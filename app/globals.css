@@ -1,26 +1,151 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  /* Base palette */
+  --color-bg: #FAFAF9;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #F4F3F0;
+  --color-border: #E4E4E0;
+  --color-border-strong: #CDCDC8;
+
+  /* Text */
+  --color-text: #18181B;
+  --color-text-muted: #71717A;
+  --color-text-subtle: #A1A1AA;
+
+  /* Brand — Orange (primary action, energy, video) */
+  --color-orange: #FF4F17;
+  --color-orange-hover: #E84410;
+  --color-orange-light: #FFF3EF;
+  --color-orange-muted: #FFD5C5;
+
+  /* Brand — Indigo (accent, status, AI) */
+  --color-indigo: #6366F1;
+  --color-indigo-hover: #4F52E0;
+  --color-indigo-light: #EEF2FF;
+  --color-indigo-muted: #C7D2FE;
+
+  /* Semantic */
+  --color-success: #22C55E;
+  --color-success-light: #DCFCE7;
+  --color-warning: #F59E0B;
+  --color-warning-light: #FEF3C7;
+  --color-destructive: #EF4444;
+  --color-destructive-light: #FEE2E2;
+
+  /* Fonts */
+  --font-heading: var(--font-jakarta);
+  --font-sans: var(--font-dmsans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+* {
+  box-sizing: border-box;
+}
+
+/* Eliminate 300ms tap delay on all interactive elements */
+a, button, [role="button"] {
+  touch-action: manipulation;
+}
+
+/* Respect reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fadeInUp,
+  .animate-fadeIn,
+  .animate-scaleIn,
+  .animate-slideInLeft {
+    animation: none !important;
+  }
+  .hover-lift {
+    transition: none !important;
   }
 }
 
+html {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-dmsans), system-ui, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  min-height: 100dvh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-subtle);
+}
+
+/* Focus ring */
+:focus-visible {
+  outline: 2px solid var(--color-orange);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Selection */
+::selection {
+  background: var(--color-orange-muted);
+  color: var(--color-text);
+}
+
+/* ── Keyframes ── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Animation utilities ── */
+.animate-fadeInUp {
+  animation: fadeInUp 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.22s ease-out both;
+}
+
+.animate-scaleIn {
+  animation: scaleIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-slideInLeft {
+  animation: slideInLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ── Hover lift for interactive cards ── */
+.hover-lift {
+  transition: transform 0.18s ease, box-shadow 0.18s ease !important;
+}
+.hover-lift:hover {
+  transform: translateY(-2px);
 }

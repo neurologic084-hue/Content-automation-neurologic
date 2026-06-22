@@ -1,0 +1,24 @@
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+import { Sidebar } from '@/components/layout/sidebar'
+import { BottomNav } from '@/components/layout/bottom-nav'
+
+export default async function AppLayout({ children }: { children: React.ReactNode }) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) redirect('/login')
+
+  const { data: brand } = await supabase.from('brand_settings').select('clinic_name').single()
+  const hasSettings = !!(brand?.clinic_name && brand.clinic_name !== 'Your Clinic')
+
+  return (
+    <div className="flex min-h-dvh bg-[#FAFAF9]">
+      <Sidebar hasSettings={hasSettings} />
+      <main className="flex-1 flex flex-col min-w-0 pb-20 md:pb-0">
+        {children}
+      </main>
+      <BottomNav />
+    </div>
+  )
+}

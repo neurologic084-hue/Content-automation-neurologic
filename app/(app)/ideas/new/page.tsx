@@ -1,0 +1,658 @@
+'use client'
+
+import { useState, useEffect, useRef } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { createClient } from '@/lib/supabase/client'
+import type { AudienceLane, LaneSuggestion } from '@/lib/types'
+import { PulseLoader } from '@/components/pulse-loader'
+import { ConfirmModal } from '@/components/confirm-modal'
+
+const GENERATING_STEPS = [
+  { label: 'Searching the web for relevant context...', delay: 0 },
+  { label: 'Applying your brand voice & audience lane...', delay: 2800 },
+  { label: 'Crafting hook, body & CTA...', delay: 5500 },
+]
+
+const LANES: { id: AudienceLane; label: string; description: string; color: string; bg: string }[] = [
+  {
+    id: 'adhd_parents',
+    label: 'ADHD Parents',
+    description: 'Parents seeking natural, functional approaches for their child',
+    color: '#6366F1',
+    bg: '#EEF2FF',
+  },
+  {
+    id: 'sympathetic_overdrive',
+    label: 'Sympathetic Overdrive',
+    description: 'Adults with anxiety, stress & trauma — mental health is physiologic',
+    color: '#FF4F17',
+    bg: '#FFF3EF',
+  },
+  {
+    id: 'burnout_professionals',
+    label: 'Burned-Out Professionals',
+    description: 'High-performing Seattle professionals who need to slow their brain down',
+    color: '#18181B',
+    bg: '#F4F3F0',
+  },
+]
+
+const IDEA_TYPE_LABELS: string[] = [
+  'Mechanism reveal',
+  'Myth bust',
+  'Validation',
+  'Urgency',
+  'Result story',
+  'Curiosity gap',
+  'Bold take',
+  'How-to',
+  'Comparison',
+  'Personal story',
+]
+
+type Step = 'input' | 'confirm-lane' | 'generating' | 'done'
+type Tab = 'write' | 'generate'
+
+const DRAFT_KEY = 'reel_idea_draft'
+
+export default function NewIdeaPage() {
+  const router = useRouter()
+  const [settingsReady, setSettingsReady] = useState<boolean | null>(null)
+  const [step, setStep] = useState<Step>('input')
+  const [tab, setTab] = useState<Tab>('write')
+  const [idea, setIdea] = useState('')
+  const [suggestion, setSuggestion] = useState<LaneSuggestion | null>(null)
+  const [selectedLane, setSelectedLane] = useState<AudienceLane | null>(null)
+  const [ideaId, setIdeaId] = useState<string | null>(null)
+  const [scriptId, setScriptId] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [visibleSteps, setVisibleSteps] = useState(0)
+  const stepTimers = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  // Idea generation state
+  const [generatedIdeas, setGeneratedIdeas] = useState<string[]>([])
+  const [isGeneratingIdeas, setIsGeneratingIdeas] = useState(false)
+  const [ideaGenError, setIdeaGenError] = useState('')
+  const [showGenerateConfirm, setShowGenerateConfirm] = useState(false)
+
+  // Restore draft from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(DRAFT_KEY)
+      if (saved) {
+        const draft = JSON.parse(saved)
+        if (draft.tab) setTab(draft.tab)
+        if (draft.idea) setIdea(draft.idea)
+        if (Array.isArray(draft.generatedIdeas) && draft.generatedIdeas.length) {
+          setGeneratedIdeas(draft.generatedIdeas)
+        }
+      }
+    } catch {}
+  }, [])
+
+  // Persist draft to localStorage whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ tab, idea, generatedIdeas }))
+    } catch {}
+  }, [tab, idea, generatedIdeas])
+
+  useEffect(() => {
+    async function checkSettings() {
+      const supabase = createClient()
+      const { data } = await supabase.from('brand_settings').select('clinic_name').single()
+      setSettingsReady(!!(data?.clinic_name && data.clinic_name !== 'Your Clinic'))
+    }
+    checkSettings()
+  }, [])
+
+  useEffect(() => {
+    if (step === 'generating') {
+      setVisibleSteps(0)
+      stepTimers.current.forEach(clearTimeout)
+      stepTimers.current = GENERATING_STEPS.map((s, i) =>
+        setTimeout(() => setVisibleSteps(i + 1), s.delay)
+      )
+    }
+    return () => stepTimers.current.forEach(clearTimeout)
+  }, [step])
+
+  async function handleSuggestLane(overrideIdea?: string) {
+    const text = overrideIdea ?? idea
+    if (!text.trim()) return
+    setLoading(true)
+    setError('')
+
+    try {
+      const res = await fetch('/api/ideas/suggest-lane', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idea: text }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setSuggestion(data)
+      setSelectedLane(data.suggested_lane)
+      setStep('confirm-lane')
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleSelectGeneratedIdea(text: string) {
+    setIdea(text)
+    await handleSuggestLane(text)
+  }
+
+  async function handleGenerateIdeas() {
+    setIsGeneratingIdeas(true)
+    setIdeaGenError('')
+    setGeneratedIdeas([])
+
+    try {
+      const res = await fetch('/api/ideas/generate', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setGeneratedIdeas(data.ideas ?? [])
+    } catch (err) {
+      setIdeaGenError(String(err))
+    } finally {
+      setIsGeneratingIdeas(false)
+    }
+  }
+
+  async function handleGenerate() {
+    if (!selectedLane) return
+    setStep('generating')
+    setError('')
+
+    try {
+      const supabase = createClient()
+      const { data: newIdea, error: ideaErr } = await supabase
+        .from('ideas')
+        .insert({
+          raw_idea: idea,
+          ai_suggested_lane: suggestion?.suggested_lane,
+          ai_lane_reasoning: suggestion?.reasoning,
+          confirmed_lane: selectedLane,
+          status: 'generating',
+        })
+        .select('id')
+        .single()
+
+      if (ideaErr || !newIdea) throw new Error(ideaErr?.message ?? 'Failed to save idea')
+      setIdeaId(newIdea.id)
+
+      const res = await fetch('/api/scripts/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idea_id: newIdea.id }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+
+      setScriptId(data.script_id)
+      setStep('done')
+    } catch (err) {
+      setError(String(err))
+      setStep('confirm-lane')
+    }
+  }
+
+  if (settingsReady === null) {
+    return (
+      <div className="p-6 md:p-8 max-w-2xl w-full mx-auto flex items-center justify-center min-h-64">
+        <PulseLoader label="Loading..." />
+      </div>
+    )
+  }
+
+  if (!settingsReady) {
+    return (
+      <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
+        <div className="bg-white border border-[#E4E4E0] rounded-2xl overflow-hidden">
+          <div className="p-8 flex flex-col items-center text-center">
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-5" style={{ background: '#F4F3F0' }}>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+            </div>
+            <h2 className="text-lg font-bold text-[#18181B] mb-2" style={{ fontFamily: 'var(--font-jakarta)' }}>
+              Brand voice required first
+            </h2>
+            <p className="text-sm text-[#71717A] leading-relaxed max-w-sm mb-6">
+              Your script engine needs to know your brand identity, tone, and audience before it can write anything. Takes less than 3 minutes.
+            </p>
+            <Link
+              href="/settings"
+              className="px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all"
+              style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.3)' }}
+            >
+              Set up brand voice →
+            </Link>
+          </div>
+          <div className="border-t border-[#F0F0EE] px-8 py-4 bg-[#FAFAF9] flex items-center gap-3">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+            </svg>
+            <p className="text-xs text-[#A1A1AA]">
+              Once saved, your settings train every future script — you only fill this out once.
+            </p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
+      {/* Header */}
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
+          New content idea
+        </h1>
+        <p className="mt-1 text-sm text-[#71717A]">
+          Type anything — or let AI generate 10 ideas from your brand profile.
+        </p>
+      </div>
+
+      {/* Step: Input idea */}
+      {step === 'input' && (
+        <div>
+          {/* Tab bar */}
+          <div className="flex gap-1 mb-5 p-1 bg-[#F4F3F0] rounded-xl w-fit">
+            <button
+              onClick={() => setTab('write')}
+              className="px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer"
+              style={{
+                background: tab === 'write' ? '#FFFFFF' : 'transparent',
+                color: tab === 'write' ? '#18181B' : '#71717A',
+                boxShadow: tab === 'write' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+              }}
+            >
+              Write my own
+            </button>
+            <button
+              onClick={() => setTab('generate')}
+              className="px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center gap-2"
+              style={{
+                background: tab === 'generate' ? '#FFFFFF' : 'transparent',
+                color: tab === 'generate' ? '#18181B' : '#71717A',
+                boxShadow: tab === 'generate' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+              </svg>
+              Generate 10 ideas
+            </button>
+          </div>
+
+          {/* Write tab */}
+          {tab === 'write' && (
+            <div className="bg-white border border-[#E4E4E0] rounded-2xl p-6">
+              <label className="block text-sm font-medium text-[#18181B] mb-2">
+                What's the idea?
+              </label>
+              <textarea
+                value={idea}
+                onChange={(e) => setIdea(e.target.value)}
+                placeholder="e.g. A video about why kids with ADHD can't just 'try harder' — and what's actually happening in their nervous system"
+                rows={5}
+                className="w-full px-3.5 py-3 rounded-xl border border-[#E4E4E0] bg-[#FAFAF9] text-[#18181B] text-sm placeholder:text-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#FF4F17] focus:border-transparent transition-all resize-none"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && idea.trim()) {
+                    handleSuggestLane()
+                  }
+                }}
+              />
+              <p className="text-xs text-[#A1A1AA] mt-2 mb-4">⌘ + Enter to continue</p>
+
+              {error && (
+                <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
+              )}
+
+              <button
+                onClick={() => handleSuggestLane()}
+                disabled={!idea.trim() || loading}
+                className="w-full py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Analyzing idea...
+                  </span>
+                ) : (
+                  'Analyze & continue →'
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Generate tab */}
+          {tab === 'generate' && (
+            <div>
+              {/* Generate button / loading */}
+              {!generatedIdeas.length && (
+                <div className="bg-white border border-[#E4E4E0] rounded-2xl p-6 flex flex-col items-center text-center">
+                  {isGeneratingIdeas ? (
+                    <>
+                      <div className="relative w-14 h-14 mb-4">
+                        <div className="absolute inset-0 rounded-full bg-[#FFF3EF] animate-pulse" />
+                        <div className="relative w-14 h-14 rounded-full bg-[#FFF3EF] flex items-center justify-center">
+                          <svg className="animate-spin w-6 h-6 text-[#FF4F17]" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                            <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                        </div>
+                      </div>
+                      <p className="text-sm font-medium text-[#18181B]">Thinking about your brand...</p>
+                      <p className="text-xs text-[#71717A] mt-1">Generating 10 tailored content ideas</p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-12 h-12 rounded-2xl bg-[#FFF3EF] flex items-center justify-center mb-4">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF4F17" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                        </svg>
+                      </div>
+                      <p className="text-sm font-medium text-[#18181B] mb-1">AI-generated content ideas</p>
+                      <p className="text-xs text-[#71717A] leading-relaxed max-w-xs mb-5">
+                        Based on your brand profile, ICP, and positioning — 10 specific ideas across different content angles.
+                      </p>
+                      {ideaGenError && (
+                        <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm w-full">
+                          {ideaGenError}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => setShowGenerateConfirm(true)}
+                        className="px-6 py-2.5 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] transition-all cursor-pointer"
+                        style={{ boxShadow: '0 4px 14px rgba(255,79,23,0.3)' }}
+                      >
+                        Generate 10 ideas →
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Ideas grid */}
+              {generatedIdeas.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs font-semibold text-[#A1A1AA] uppercase tracking-wider">
+                      Click an idea to write a script from it
+                    </p>
+                    <button
+                      onClick={() => setShowGenerateConfirm(true)}
+                      className="text-xs text-[#FF4F17] hover:underline cursor-pointer"
+                    >
+                      Regenerate
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {generatedIdeas.map((ideaText, i) => (
+                      <button
+                        key={i}
+                        onClick={() => handleSelectGeneratedIdea(ideaText)}
+                        disabled={loading}
+                        className="animate-fadeInUp w-full group flex items-start gap-4 p-4 bg-white border border-[#E4E4E0] rounded-xl text-left hover:border-[#FF4F17] hover:bg-[#FFF8F6] active:scale-[0.99] transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover-lift"
+                        style={{ animationDelay: `${i * 50}ms` }}
+                      >
+                        <span
+                          className="flex-shrink-0 w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-bold mt-0.5"
+                          style={{ background: '#F4F3F0', color: '#A1A1AA' }}
+                        >
+                          {i + 1}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-[#FF4F17] mb-0.5">{IDEA_TYPE_LABELS[i]}</p>
+                          <p className="text-sm text-[#18181B] leading-relaxed">{ideaText}</p>
+                        </div>
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="#A1A1AA"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="flex-shrink-0 mt-1 group-hover:stroke-[#FF4F17] transition-colors"
+                        >
+                          <path d="M9 18l6-6-6-6" />
+                        </svg>
+                      </button>
+                    ))}
+                  </div>
+
+                  {loading && (
+                    <div className="mt-4 flex items-center gap-2 text-sm text-[#71717A]">
+                      <svg className="animate-spin w-4 h-4 text-[#FF4F17]" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Analyzing idea...
+                    </div>
+                  )}
+
+                  {error && (
+                    <div className="mt-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Step: Confirm lane */}
+      {step === 'confirm-lane' && suggestion && (
+        <div className="space-y-4 animate-fadeInUp">
+          <div className="bg-[#F4F3F0] rounded-2xl p-4">
+            <p className="text-xs text-[#A1A1AA] mb-1">Your idea</p>
+            <p className="text-sm text-[#18181B]">"{idea}"</p>
+          </div>
+
+          <div className="bg-white border border-[#E4E4E0] rounded-2xl p-5">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-8 h-8 rounded-xl bg-[#EEF2FF] flex items-center justify-center flex-shrink-0 mt-0.5">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2">
+                  <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/>
+                  <path d="M12 8v4M12 16h.01"/>
+                </svg>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-[#18181B]">AI suggests this audience</p>
+                <p className="text-xs text-[#71717A] mt-0.5">{suggestion.reasoning}</p>
+              </div>
+            </div>
+
+            <p className="text-xs font-semibold text-[#A1A1AA] uppercase tracking-wider mb-3">
+              Choose the audience for this script
+            </p>
+
+            <div className="space-y-2">
+              {LANES.map((lane, li) => {
+                const isSelected = selectedLane === lane.id
+                const isAI = suggestion.suggested_lane === lane.id
+                return (
+                  <button
+                    key={lane.id}
+                    type="button"
+                    onClick={() => setSelectedLane(lane.id)}
+                    className="animate-fadeInUp w-full flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all duration-150 cursor-pointer"
+                    style={{
+                      borderColor: isSelected ? lane.color : '#E4E4E0',
+                      background: isSelected ? lane.bg : 'transparent',
+                      animationDelay: `${80 + li * 60}ms`,
+                    }}
+                  >
+                    <div
+                      className="w-4 h-4 rounded-full border-2 flex-shrink-0 mt-0.5 transition-all"
+                      style={{
+                        borderColor: isSelected ? lane.color : '#CDCDC8',
+                        background: isSelected ? lane.color : 'transparent',
+                      }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-[#18181B]">{lane.label}</span>
+                        {isAI && (
+                          <span
+                            className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                            style={{ background: lane.bg, color: lane.color }}
+                          >
+                            AI pick
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-[#71717A] mt-0.5">{lane.description}</p>
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {error && (
+            <div className="px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
+          )}
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => setStep('input')}
+              className="flex-1 py-2.5 px-4 rounded-xl border border-[#E4E4E0] text-[#71717A] text-sm font-medium hover:bg-[#F4F3F0] transition-all cursor-pointer"
+            >
+              ← Back
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={!selectedLane}
+              className="flex-[2] py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
+            >
+              Generate script →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Step: Generating */}
+      {step === 'generating' && (
+        <div className="bg-white border border-[#E4E4E0] rounded-2xl p-6 sm:p-10 flex flex-col items-center text-center gap-6 sm:gap-8">
+          {/* Pulse animation from shared component */}
+          <div className="relative flex items-center justify-center" style={{ width: 88, height: 88 }}>
+            <div className="absolute rounded-full animate-ping" style={{ width: 88, height: 88, border: '1px solid #FF4F17', opacity: 0.1, animationDuration: '2.4s', animationDelay: '0.6s' }} />
+            <div className="absolute rounded-full animate-ping" style={{ width: 60, height: 60, border: '1px solid #FF4F17', opacity: 0.2, animationDuration: '2.4s', animationDelay: '0.3s' }} />
+            <div className="absolute rounded-full animate-ping" style={{ width: 40, height: 40, border: '1.5px solid #FF4F17', opacity: 0.32, animationDuration: '2.4s' }} />
+            <div className="relative flex items-center justify-center rounded-2xl animate-pulse" style={{ width: 48, height: 48, background: 'linear-gradient(145deg, #FF6B3D 0%, #FF4F17 55%, #D93D00 100%)', boxShadow: '0 0 24px rgba(255,79,23,0.35)', animationDuration: '1.8s' }}>
+              <svg width="22" height="20" viewBox="0 0 18 16" fill="none">
+                <path d="M9 1 L17 15 L1 15 Z" fill="white" />
+                <path d="M9 1 L13.5 9 L4.5 9 Z" fill="white" fillOpacity="0.28" />
+              </svg>
+            </div>
+          </div>
+
+          <div className="w-full max-w-xs space-y-3">
+            {GENERATING_STEPS.map((s, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-3 text-left transition-all duration-500"
+                style={{
+                  opacity: visibleSteps > i ? 1 : 0,
+                  transform: visibleSteps > i ? 'translateY(0)' : 'translateY(6px)',
+                }}
+              >
+                <div
+                  className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center"
+                  style={{ background: visibleSteps > i + 1 ? '#DCFCE7' : '#FFF3EF' }}
+                >
+                  {visibleSteps > i + 1 ? (
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  ) : (
+                    <div className="w-2 h-2 rounded-full bg-[#FF4F17] animate-pulse" />
+                  )}
+                </div>
+                <span className="text-sm" style={{ color: visibleSteps > i + 1 ? '#A1A1AA' : '#18181B' }}>
+                  {s.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Step: Done */}
+      {step === 'done' && scriptId && (
+        <div className="bg-white border border-[#E4E4E0] rounded-2xl p-8 flex flex-col items-center text-center">
+          <div className="w-14 h-14 rounded-2xl bg-[#DCFCE7] flex items-center justify-center mb-5">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 6L9 17l-5-5" />
+            </svg>
+          </div>
+          <h2 className="text-lg font-semibold text-[#18181B] mb-2" style={{ fontFamily: 'var(--font-jakarta)' }}>
+            Script ready
+          </h2>
+          <p className="text-sm text-[#71717A] mb-6">
+            Your script has been generated and is waiting for your review.
+          </p>
+
+          {/* Re-looping info */}
+          <div className="w-full max-w-xs mb-6 px-4 py-3 rounded-xl bg-[#F4F3F0] flex items-start gap-3 text-left">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#71717A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 flex-shrink-0">
+              <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+            </svg>
+            <p className="text-xs text-[#71717A] leading-relaxed">
+              If you approve this script, it trains your engine — future scripts will match its style and quality.
+            </p>
+          </div>
+
+          <div className="flex gap-3 w-full max-w-xs">
+            <button
+              onClick={() => {
+                setStep('input')
+                setIdea('')
+                setSuggestion(null)
+                setSelectedLane(null)
+                setIdeaId(null)
+                setScriptId(null)
+                setGeneratedIdeas([])
+                try { localStorage.removeItem(DRAFT_KEY) } catch {}
+              }}
+              className="flex-1 py-2.5 px-4 rounded-xl border border-[#E4E4E0] text-[#71717A] text-sm font-medium hover:bg-[#F4F3F0] transition-all cursor-pointer"
+            >
+              New idea
+            </button>
+            <button
+              onClick={() => router.push(`/review/${scriptId}`)}
+              className="flex-[2] py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] transition-all cursor-pointer"
+            >
+              Review script →
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ConfirmModal
+        open={showGenerateConfirm}
+        title="Generate ideas"
+        message="Generate 10 ideas using your brand profile? This uses AI credits."
+        confirmLabel="Generate"
+        onConfirm={() => { setShowGenerateConfirm(false); handleGenerateIdeas() }}
+        onCancel={() => setShowGenerateConfirm(false)}
+      />
+    </div>
+  )
+}

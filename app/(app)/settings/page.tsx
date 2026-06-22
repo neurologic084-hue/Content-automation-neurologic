@@ -1,0 +1,455 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+
+const TONE_OPTIONS = [
+  'Warm', 'Direct', 'Science-backed', 'Empathetic', 'Calm',
+  'Confident', 'Conversational', 'Educational', 'Motivating', 'Honest',
+  'Grounded', 'Bold', 'Nurturing', 'No-nonsense', 'Hopeful',
+]
+
+type Offering = { name: string; description: string }
+type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+function parseOfferings(raw: string): Offering[] {
+  if (!raw?.trim()) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed) && parsed.length) return parsed
+  } catch {}
+  return raw.split('\n').filter(Boolean).map(line => {
+    const idx = line.indexOf(': ')
+    return idx > -1
+      ? { name: line.slice(0, idx), description: line.slice(idx + 2) }
+      : { name: line, description: '' }
+  })
+}
+
+function serializeOfferings(items: Offering[]): string {
+  return items
+    .filter(o => o.name.trim())
+    .map(o => o.description.trim() ? `${o.name}: ${o.description}` : o.name)
+    .join('\n')
+}
+
+function Section({
+  num, title, description, action, children,
+}: {
+  num: string; title: string; description: string; action?: React.ReactNode; children: React.ReactNode
+}) {
+  return (
+    <div
+      className="bg-white rounded-2xl border border-[#EAEAE6] overflow-hidden"
+      style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.03)' }}
+    >
+      <div className="px-4 sm:px-7 pt-5 sm:pt-6 pb-4 sm:pb-5 border-b border-[#F2F2EF] flex items-start justify-between gap-4">
+        <div>
+          <span className="inline-block text-[10px] font-semibold tracking-widest text-[#BABAB6] uppercase mb-2.5 font-mono">{num}</span>
+          <h2
+            className="text-[15px] font-semibold text-[#111111] leading-snug"
+            style={{ fontFamily: 'var(--font-jakarta)' }}
+          >
+            {title}
+          </h2>
+          <p className="text-[13px] text-[#9B9B97] mt-1.5 leading-relaxed">{description}</p>
+        </div>
+        {action && <div className="flex-shrink-0 mt-1">{action}</div>}
+      </div>
+      <div className="px-4 sm:px-7 py-5 sm:py-6 space-y-5">{children}</div>
+    </div>
+  )
+}
+
+function Field({
+  label, hint, required, children,
+}: {
+  label: string; hint?: string; required?: boolean; children: React.ReactNode
+}) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <label className="text-[13px] font-medium text-[#333330]">
+          {label}
+          {required && <span className="text-[#FF4F17] ml-0.5">*</span>}
+        </label>
+        {hint && <span className="text-[11px] text-[#BABAB6]">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+const inputCls =
+  'w-full px-3.5 py-2.5 rounded-xl border border-[#E4E0DA] bg-[#FAFAF8] text-[14px] text-[#111111] placeholder:text-[#C4C0BB] focus:outline-none focus:ring-2 focus:ring-[#FF4F17]/25 focus:border-[#FF4F17] transition-all'
+const textareaCls = `${inputCls} resize-none leading-relaxed`
+const rowInputCls =
+  'px-3.5 py-2.5 rounded-xl border border-[#E4E0DA] bg-[#FAFAF8] text-[13px] text-[#111111] placeholder:text-[#C4C0BB] focus:outline-none focus:ring-2 focus:ring-[#FF4F17]/25 focus:border-[#FF4F17] transition-all'
+
+export default function SettingsPage() {
+  const [loading, setLoading] = useState(true)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+
+  const [form, setForm] = useState({
+    id: null as string | null,
+    clinic_name: '',
+    tagline: '',
+    target_location: '',
+    tone_keywords: [] as string[],
+    what_makes_different: '',
+    patient_transformation: '',
+    positioning: '',
+    core_offerings: '',
+    icp_definition: '',
+    social_proof: '',
+    additional_context: '',
+  })
+
+  const [offerings, setOfferings] = useState<Offering[]>([])
+
+  useEffect(() => {
+    async function load() {
+      const supabase = createClient()
+      const { data } = await supabase.from('brand_settings').select('*').single()
+      if (data) {
+        setForm({
+          id: data.id,
+          clinic_name: data.clinic_name ?? '',
+          tagline: data.tagline ?? '',
+          target_location: data.target_location ?? '',
+          tone_keywords: data.tone_keywords ?? [],
+          what_makes_different: data.what_makes_different ?? '',
+          patient_transformation: data.patient_transformation ?? '',
+          positioning: data.positioning ?? '',
+          core_offerings: data.core_offerings ?? '',
+          icp_definition: data.icp_definition ?? '',
+          social_proof: data.social_proof ?? '',
+          additional_context: data.additional_context ?? '',
+        })
+        setOfferings(parseOfferings(data.core_offerings ?? ''))
+      }
+      setLoading(false)
+    }
+    load()
+  }, [])
+
+  function set(field: string, value: unknown) {
+    setForm(prev => ({ ...prev, [field]: value }))
+  }
+
+  function toggleTone(tone: string) {
+    setForm(prev => ({
+      ...prev,
+      tone_keywords: prev.tone_keywords.includes(tone)
+        ? prev.tone_keywords.filter(t => t !== tone)
+        : prev.tone_keywords.length < 6
+          ? [...prev.tone_keywords, tone]
+          : prev.tone_keywords,
+    }))
+  }
+
+  function addOffering() {
+    setOfferings(prev => [...prev, { name: '', description: '' }])
+  }
+
+  function removeOffering(i: number) {
+    setOfferings(prev => prev.filter((_, idx) => idx !== i))
+  }
+
+  function updateOffering(i: number, field: 'name' | 'description', value: string) {
+    setOfferings(prev => prev.map((o, idx) => idx === i ? { ...o, [field]: value } : o))
+  }
+
+  async function handleSave() {
+    setSaveState('saving')
+    const supabase = createClient()
+    const { id, ...rest } = form
+
+    const saveData = {
+      ...rest,
+      core_offerings: serializeOfferings(offerings),
+      what_makes_different: rest.positioning || rest.what_makes_different || '',
+      patient_transformation: rest.icp_definition || rest.patient_transformation || '',
+      updated_at: new Date().toISOString(),
+    }
+
+    const op = id
+      ? supabase.from('brand_settings').update(saveData).eq('id', id)
+      : supabase.from('brand_settings').insert({ ...saveData }).select('id').single()
+
+    const { data, error } = await op
+    if (error) {
+      setSaveState('error')
+      setTimeout(() => setSaveState('idle'), 3000)
+    } else {
+      if (!id && data && 'id' in data) set('id', (data as { id: string }).id)
+      setSaveState('saved')
+      setTimeout(() => setSaveState('idle'), 2500)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="p-8 flex items-center justify-center min-h-64">
+        <div className="w-8 h-8 border-2 border-[#FF4F17] border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  const canSave = form.clinic_name.trim().length > 0
+
+  return (
+    <div className="p-6 md:p-8 max-w-2xl w-full mx-auto pb-32">
+
+      {/* Header */}
+      <div className="mb-8">
+        <h1
+          className="text-2xl font-bold text-[#111111]"
+          style={{ fontFamily: 'var(--font-jakarta)' }}
+        >
+          Brand voice
+        </h1>
+        <p className="mt-1.5 text-[13px] text-[#9B9B97] leading-relaxed">
+          Everything here feeds into every script Olympus writes. More context means better, more specific scripts.
+        </p>
+      </div>
+
+      <div className="space-y-4">
+
+        {/* 01 — Identity */}
+        <Section num="01" title="Identity" description="Brand name, location and tagline injected into every hook and CTA.">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Brand name" required>
+              <input
+                type="text"
+                value={form.clinic_name}
+                onChange={e => set('clinic_name', e.target.value)}
+                placeholder="Wendling Health"
+                maxLength={80}
+                className={inputCls}
+              />
+            </Field>
+            <Field label="Location" hint="optional">
+              <input
+                type="text"
+                value={form.target_location}
+                onChange={e => set('target_location', e.target.value)}
+                placeholder="Seattle, WA"
+                maxLength={60}
+                className={inputCls}
+              />
+            </Field>
+          </div>
+          <Field label="Tagline" hint="optional">
+            <input
+              type="text"
+              value={form.tagline}
+              onChange={e => set('tagline', e.target.value)}
+              placeholder="Your nervous system is the medicine"
+              maxLength={120}
+              className={inputCls}
+            />
+          </Field>
+        </Section>
+
+        {/* 02 — Positioning */}
+        <Section num="02" title="Positioning & background" description="Your credentials and what makes you different. Adds authority and specificity to every hook.">
+          <textarea
+            value={form.positioning}
+            onChange={e => set('positioning', e.target.value)}
+            placeholder={`I'm a functional medicine nurse practitioner with 12 years in neurological care. Before starting my own practice I worked at the Seattle Integrative Health Center under Dr. Chen. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine labs, lifestyle, and nervous system work — not just symptom management.`}
+            rows={5}
+            maxLength={1200}
+            className={textareaCls}
+          />
+          <p className="text-right text-[11px] text-[#C4C0BB]">{form.positioning.length} / 1200</p>
+        </Section>
+
+        {/* 03 — Voice */}
+        <Section
+          num="03"
+          title="Tone of voice"
+          description="Pick up to 6 keywords. The AI calibrates sentence length, energy and word choice to match your style."
+        >
+          <div>
+            <div className="flex flex-wrap gap-2">
+              {TONE_OPTIONS.map(tone => {
+                const active = form.tone_keywords.includes(tone)
+                const maxed = form.tone_keywords.length >= 6 && !active
+                return (
+                  <button
+                    key={tone}
+                    type="button"
+                    onClick={() => toggleTone(tone)}
+                    disabled={maxed}
+                    className="px-4 py-1.5 rounded-full text-[13px] font-medium border transition-all duration-150 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                    style={{
+                      background: active ? '#FF4F17' : '#F7F7F4',
+                      color: active ? 'white' : '#6B6B68',
+                      borderColor: active ? '#FF4F17' : '#E4E0DA',
+                      boxShadow: active ? '0 2px 8px rgba(255,79,23,0.22)' : 'none',
+                    }}
+                  >
+                    {tone}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-[11px] text-[#C4C0BB] mt-3">{form.tone_keywords.length} / 6 selected</p>
+          </div>
+        </Section>
+
+        {/* 04 — Offerings */}
+        <Section
+          num="04"
+          title="Core offerings"
+          description="Your products and services. The AI names these accurately in script CTAs."
+          action={
+            <button
+              onClick={addOffering}
+              className="flex items-center gap-1.5 text-[13px] font-semibold text-[#FF4F17] hover:text-[#E84410] transition-colors cursor-pointer"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              Add
+            </button>
+          }
+        >
+          {offerings.length === 0 ? (
+            <p className="text-[13px] text-[#C4C0BB] py-1">
+              No offerings yet.{' '}
+              <button onClick={addOffering} className="text-[#FF4F17] hover:underline cursor-pointer">Add one</button>
+            </p>
+          ) : (
+            <div className="space-y-2.5">
+              {offerings.map((o, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <span className="w-7 h-7 rounded-full bg-[#F4F3F0] flex items-center justify-center text-[11px] font-semibold text-[#BABAB6] flex-shrink-0">
+                    {i + 1}
+                  </span>
+                  <input
+                    type="text"
+                    value={o.name}
+                    onChange={e => updateOffering(i, 'name', e.target.value)}
+                    placeholder="Service name"
+                    maxLength={60}
+                    className={`w-[160px] flex-shrink-0 font-medium ${rowInputCls}`}
+                  />
+                  <input
+                    type="text"
+                    value={o.description}
+                    onChange={e => updateOffering(i, 'description', e.target.value)}
+                    placeholder="Short description or price"
+                    maxLength={120}
+                    className={`flex-1 min-w-0 ${rowInputCls}`}
+                  />
+                  <button
+                    onClick={() => removeOffering(i)}
+                    className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg text-[#C4C0BB] hover:text-[#EF4444] hover:bg-[#FEF2F2] transition-all cursor-pointer"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6l-1 14H6L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                      <path d="M9 6V4h6v2" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
+
+        {/* 05 — Ideal Client */}
+        <Section num="05" title="Ideal client" description="Who you are talking to. The more specific this is, the more targeted every hook and CTA becomes.">
+          <textarea
+            value={form.icp_definition}
+            onChange={e => set('icp_definition', e.target.value)}
+            placeholder={`Women 30–50, often moms or high-achievers dealing with anxiety or exhaustion that doctors dismiss as "just stress." They've tried therapy, medication, cutting back on work — but nothing fixes the root cause. They find me through Instagram or Google after searching "nervous system burnout" or "why am I always tired."`}
+            rows={6}
+            maxLength={1500}
+            className={textareaCls}
+          />
+          <p className="text-right text-[11px] text-[#C4C0BB]">{form.icp_definition.length} / 1500</p>
+        </Section>
+
+        {/* 06 — Social Proof */}
+        <Section num="06" title="Results & case studies" description="Real outcomes the AI weaves into scripts as specific, credible context — not direct quotes.">
+          <textarea
+            value={form.social_proof}
+            onChange={e => set('social_proof', e.target.value)}
+            placeholder={`Emily — panic attacks 3x/week, zero after 12 weeks, now off Lexapro with her psychiatrist's sign-off\nSarah, burned-out marketing director — recovered energy in 8 weeks, got promoted 3 months later\n35% of clients report measurable sleep improvement within the first 30 days\n87% of 1:1 clients complete the full 90-day program`}
+            rows={6}
+            maxLength={1500}
+            className={textareaCls}
+          />
+          <p className="text-right text-[11px] text-[#C4C0BB]">{form.social_proof.length} / 1500</p>
+        </Section>
+
+        {/* 07 — Rules */}
+        <Section num="07" title="Rules" description="Hard constraints the AI must never break. One rule per line. These override everything else.">
+          <textarea
+            value={form.additional_context}
+            onChange={e => set('additional_context', e.target.value)}
+            placeholder={`Never tell someone to stop their prescribed medication\nNever claim to cure or treat — say "support" or "address"\nNever name-drop other practitioners or compare to competitors\nNever use the word "journey"\nAlways keep an empowering tone — no shame, no catastrophising`}
+            rows={7}
+            maxLength={1500}
+            className={`${textareaCls} font-mono text-[12px]`}
+            style={{ fontFamily: 'var(--font-geist-mono)' }}
+          />
+          <div className="flex items-center gap-2.5 px-3.5 py-3 rounded-xl bg-[#EEF2FF]">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+              <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+            </svg>
+            <p className="text-[12px] text-[#4F52E0] leading-relaxed">
+              Injected at the top of every prompt as non-negotiable constraints — they override tone, style, and everything else.
+            </p>
+          </div>
+        </Section>
+
+      </div>
+
+      {/* Sticky save bar */}
+      <div className="sticky bottom-6 mt-6 z-10">
+        <div
+          className="flex items-center justify-between px-6 py-4 rounded-2xl border border-[#EAEAE6] bg-white/95"
+          style={{
+            backdropFilter: 'blur(12px)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.09), 0 2px 8px rgba(0,0,0,0.05)',
+          }}
+        >
+          <p className="text-[12px] text-[#ADADAA]">
+            {form.id
+              ? 'Changes apply to all future scripts immediately.'
+              : 'First save activates your script engine.'}
+          </p>
+          <button
+            onClick={handleSave}
+            disabled={saveState === 'saving' || !canSave}
+            className="px-6 py-2 rounded-xl text-[13px] font-semibold transition-all duration-200 cursor-pointer disabled:cursor-not-allowed"
+            style={{
+              background:
+                saveState === 'saved' ? '#16A34A'
+                  : saveState === 'error' ? '#EF4444'
+                  : canSave ? '#FF4F17'
+                  : '#E4E0DA',
+              color: !canSave ? '#A0A09C' : 'white',
+              opacity: saveState === 'saving' ? 0.7 : 1,
+              boxShadow: saveState === 'idle' && canSave ? '0 4px 14px rgba(255,79,23,0.25)' : 'none',
+            }}
+          >
+            {saveState === 'saving'
+              ? 'Saving...'
+              : saveState === 'saved'
+              ? '✓ Saved'
+              : saveState === 'error'
+              ? 'Error — retry'
+              : 'Save settings'}
+          </button>
+        </div>
+      </div>
+
+    </div>
+  )
+}
