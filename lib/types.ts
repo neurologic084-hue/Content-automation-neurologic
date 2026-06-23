@@ -26,17 +26,17 @@ export type MoodTag =
 
 export interface BrandSettings {
   id: string
-  clinic_name: string
-  tagline: string | null
+  creator_name: string
+  tagline: string
   tone_keywords: string[]
-  what_makes_different: string
-  patient_transformation: string
-  target_location: string
-  additional_context: string | null
-  positioning: string | null
-  core_offerings: string | null
-  icp_definition: string | null
-  social_proof: string | null
+  unique_angle: string
+  audience_transformation: string
+  location: string
+  extra_context: string
+  content_pillars: string
+  offerings: string
+  audience_description: string
+  social_proof: string
   created_at: string
   updated_at: string
 }
@@ -109,21 +109,21 @@ export interface GeneratedScript {
 }
 
 export const LANE_LABELS: Record<AudienceLane, string> = {
-  adhd_parents: 'Founders Building Brand',
-  sympathetic_overdrive: 'Marketing Teams Scaling',
-  burnout_professionals: 'LinkedIn Creators',
+  adhd_parents: 'ADHD Parents',
+  sympathetic_overdrive: 'Sympathetic Overdrive',
+  burnout_professionals: 'Burned-Out Professionals',
 }
 
 export const LANE_DESCRIPTIONS: Record<AudienceLane, string> = {
-  adhd_parents: 'Startup founders and solopreneurs growing a personal brand with AI',
-  sympathetic_overdrive: 'Marketing teams scaling content output and workflow with AI tools',
-  burnout_professionals: 'Consultants and creators trying to stand out on LinkedIn',
+  adhd_parents: 'Parents seeking natural, functional approaches for their child',
+  sympathetic_overdrive: 'Adults with anxiety, stress and trauma — mental health is physiologic',
+  burnout_professionals: 'High-performing Seattle professionals who need to slow their brain down',
 }
 
 export const LANE_COLORS: Record<AudienceLane, string> = {
-  adhd_parents: 'bg-indigo-light text-indigo',
-  sympathetic_overdrive: 'bg-orange-light text-orange',
-  burnout_professionals: 'bg-surface-raised text-text-muted',
+  adhd_parents: '#6366F1',
+  sympathetic_overdrive: '#FF4F17',
+  burnout_professionals: '#18181B',
 }
 
 export const STATUS_COLORS: Record<ScriptStatus, string> = {

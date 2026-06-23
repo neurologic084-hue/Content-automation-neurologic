@@ -11,16 +11,15 @@ export async function POST() {
   if (!brand) return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
 
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
-  const icp = brand.icp_definition || brand.patient_transformation || ''
-  const positioning = brand.positioning || brand.what_makes_different || ''
-  const offerings = brand.core_offerings || ''
+  const icp = brand.audience_description || ''
+  const positioning = brand.unique_angle || ''
+  const offerings = brand.offerings || ''
 
   // Run news search + previous ideas fetch in parallel
   const nicheQuery = [
     positioning,
     offerings,
     icp,
-    'nervous system ADHD burnout functional medicine wellness',
   ].filter(Boolean).join(' ').slice(0, 300)
 
   const [newsItems, previousIdeasRes] = await Promise.allSettled([
@@ -56,7 +55,7 @@ ${buildHumanizerInstruction()}`
 
   const userMessage = `Generate exactly 10 short-form video content ideas for this brand.
 
-BRAND: ${brand.clinic_name}
+BRAND: ${brand.creator_name}
 POSITIONING: ${positioning}
 IDEAL CLIENT: ${icp}
 OFFERINGS: ${offerings}

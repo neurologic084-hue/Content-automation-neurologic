@@ -92,17 +92,16 @@ export default function SettingsPage() {
 
   const [form, setForm] = useState({
     id: null as string | null,
-    clinic_name: '',
+    creator_name: '',
     tagline: '',
-    target_location: '',
+    location: '',
     tone_keywords: [] as string[],
-    what_makes_different: '',
-    patient_transformation: '',
-    positioning: '',
-    core_offerings: '',
-    icp_definition: '',
+    unique_angle: '',
+    audience_transformation: '',
+    audience_description: '',
+    offerings: '',
     social_proof: '',
-    additional_context: '',
+    extra_context: '',
   })
 
   const [offerings, setOfferings] = useState<Offering[]>([])
@@ -114,19 +113,18 @@ export default function SettingsPage() {
       if (data) {
         setForm({
           id: data.id,
-          clinic_name: data.clinic_name ?? '',
+          creator_name: data.creator_name ?? '',
           tagline: data.tagline ?? '',
-          target_location: data.target_location ?? '',
+          location: data.location ?? '',
           tone_keywords: data.tone_keywords ?? [],
-          what_makes_different: data.what_makes_different ?? '',
-          patient_transformation: data.patient_transformation ?? '',
-          positioning: data.positioning ?? '',
-          core_offerings: data.core_offerings ?? '',
-          icp_definition: data.icp_definition ?? '',
+          unique_angle: data.unique_angle ?? '',
+          audience_transformation: data.audience_transformation ?? '',
+          audience_description: data.audience_description ?? '',
+          offerings: data.offerings ?? '',
           social_proof: data.social_proof ?? '',
-          additional_context: data.additional_context ?? '',
+          extra_context: data.extra_context ?? '',
         })
-        setOfferings(parseOfferings(data.core_offerings ?? ''))
+        setOfferings(parseOfferings(data.offerings ?? ''))
       }
       setLoading(false)
     }
@@ -167,9 +165,7 @@ export default function SettingsPage() {
 
     const saveData = {
       ...rest,
-      core_offerings: serializeOfferings(offerings),
-      what_makes_different: rest.positioning || rest.what_makes_different || '',
-      patient_transformation: rest.icp_definition || rest.patient_transformation || '',
+      offerings: serializeOfferings(offerings),
       updated_at: new Date().toISOString(),
     }
 
@@ -196,7 +192,7 @@ export default function SettingsPage() {
     )
   }
 
-  const canSave = form.clinic_name.trim().length > 0
+  const canSave = form.creator_name.trim().length > 0
 
   return (
     <div className="p-6 md:p-8 max-w-2xl w-full mx-auto pb-32">
@@ -210,7 +206,7 @@ export default function SettingsPage() {
           Brand voice
         </h1>
         <p className="mt-1.5 text-[13px] text-[#9B9B97] leading-relaxed">
-          Everything here feeds into every script Olympus writes. More context means better, more specific scripts.
+          Everything here feeds into every script the AI writes. More context means sharper hooks, better CTAs, and content that sounds like you.
         </p>
       </div>
 
@@ -222,9 +218,9 @@ export default function SettingsPage() {
             <Field label="Brand name" required>
               <input
                 type="text"
-                value={form.clinic_name}
-                onChange={e => set('clinic_name', e.target.value)}
-                placeholder="Wendling Health"
+                value={form.creator_name}
+                onChange={e => set('creator_name', e.target.value)}
+                placeholder="Dr. Jessica Wendling"
                 maxLength={80}
                 className={inputCls}
               />
@@ -232,8 +228,8 @@ export default function SettingsPage() {
             <Field label="Location" hint="optional">
               <input
                 type="text"
-                value={form.target_location}
-                onChange={e => set('target_location', e.target.value)}
+                value={form.location}
+                onChange={e => set('location', e.target.value)}
                 placeholder="Seattle, WA"
                 maxLength={60}
                 className={inputCls}
@@ -253,16 +249,16 @@ export default function SettingsPage() {
         </Section>
 
         {/* 02 — Positioning */}
-        <Section num="02" title="Positioning & background" description="Your credentials and what makes you different. Adds authority and specificity to every hook.">
+        <Section num="02" title="Positioning & background" description="Your story, credentials, and what makes your approach different. The AI uses this to add credibility to every hook.">
           <textarea
-            value={form.positioning}
-            onChange={e => set('positioning', e.target.value)}
-            placeholder={`I'm a functional medicine nurse practitioner with 12 years in neurological care. Before starting my own practice I worked at the Seattle Integrative Health Center under Dr. Chen. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine labs, lifestyle, and nervous system work — not just symptom management.`}
+            value={form.unique_angle}
+            onChange={e => set('unique_angle', e.target.value)}
+            placeholder={`I'm a functional neurologist with 12 years in clinical practice. Before starting my own practice I worked at the Seattle Integrative Health Center. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine neurology, lifestyle medicine, and nervous system work — not just symptom management.`}
             rows={5}
             maxLength={1200}
             className={textareaCls}
           />
-          <p className="text-right text-[11px] text-[#C4C0BB]">{form.positioning.length} / 1200</p>
+          <p className="text-right text-[11px] text-[#C4C0BB]">{form.unique_angle.length} / 1200</p>
         </Section>
 
         {/* 03 — Voice */}
@@ -302,8 +298,8 @@ export default function SettingsPage() {
         {/* 04 — Offerings */}
         <Section
           num="04"
-          title="Core offerings"
-          description="Your products and services. The AI names these accurately in script CTAs."
+          title="Products & programs"
+          description="Your courses, communities, or services. The AI names these accurately in every CTA."
           action={
             <button
               onClick={addOffering}
@@ -332,7 +328,7 @@ export default function SettingsPage() {
                     type="text"
                     value={o.name}
                     onChange={e => updateOffering(i, 'name', e.target.value)}
-                    placeholder="Service name"
+                    placeholder="Nervous System Reset"
                     maxLength={60}
                     className={`w-[160px] flex-shrink-0 font-medium ${rowInputCls}`}
                   />
@@ -340,7 +336,7 @@ export default function SettingsPage() {
                     type="text"
                     value={o.description}
                     onChange={e => updateOffering(i, 'description', e.target.value)}
-                    placeholder="Short description or price"
+                    placeholder="90-day 1:1 program / $1,200"
                     maxLength={120}
                     className={`flex-1 min-w-0 ${rowInputCls}`}
                   />
@@ -362,20 +358,20 @@ export default function SettingsPage() {
         </Section>
 
         {/* 05 — Ideal Client */}
-        <Section num="05" title="Ideal client" description="Who you are talking to. The more specific this is, the more targeted every hook and CTA becomes.">
+        <Section num="05" title="Ideal audience" description="Who you are talking to. The more specific this is, the more targeted every hook and CTA becomes.">
           <textarea
-            value={form.icp_definition}
-            onChange={e => set('icp_definition', e.target.value)}
-            placeholder={`Women 30–50, often moms or high-achievers dealing with anxiety or exhaustion that doctors dismiss as "just stress." They've tried therapy, medication, cutting back on work — but nothing fixes the root cause. They find me through Instagram or Google after searching "nervous system burnout" or "why am I always tired."`}
+            value={form.audience_description}
+            onChange={e => set('audience_description', e.target.value)}
+            placeholder={`Women 30–50, often high-achievers dealing with anxiety, exhaustion, or ADHD that doctors dismiss as "just stress." They've tried therapy, medication, and cutting back on work but nothing fixes the root cause. They find me through Instagram or Google searching "nervous system burnout" or "why am I always tired."`}
             rows={6}
             maxLength={1500}
             className={textareaCls}
           />
-          <p className="text-right text-[11px] text-[#C4C0BB]">{form.icp_definition.length} / 1500</p>
+          <p className="text-right text-[11px] text-[#C4C0BB]">{form.audience_description.length} / 1500</p>
         </Section>
 
         {/* 06 — Social Proof */}
-        <Section num="06" title="Results & case studies" description="Real outcomes the AI weaves into scripts as specific, credible context — not direct quotes.">
+        <Section num="06" title="Results & social proof" description="Real wins from your community. The AI weaves these into scripts as specific, credible proof.">
           <textarea
             value={form.social_proof}
             onChange={e => set('social_proof', e.target.value)}
@@ -390,8 +386,8 @@ export default function SettingsPage() {
         {/* 07 — Rules */}
         <Section num="07" title="Rules" description="Hard constraints the AI must never break. One rule per line. These override everything else.">
           <textarea
-            value={form.additional_context}
-            onChange={e => set('additional_context', e.target.value)}
+            value={form.extra_context}
+            onChange={e => set('extra_context', e.target.value)}
             placeholder={`Never tell someone to stop their prescribed medication\nNever claim to cure or treat — say "support" or "address"\nNever name-drop other practitioners or compare to competitors\nNever use the word "journey"\nAlways keep an empowering tone — no shame, no catastrophising`}
             rows={7}
             maxLength={1500}

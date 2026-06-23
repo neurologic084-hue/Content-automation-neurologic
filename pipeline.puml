@@ -1,0 +1,249 @@
+@startuml Content Engine — Full Pipeline
+
+!theme materia
+
+skinparam backgroundcolor transparent
+skinparam shadowing false
+skinparam defaultFontName "Inter", "Segoe UI", sans-serif
+skinparam defaultFontSize 13
+skinparam defaultFontColor #1E293B
+skinparam roundcorner 12
+skinparam linetype polyline
+skinparam nodesep 100
+skinparam ranksep 80
+
+!define C1 #4F46E5
+!define C2 #059669
+!define C3 #D97706
+!define C4 #0891B2
+!define C5 #DC2626
+!define C6 #7C3AED
+!define C7 #FF4F17
+!define C8 #0D9488
+!define C9 #64748B
+
+skinparam rectangle {
+    BackgroundColor WHITE
+    BorderColor #CBD5E1
+    BorderThickness 1.5
+    FontColor #1E293B
+}
+skinparam database {
+    BackgroundColor WHITE
+    BorderColor #CBD5E1
+    BorderThickness 1.5
+    FontColor #1E293B
+}
+skinparam package {
+    FontColor #1E293B
+    FontSize 13
+    FontStyle bold
+}
+skinparam arrow {
+    Thickness 2
+    Color #94A3B8
+}
+
+title <size:18>Jessica Content Engine — Full Pipeline</size>
+
+top to bottom direction
+
+actor "Jessica\n[Neurologist]" as J
+
+' ── PATH A: AI-GENERATED SCRIPT ──
+package "Path A: AI Script Generation" as PA #F8FAFC {
+
+    package "Step 1: Idea" as S1 #F8FAFC {
+        rectangle "Next.js Dashboard\n/ideas/new" as S1a
+        database "Supabase\n[ideas table]" as S1b
+    }
+
+    package "Step 2: Script Engine" as S2 #EFF6FF {
+        rectangle "OpenRouter\nClaude Sonnet 4.6\n[hook · body · CTA · filming plan]" as S2a
+        rectangle "Tavily Web Search\n[dual-query: research + viral angle]" as S2b
+        database "Supabase\n[scripts table — status: pending_review]" as S2c
+    }
+
+    package "Step 3: Review and Approve" as S3 #F0FDF4 {
+        rectangle "Next.js Dashboard\n/review — read, revise, approve" as S3a
+        database "Supabase\n[status: approved + is_few_shot: true\nfeeds back as few-shot examples]" as S3b
+    }
+}
+
+' ── PATH B: OWN SCRIPT ──
+package "Path B: Paste Your Own Script" as PB #FFFBEB {
+    rectangle "Next.js Dashboard\n/ideas/new [Paste my script tab]\nhook · body · CTA · tone · audience" as PBa
+    database "Supabase\n[script: status = approved]\n[idea: stub row auto-created]" as PBb
+}
+
+' ── STEP 4: FILMING ──
+package "Step 4: Filming" as S4 #FFFBEB {
+    rectangle "Jessica films with phone\nor records screen" as S4a
+    rectangle "Upload to Google Drive\n(share link — anyone with link)" as S4b
+    database "Supabase\n[video_jobs.source_drive_url]" as S4c
+}
+
+' ── STEP 5: AUTO-EDIT (VideoUse) ──
+package "Step 5: Auto-Edit — VideoUse" as S5 #FEF2F2 {
+    rectangle "VideoUse\n(github.com/browser-use/video-use)\nClaude Code orchestrates" as S5a
+    rectangle "ElevenLabs STT\nscribe_v1 — word-level timestamps" as S5b
+    rectangle "edited.mp4 (ums, silences, retakes removed)\n+ transcript.json (per-word ms timing)" as S5c
+    database "Supabase\n[video_jobs.transcript]" as S5d
+}
+
+' ── STEP 6: 10 VARIANTS ──
+package "Step 6: 10 Variants — Parallel" as S6 #F5F3FF {
+
+    package "Captions  [Submagic — 3 variants]" as S6_SM #EEF2FF {
+        rectangle "Bold\n[Hormozi 1 template]" as V1
+        rectangle "Minimal\n[Sara template]" as V2
+        rectangle "Karaoke\n[Beast template]" as V3
+    }
+
+    package "Motion  [HyperFrames + FFmpeg — 7 variants]" as S6_HF #FFF3EF {
+        rectangle "Liquid Glass\niOS-style frosted glass cards\nsynced to transcript" as V4
+        rectangle "Branded\nClinic lower-third (name + tagline)\n+ brand orange overlay" as V5
+        rectangle "B-Roll: Medical\nPexels medical clips intercut\n+ caption overlay" as V6
+        rectangle "B-Roll: Lifestyle\nPexels wellness clips intercut\n+ caption overlay" as V7
+        rectangle "Cinematic\nDark vignette + desaturation\n+ letterbox bars" as V8
+        rectangle "9:16 Vertical\n1080x1920 — Reels and TikTok\n+ black padding" as V9
+        rectangle "1:1 Square\n1080x1080 — feed posts\n+ black padding" as V10
+    }
+}
+
+' ── STEP 7: SELECT ──
+package "Step 7: Select Variant" as S7 #FFF7ED {
+    rectangle "Video Studio UI\n/edit/[scriptId]\nPreview · Download · Select" as S7a
+    database "Supabase\n[video_jobs.selected_variant]" as S7b
+}
+
+' ── STEP 8: PUBLISH (Phase 3) ──
+package "Step 8: Auto-Post  [Phase 3 — not yet built]" as S8 #F1F5F9 {
+    rectangle "Blotato\nInstagram · TikTok · YouTube Shorts\nFacebook · LinkedIn" as S8a
+    database "Supabase\n[publish_jobs]" as S8b
+}
+
+' ── STEP 9: ANALYTICS FEEDBACK ──
+package "Step 9: Analytics Feedback  [Phase 3]" as S9 #F0FDF4 {
+    rectangle "pg_cron — Weekly pull\nengagement · reach · saves" as S9a
+    database "Supabase\n[injected into Claude prompt\nas performance context]" as S9b
+}
+
+' ── PATH A FLOWS ──
+
+J         -[C1]d-> S1a           : "Types idea or topic"
+S1a       -[C1]d-> S1b
+
+S1b       -[C2]d-> S2b           : "Idea confirmed"
+S2b       -[C2]d-> S2a           : "Web research injected"
+S2a       -[C2]d-> S2c
+
+S2c       -[C3]d-> S3a           : "Pending review"
+S3a       -[C3]d-> S3b           : "Approved"
+S3b       -[C3]u-> S2a           : "Few-shot examples\nshape next generation"
+
+S3a       -[C4]d-> S4a           : "Script approved — go film"
+
+' ── PATH B FLOWS ──
+
+J         -[C9]d-> PBa           : "Already has a script"
+PBa       -[C9]d-> PBb           : "Saves or approves directly"
+PBb       -[C4]d-> S4a           : "Skips Steps 1-3"
+
+' ── SHARED FLOWS ──
+
+S4a       -[C4]d-> S4b           : "Films and uploads"
+S4b       -[C4]d-> S4c
+
+S4c       -[C5]d-> S5a           : "Drive URL submitted\n/api/video/process"
+S5a       -[C5]d-> S5b           : "ElevenLabs transcribes"
+S5b       -[C5]d-> S5c           : "Trims ums, silences, retakes"
+S5c       -[C5]d-> S5d
+
+S5c       -[C6]d-> V1            : "Submagic API\nPOST /v1/projects"
+S5c       -[C6]d-> V2
+S5c       -[C6]d-> V3
+
+S5c       -[C7]d-> V4            : "FFmpeg + HyperFrames\nBackground render"
+S5c       -[C7]d-> V5            : "Pexels fetch\n+ FFmpeg concat"
+S5c       -[C7]d-> V6
+S5c       -[C7]d-> V7
+S5c       -[C7]d-> V8
+S5c       -[C7]d-> V9
+S5c       -[C7]d-> V10
+
+V1        -[C6]d-> S7a
+V2        -[C6]d-> S7a
+V3        -[C6]d-> S7a
+V4        -[C7]d-> S7a
+V5        -[C7]d-> S7a
+V6        -[C7]d-> S7a
+V7        -[C7]d-> S7a
+V8        -[C7]d-> S7a
+V9        -[C7]d-> S7a
+V10       -[C7]d-> S7a
+
+S7a       -[C3]d-> S7b           : "Jessica picks 1 of 10"
+
+S7b       -[C6]d-> S8a           : "Phase 3"
+S8a       -[C6]d-> S8b
+
+S8b       -[C2]d-> S9a           : "Post goes live"
+S9a       -[C2]d-> S9b
+S9b       -[C2]u-> S2a           : "Performance context\ninjected into prompt"
+
+
+note right of S5a
+  **VideoUse + ElevenLabs does:**
+  · Transcribe via ElevenLabs scribe_v1 (word timestamps)
+  · Detect ums, filler words, long silences
+  · Detect retakes and bad cuts
+  · Output edited.mp4 (shorter, cleaner)
+  · Output transcript.json (per-word ms timing)
+  · Claude Code orchestrates the whole run
+end note
+
+note right of V4
+  **HyperFrames + FFmpeg does:**
+  · Liquid glass: frosted bottom panel + white text
+  · Branded: clinic name + tagline lower-third
+  · B-Roll: Pexels clips concatenated via FFmpeg concat
+  · Cinematic: vignette + desaturation + letterbox bars
+  · 9:16 and 1:1: scale + black-pad to exact dimensions
+  · All rendered server-side, fire-and-forget via setImmediate
+  · Results written to /public/renders/[jobId]/
+end note
+
+note right of S2a
+  **Claude Sonnet 4.6 context:**
+  · Brand voice + tone keywords + positioning
+  · Target audience lane (3 lanes)
+  · Past approved scripts as few-shot examples
+  · Tavily web research injected as context
+  · mood_tag output steers HyperFrames style
+  · Outputs: hook, body, CTA, filming plan, why_this_works
+end note
+
+note right of PBa
+  **Paste my own script:**
+  · Jessica already has a script
+  · Skips AI generation entirely
+  · Picks tone and audience lane
+  · Saves as pending_review or approves directly
+  · Goes straight to filming and editing
+  · Stub idea row auto-created (no AI involved)
+end note
+
+legend bottom left
+  |= Color |= Step |
+  |<C1>| Step 1: Idea Intake (Path A) |
+  |<C2>| Step 2: Script Engine (Claude + Tavily) |
+  |<C3>| Step 3: Review + Approval + Few-Shot Loop |
+  |<C4>| Step 4: Filming + Upload (Google Drive) |
+  |<C5>| Step 5: Auto-Edit (VideoUse + ElevenLabs) |
+  |<C6>| Step 6: Submagic — 3 caption variants |
+  |<C7>| Step 6: HyperFrames + FFmpeg — 7 motion variants |
+  |<C9>| Path B: Paste your own script (bypass AI) |
+endlegend
+
+@enduml

@@ -50,13 +50,9 @@ const NAV = [
       </svg>
     ),
   },
-]
-
-const COMING_NAV = [
   {
     href: '/edit',
     label: 'Edit',
-    phase: '2',
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
         <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3L14.5 4z" />
@@ -64,6 +60,9 @@ const COMING_NAV = [
       </svg>
     ),
   },
+]
+
+const COMING_NAV = [
   {
     href: '/publish',
     label: 'Publish',
@@ -134,10 +133,10 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
       {/* Main navigation */}
       <nav className="flex-1 px-3 overflow-y-auto">
 
-        {/* Phase 1 nav */}
+        {/* Main nav */}
         <div className="mb-1">
           <p className="px-3 mb-1.5 text-[9px] font-semibold uppercase tracking-[0.13em]" style={{ color: '#C4C0BB' }}>
-            Script engine
+            Content engine
           </p>
           {NAV.map((item) => {
             const active = pathname === item.href || pathname.startsWith(item.href + '/')
@@ -147,12 +146,18 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
               <Link
                 key={item.href}
                 href={item.href}
-                className="flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-100 group"
-                style={{
-                  background: active ? '#FFF4F1' : 'transparent',
-                  color: locked ? '#CCCAC7' : active ? '#FF4F17' : '#5A5A57',
-                }}
+                className={[
+                  'relative flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-150',
+                  locked
+                    ? 'text-[#CCCAC7]'
+                    : active
+                    ? 'bg-[#FFF4F1] text-[#FF4F17]'
+                    : 'text-[#5A5A57] hover:bg-[#F7F5F3] hover:text-[#1A1A18]',
+                ].join(' ')}
               >
+                {active && !locked && (
+                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-[18px] bg-[#FF4F17] rounded-r-full" />
+                )}
                 <span className="flex-shrink-0" style={{ opacity: locked ? 0.6 : 1 }}>
                   {item.icon}
                 </span>
@@ -179,19 +184,15 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
               <Link
                 key={item.href}
                 href={item.href}
-                className="flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-100"
-                style={{
-                  background: active ? '#F5F4F2' : 'transparent',
-                  color: '#BFBCB8',
-                }}
+                className={[
+                  'flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-150',
+                  active ? 'bg-[#F5F4F2] text-[#BFBCB8]' : 'text-[#BFBCB8] hover:bg-[#F7F5F3] hover:text-[#9B9894]',
+                ].join(' ')}
               >
                 <span className="flex-shrink-0">{item.icon}</span>
                 <span className="flex-1 truncate">{item.label}</span>
-                <span
-                  className="flex-shrink-0 text-[9px] font-semibold tracking-wide"
-                  style={{ color: '#D0CDC9' }}
-                >
-                  P{item.phase}
+                <span className="flex-shrink-0 text-[9px] font-semibold tracking-wide" style={{ color: '#D0CDC9' }}>
+                  Soon
                 </span>
               </Link>
             )
@@ -208,12 +209,14 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
           return (
             <Link
               href="/settings"
-              className="flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-100"
-              style={{
-                background: active ? '#FFF4F1' : 'transparent',
-                color: active ? '#FF4F17' : '#5A5A57',
-              }}
+              className={[
+                'relative flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-150',
+                active ? 'bg-[#FFF4F1] text-[#FF4F17]' : 'text-[#5A5A57] hover:bg-[#F7F5F3] hover:text-[#1A1A18]',
+              ].join(' ')}
             >
+              {active && (
+                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-[18px] bg-[#FF4F17] rounded-r-full" />
+              )}
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />

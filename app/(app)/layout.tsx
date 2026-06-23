@@ -5,12 +5,12 @@ import { BottomNav } from '@/components/layout/bottom-nav'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const { data: { session } } = await supabase.auth.getSession()
 
-  if (!user) redirect('/login')
+  if (!session) redirect('/login')
 
-  const { data: brand } = await supabase.from('brand_settings').select('clinic_name').single()
-  const hasSettings = !!(brand?.clinic_name && brand.clinic_name !== 'Your Clinic')
+  const { data: brand } = await supabase.from('brand_settings').select('creator_name').single()
+  const hasSettings = !!(brand?.creator_name && brand.creator_name.trim().length > 0)
 
   return (
     <div className="flex min-h-dvh bg-[#FAFAF9]">

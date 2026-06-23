@@ -1,0 +1,158 @@
+@startuml Content Automation Engine — Med-Spa
+
+!theme materia
+
+skinparam backgroundcolor transparent
+skinparam shadowing false
+skinparam defaultFontName "Inter", "Segoe UI", sans-serif
+skinparam defaultFontSize 13
+skinparam defaultFontColor #1E293B
+skinparam roundcorner 12
+skinparam linetype polyline
+skinparam nodesep 120
+skinparam ranksep 100
+
+!define C1 #4F46E5
+!define C2 #059669
+!define C3 #D97706
+!define C4 #0891B2
+!define C5 #DC2626
+!define C6 #7C3AED
+!define C7 #C9A84C
+
+skinparam rectangle {
+    BackgroundColor WHITE
+    BorderColor #CBD5E1
+    BorderThickness 1.5
+    FontColor #1E293B
+}
+skinparam database {
+    BackgroundColor WHITE
+    BorderColor #CBD5E1
+    BorderThickness 1.5
+    FontColor #1E293B
+}
+skinparam package {
+    FontColor #1E293B
+    FontSize 13
+    FontStyle bold
+}
+skinparam arrow {
+    Thickness 2
+    Color #94A3B8
+}
+
+title <size:18>Content Automation Engine — Med-Spa / Clinic</size>
+
+top to bottom direction
+
+actor "Client\n[Med-Spa Owner]" as Client
+
+' ── STEP 1: IDEA INTAKE ──
+package "Step 1: Idea Intake" as S1 #F8FAFC {
+    rectangle "Next.js Dashboard" as S1a
+    database "Supabase" as S1b
+}
+
+' ── STEP 2: SCRIPT ENGINE ──
+package "Step 2: Script Engine" as S2 #EFF6FF {
+    rectangle "OpenRouter + Claude" as S2a
+    rectangle "Script + Filming Plan + Mood Tag" as S2b
+    database "Supabase" as S2c
+}
+
+' ── STEP 3: APPROVAL ──
+package "Step 3: Approval" as S3 #F0FDF4 {
+    rectangle "Next.js Dashboard" as S3a
+    database "Supabase\n[feeds back as few-shot]" as S3b
+}
+
+' ── STEP 4: FILMING ──
+package "Step 4: Filming" as S4 #FFFBEB {
+    rectangle "Client Records" as S4a
+    rectangle "Supabase Storage" as S4b
+    database "Supabase" as S4c
+}
+
+' ── STEP 5: AUTO-EDIT ──
+package "Step 5: Auto-Edit" as S5 #FEF2F2 {
+    rectangle "Submagic · AssemblyAI · Pexels\nElevenLabs · Remotion · AWS Lambda" as S5a
+    database "Supabase" as S5c
+}
+
+' ── STEP 6: AUTO-POST ──
+package "Step 6: Auto-Post" as S6 #F5F3FF {
+    rectangle "Blotato\n[Instagram · TikTok · Facebook · YouTube]" as S6a
+    database "Supabase" as S6b
+}
+
+' ── STEP 7: ANALYTICS FEEDBACK ──
+package "Step 7: Analytics Feedback" as S7 #FFF7ED {
+    rectangle "pg_cron — Weekly" as S7a
+    database "Supabase\n[injected into script prompt]" as S7b
+}
+
+' ── PHASE 2 (NOT YET WIRED) ──
+package "Phase 2: Lead Capture" as P2 #F1F5F9 {
+    rectangle "ManyChat" as P2a
+}
+
+' ── FLOWS ──
+
+Client   -[C1]d-> S1a            : "Submits idea"
+S1a      -[C1]d-> S1b
+
+S1b      -[C2]d-> S2a            : "Idea pulled"
+S2a      -[C2]d-> S2b
+S2b      -[C2]d-> S2c
+
+S2c      -[C3]d-> S3a            : "Pending review"
+S3a      -[C3]d-> S3b            : "Approved"
+S3b      -[C3]u-> S2a            : "Few-shot examples"
+
+S3a      -[C4]d-> S4a            : "Script approved\npath flag set"
+S4a      -[C4]d-> S4b            : "Films + uploads"
+S4b      -[C4]d-> S4c
+
+S4c      -[C5]d-> S5a
+S5a      -[C5]d-> S5c
+
+S5c      -[C6]d-> S6a            : "Edited video ready"
+S6a      -[C6]d-> S6b
+
+S6b      -[C7]d-> S7a            : "Post goes live"
+S7a      -[C7]d-> S7b
+S7b      -[C7]u-> S2a            : "Performance context\ninjected into prompt"
+
+S6b      -[#CBD5E1]d-> P2a       : "Phase 2"
+
+
+note right of S2a
+  **Script engine context:**
+  · Brand voice system prompt
+  · Target audience definition
+  · Past approved edits (few-shot)
+  · Weekly analytics (what worked)
+  · Outputs mood tag for Path B
+end note
+
+
+note right of S6a
+  **Blotato handles:**
+  · Platform OAuth per channel
+  · Scheduling per platform
+  · One API call, all platforms
+end note
+
+legend bottom left
+  |= Color |= Step |
+  |<C1>| Step 1: Idea Intake |
+  |<C2>| Step 2: Script Engine |
+  |<C3>| Step 3: Approval + Feedback Loop |
+  |<C4>| Step 4: Filming + Upload |
+  |<C5>| Step 5: Auto-Edit (Path A or B) |
+  |<C6>| Step 6: Auto-Post |
+  |<C7>| Step 7: Analytics Feedback |
+endlegend
+
+@enduml

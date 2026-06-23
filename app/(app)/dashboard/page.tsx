@@ -9,14 +9,14 @@ export default async function DashboardPage() {
     supabase.from('ideas').select('id', { count: 'exact', head: true }),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'pending_review'),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
-    supabase.from('brand_settings').select('clinic_name').single(),
+    supabase.from('brand_settings').select('creator_name').single(),
   ])
 
   const totalIdeas = ideasRes.count ?? 0
   const pendingReview = pendingRes.count ?? 0
   const totalApproved = approvedRes.count ?? 0
-  const brandName = brandRes.data?.clinic_name ?? null
-  const hasSettings = !!(brandName && brandName !== 'Your Clinic')
+  const brandName = brandRes.data?.creator_name ?? null
+  const hasSettings = !!(brandName && brandName.trim().length > 0)
 
   const { data: recentScripts } = await supabase
     .from('scripts')
@@ -202,44 +202,6 @@ export default async function DashboardPage() {
         </div>
       )}
 
-      {/* ── Content pipeline (once all 3 steps complete) ── */}
-      {!showGettingStarted && (
-        <div className="animate-fadeInUp grid grid-cols-3 gap-2 sm:gap-3" style={{ animationDelay: '80ms' }}>
-          {/* Phase 1 — Active */}
-          <div
-            className="rounded-2xl p-4 relative overflow-hidden"
-            style={{ background: '#0D0D0D', border: '1.5px solid rgba(255,79,23,0.4)' }}
-          >
-            <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(ellipse at 50% 0%, rgba(255,79,23,0.12) 0%, transparent 70%)' }} />
-            <div className="relative z-10">
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full mb-3" style={{ background: 'rgba(255,79,23,0.15)', color: '#FF4F17' }}>
-                <span className="w-1.5 h-1.5 rounded-full bg-[#FF4F17] animate-pulse" />
-                Active
-              </span>
-              <p className="text-white/40 text-[10px] uppercase tracking-widest font-bold mb-1">Phase 1</p>
-              <p className="text-white font-bold text-sm" style={{ fontFamily: 'var(--font-jakarta)' }}>Script Engine</p>
-            </div>
-          </div>
-
-          {/* Phase 2 — Coming */}
-          <div className="rounded-2xl p-4 bg-white border border-[#E4E4E0]">
-            <span className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mb-3" style={{ background: '#EEF2FF', color: '#6366F1' }}>
-              Phase 2
-            </span>
-            <p className="text-[#A1A1AA] text-[10px] uppercase tracking-widest font-bold mb-1">Coming</p>
-            <p className="text-[#18181B] font-bold text-sm" style={{ fontFamily: 'var(--font-jakarta)' }}>Video Editing</p>
-          </div>
-
-          {/* Phase 3 — Coming */}
-          <div className="rounded-2xl p-4 bg-white border border-[#E4E4E0]">
-            <span className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mb-3" style={{ background: '#FFF3EF', color: '#FF4F17' }}>
-              Phase 3
-            </span>
-            <p className="text-[#A1A1AA] text-[10px] uppercase tracking-widest font-bold mb-1">Coming</p>
-            <p className="text-[#18181B] font-bold text-sm" style={{ fontFamily: 'var(--font-jakarta)' }}>Publish</p>
-          </div>
-        </div>
-      )}
 
       {/* ── New idea CTA ── */}
       {step1Done ? (
@@ -347,12 +309,7 @@ export default async function DashboardPage() {
             href="/edit"
             className="bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#6366F1] hover:shadow-sm transition-all duration-150 group hover-lift"
           >
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: '#EEF2FF', color: '#6366F1' }}>
-                Phase 2
-              </span>
-            </div>
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 mb-4">
               <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#EEF2FF' }}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3L14.5 4z" />
@@ -373,8 +330,8 @@ export default async function DashboardPage() {
                 </ul>
               </div>
             </div>
-            <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-[#6366F1] group-hover:gap-2.5 transition-all">
-              Preview Phase 2
+            <div className="flex items-center gap-1.5 text-xs font-medium text-[#6366F1] group-hover:gap-2.5 transition-all">
+              Coming soon
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 18l6-6-6-6" />
               </svg>
@@ -386,12 +343,7 @@ export default async function DashboardPage() {
             href="/publish"
             className="bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#FF4F17] hover:shadow-sm transition-all duration-150 group hover-lift"
           >
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ background: '#FFF3EF', color: '#FF4F17' }}>
-                Phase 3
-              </span>
-            </div>
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 mb-4">
               <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#FFF3EF' }}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF4F17" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M22 2L11 13" />
@@ -402,9 +354,7 @@ export default async function DashboardPage() {
                 <p className="font-bold text-sm text-[#18181B] mb-2" style={{ fontFamily: 'var(--font-jakarta)' }}>
                   Multi-Platform Publishing
                 </p>
-                {/* Platform icons */}
                 <div className="flex items-center gap-2 mb-2">
-                  {/* Instagram */}
                   <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045)' }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
@@ -412,20 +362,17 @@ export default async function DashboardPage() {
                       <circle cx="17.5" cy="6.5" r="1.5" fill="white" stroke="none" />
                     </svg>
                   </div>
-                  {/* TikTok */}
                   <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#010101' }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="white">
                       <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.89-2.89 2.89 2.89 0 0 1 2.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 0 0-.79-.05 6.34 6.34 0 0 0-6.34 6.34 6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.33-6.34V8.69a8.27 8.27 0 0 0 4.84 1.55V6.79a4.85 4.85 0 0 1-1.07-.1z" />
                     </svg>
                   </div>
-                  {/* YouTube */}
                   <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#FF0000' }}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="white">
                       <path d="M10 15l5.19-3L10 9v6z" />
                       <path d="M21.56 7.17a2.76 2.76 0 0 0-1.94-1.95C17.88 4.78 12 4.78 12 4.78s-5.88 0-7.62.44A2.76 2.76 0 0 0 2.44 7.17C2 8.91 2 12 2 12s0 3.09.44 4.83a2.76 2.76 0 0 0 1.94 1.95C6.12 19.22 12 19.22 12 19.22s5.88 0 7.62-.44a2.76 2.76 0 0 0 1.94-1.95C22 15.09 22 12 22 12s0-3.09-.44-4.83z" />
                     </svg>
                   </div>
-                  {/* LinkedIn */}
                   <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#0077B5' }}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
                       <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z" />
@@ -444,8 +391,8 @@ export default async function DashboardPage() {
                 </ul>
               </div>
             </div>
-            <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-[#FF4F17] group-hover:gap-2.5 transition-all">
-              Preview Phase 3
+            <div className="flex items-center gap-1.5 text-xs font-medium text-[#FF4F17] group-hover:gap-2.5 transition-all">
+              Coming soon
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 18l6-6-6-6" />
               </svg>

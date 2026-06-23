@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Liquid Glass Overlay</title>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 1080px;
+      height: 1920px;
+      overflow: hidden;
+      background: transparent;
+      font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+    }
+
+    #root {
+      position: relative;
+      width: 1080px;
+      height: 1920px;
+      overflow: hidden;
+    }
+
+    /* Glass caption panel — bottom quarter */
+    #glass-panel {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 480px;
+      background: rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(32px) saturate(1.8);
+      -webkit-backdrop-filter: blur(32px) saturate(1.8);
+      border-top: 1px solid rgba(255, 255, 255, 0.25);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 0 60px;
+    }
+
+    #glass-panel::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.02) 100%);
+      pointer-events: none;
+    }
+
+    #caption-text {
+      font-size: 52px;
+      font-weight: 700;
+      color: #FFFFFF;
+      text-align: center;
+      line-height: 1.25;
+      letter-spacing: -0.02em;
+      text-shadow: 0 2px 16px rgba(0,0,0,0.4);
+      opacity: 0;
+      transform: translateY(24px);
+    }
+
+    #caption-pill {
+      margin-top: 20px;
+      background: rgba(255, 79, 23, 0.9);
+      color: white;
+      font-size: 28px;
+      font-weight: 600;
+      padding: 10px 28px;
+      border-radius: 100px;
+      opacity: 0;
+      transform: scale(0.9);
+      letter-spacing: 0.01em;
+    }
+
+    /* Progress bar */
+    #progress-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 4px;
+      background: rgba(255, 79, 23, 0.9);
+      width: 0%;
+      transform-origin: left center;
+    }
+  </style>
+</head>
+<body>
+  <div
+    id="root"
+    data-composition-id="liquid-glass"
+    data-width="1080"
+    data-height="1920"
+    data-start="0"
+    data-duration="__VIDEO_DURATION__"
+  >
+    <div id="glass-panel" data-track-index="10" data-start="0" data-duration="__VIDEO_DURATION__">
+      <div id="caption-text"></div>
+      <div id="caption-pill"></div>
+      <div id="progress-bar"></div>
+    </div>
+
+    <script>
+      const vars = (typeof window.__hyperframes !== 'undefined' && window.__hyperframes.getVariables)
+        ? window.__hyperframes.getVariables()
+        : {};
+
+      const words  = vars.words  || [];
+      const hook   = vars.hook   || 'Watch till the end';
+      const cta    = vars.cta    || '';
+
+      const captionEl  = document.getElementById('caption-text');
+      const pillEl     = document.getElementById('caption-pill');
+      const progressEl = document.getElementById('progress-bar');
+
+      const tl = gsap.timeline({ paused: true });
+
+      // Reveal glass panel
+      tl.fromTo('#glass-panel', { y: 60, opacity: 0 }, { y: 0, opacity: 1, duration: 0.6, ease: 'power3.out' }, 0.3);
+
+      // Animate caption text in
+      tl.to('#caption-text', { opacity: 1, y: 0, duration: 0.4, ease: 'back.out(1.5)' }, 0.6);
+
+      // Word-by-word captions
+      if (words.length > 0) {
+        captionEl.textContent = words[0]?.text || hook;
+        words.forEach((w, i) => {
+          tl.call(() => {
+            const chunk = words.slice(Math.max(0, i - 3), i + 1).map(x => x.text).join(' ');
+            captionEl.textContent = chunk;
+            gsap.fromTo(captionEl, { scale: 0.96 }, { scale: 1, duration: 0.15, ease: 'power2.out' });
+          }, [], w.start);
+        });
+      } else {
+        captionEl.textContent = hook;
+      }
+
+      // CTA pill at 80% through
+      if (cta) {
+        pillEl.textContent = cta;
+        const ctaTime = parseFloat('__VIDEO_DURATION__') * 0.8 || 20;
+        tl.to('#caption-pill', { opacity: 1, scale: 1, duration: 0.4, ease: 'back.out(2)' }, ctaTime);
+      }
+
+      // Progress bar fills over the full duration
+      tl.to('#progress-bar', { width: '100%', duration: parseFloat('__VIDEO_DURATION__') || 30, ease: 'none' }, 0);
+
+      window.__timelines = window.__timelines || {};
+      window.__timelines['liquid-glass'] = tl;
+    </script>
+  </div>
+</body>
+</html>

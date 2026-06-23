@@ -52,7 +52,16 @@ const IDEA_TYPE_LABELS: string[] = [
 ]
 
 type Step = 'input' | 'confirm-lane' | 'generating' | 'done'
-type Tab = 'write' | 'generate'
+type Tab = 'write' | 'generate' | 'script'
+
+const MOODS = [
+  { id: 'educational', label: 'Educational' },
+  { id: 'calm',        label: 'Calm' },
+  { id: 'energetic',   label: 'Energetic' },
+  { id: 'empathetic',  label: 'Empathetic' },
+  { id: 'bold',        label: 'Bold' },
+  { id: 'story-driven',label: 'Story' },
+]
 
 const DRAFT_KEY = 'reel_idea_draft'
 
@@ -68,6 +77,15 @@ export default function NewIdeaPage() {
   const [scriptId, setScriptId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // Manual script state
+  const [ownHook, setOwnHook] = useState('')
+  const [ownBody, setOwnBody] = useState('')
+  const [ownCta, setOwnCta] = useState('')
+  const [ownMood, setOwnMood] = useState('')
+  const [ownLane, setOwnLane] = useState<AudienceLane | null>(null)
+  const [ownSaving, setOwnSaving] = useState(false)
+  const [ownError, setOwnError] = useState('')
   const [visibleSteps, setVisibleSteps] = useState(0)
   const stepTimers = useRef<ReturnType<typeof setTimeout>[]>([])
 
@@ -102,8 +120,8 @@ export default function NewIdeaPage() {
   useEffect(() => {
     async function checkSettings() {
       const supabase = createClient()
-      const { data } = await supabase.from('brand_settings').select('clinic_name').single()
-      setSettingsReady(!!(data?.clinic_name && data.clinic_name !== 'Your Clinic'))
+      const { data } = await supabase.from('brand_settings').select('creator_name').single()
+      setSettingsReady(!!(data?.creator_name && data.creator_name.trim().length > 0))
     }
     checkSettings()
   }, [])
@@ -131,15 +149,52 @@ export default function NewIdeaPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idea: text }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
-      setSuggestion(data)
-      setSelectedLane(data.suggested_lane)
-      setStep('confirm-lane')
+      const laneData = await res.json()
+      if (!res.ok) throw new Error(laneData.error)
+      setSuggestion(laneData)
+      setSelectedLane(laneData.suggested_lane)
+      // Skip confirmation step — auto-accept AI lane and generate immediately
+      await generateScript(text, laneData.suggested_lane, laneData)
     } catch (err) {
       setError(String(err))
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function generateScript(ideaText: string, lane: AudienceLane, suggestionData: LaneSuggestion) {
+    setStep('generating')
+    setError('')
+    try {
+      const supabase = createClient()
+      const { data: newIdea, error: ideaErr } = await supabase
+        .from('ideas')
+        .insert({
+          raw_idea: ideaText,
+          ai_suggested_lane: suggestionData.suggested_lane,
+          ai_lane_reasoning: suggestionData.reasoning,
+          confirmed_lane: lane,
+          status: 'generating',
+        })
+        .select('id')
+        .single()
+
+      if (ideaErr || !newIdea) throw new Error(ideaErr?.message ?? 'Failed to save idea')
+      setIdeaId(newIdea.id)
+
+      const res = await fetch('/api/scripts/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idea_id: newIdea.id }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+
+      setScriptId(data.script_id)
+      setStep('done')
+    } catch (err) {
+      setError(String(err))
+      setStep('input')
     }
   }
 
@@ -165,41 +220,34 @@ export default function NewIdeaPage() {
     }
   }
 
-  async function handleGenerate() {
-    if (!selectedLane) return
-    setStep('generating')
-    setError('')
-
+  async function handleSaveOwnScript(approve: boolean) {
+    if (!ownHook.trim() || !ownBody.trim()) return
+    setOwnSaving(true)
+    setOwnError('')
     try {
-      const supabase = createClient()
-      const { data: newIdea, error: ideaErr } = await supabase
-        .from('ideas')
-        .insert({
-          raw_idea: idea,
-          ai_suggested_lane: suggestion?.suggested_lane,
-          ai_lane_reasoning: suggestion?.reasoning,
-          confirmed_lane: selectedLane,
-          status: 'generating',
-        })
-        .select('id')
-        .single()
-
-      if (ideaErr || !newIdea) throw new Error(ideaErr?.message ?? 'Failed to save idea')
-      setIdeaId(newIdea.id)
-
-      const res = await fetch('/api/scripts/generate', {
+      const res = await fetch('/api/scripts/manual', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea_id: newIdea.id }),
+        body: JSON.stringify({
+          hook: ownHook,
+          body: ownBody,
+          cta: ownCta,
+          audience_lane: ownLane,
+          mood_tag: ownMood || null,
+          approve,
+        }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-
-      setScriptId(data.script_id)
-      setStep('done')
+      if (approve) {
+        router.push(`/edit/${data.script_id}`)
+      } else {
+        router.push(`/review/${data.script_id}`)
+      }
     } catch (err) {
-      setError(String(err))
-      setStep('confirm-lane')
+      setOwnError(String(err))
+    } finally {
+      setOwnSaving(false)
     }
   }
 
@@ -291,6 +339,24 @@ export default function NewIdeaPage() {
               </svg>
               Generate 10 ideas
             </button>
+            <button
+              onClick={() => setTab('script')}
+              className="px-4 py-2 rounded-lg text-sm font-medium transition-all cursor-pointer flex items-center gap-2"
+              style={{
+                background: tab === 'script' ? '#FFFFFF' : 'transparent',
+                color: tab === 'script' ? '#18181B' : '#71717A',
+                boxShadow: tab === 'script' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
+              </svg>
+              Paste my script
+            </button>
           </div>
 
           {/* Write tab */}
@@ -334,6 +400,103 @@ export default function NewIdeaPage() {
                   'Analyze & continue →'
                 )}
               </button>
+            </div>
+          )}
+
+          {/* Paste my script tab */}
+          {tab === 'script' && (
+            <div className="bg-white border border-[#E4E4E0] rounded-2xl p-6 space-y-5">
+              <div>
+                <p className="text-xs font-semibold text-[#A1A1AA] uppercase tracking-wider mb-1">
+                  Paste your own script — skip the AI, go straight to editing
+                </p>
+              </div>
+
+              {/* Hook */}
+              <div>
+                <label className="block text-sm font-medium text-[#18181B] mb-1.5">
+                  Opening hook <span className="text-[#FF4F17]">*</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="The first line that hooks the viewer in 1–2 seconds"
+                  value={ownHook}
+                  onChange={e => setOwnHook(e.target.value)}
+                  className="w-full h-11 px-3.5 rounded-xl border border-[#E4E4E0] bg-[#FAFAF9] text-[#18181B] text-sm placeholder:text-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#FF4F17] focus:border-transparent transition-all"
+                />
+              </div>
+
+              {/* Body */}
+              <div>
+                <label className="block text-sm font-medium text-[#18181B] mb-1.5">
+                  Script body <span className="text-[#FF4F17]">*</span>
+                </label>
+                <textarea
+                  placeholder="Paste your full script here. Write it exactly as you'll say it — the pipeline will use this for captions and editing."
+                  value={ownBody}
+                  onChange={e => setOwnBody(e.target.value)}
+                  rows={8}
+                  className="w-full px-3.5 py-3 rounded-xl border border-[#E4E4E0] bg-[#FAFAF9] text-[#18181B] text-sm placeholder:text-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#FF4F17] focus:border-transparent transition-all resize-none"
+                />
+              </div>
+
+              {/* CTA */}
+              <div>
+                <label className="block text-sm font-medium text-[#18181B] mb-1.5">
+                  Call to action
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Book a free call — link in bio"
+                  value={ownCta}
+                  onChange={e => setOwnCta(e.target.value)}
+                  className="w-full h-11 px-3.5 rounded-xl border border-[#E4E4E0] bg-[#FAFAF9] text-[#18181B] text-sm placeholder:text-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#FF4F17] focus:border-transparent transition-all"
+                />
+              </div>
+
+              {/* Mood */}
+              <div>
+                <label className="block text-sm font-medium text-[#18181B] mb-2">Tone</label>
+                <div className="flex flex-wrap gap-2">
+                  {MOODS.map(m => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setOwnMood(ownMood === m.id ? '' : m.id)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                      style={{
+                        borderColor: ownMood === m.id ? '#FF4F17' : '#E4E4E0',
+                        background: ownMood === m.id ? '#FFF3EF' : 'transparent',
+                        color: ownMood === m.id ? '#FF4F17' : '#71717A',
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {ownError && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{ownError}</div>
+              )}
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  onClick={() => handleSaveOwnScript(false)}
+                  disabled={!ownHook.trim() || !ownBody.trim() || ownSaving}
+                  className="flex-1 h-11 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#18181B] hover:bg-[#F4F3F0] disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
+                >
+                  Save for review
+                </button>
+                <button
+                  onClick={() => handleSaveOwnScript(true)}
+                  disabled={!ownHook.trim() || !ownBody.trim() || ownSaving}
+                  className="flex-[2] h-11 rounded-xl text-sm font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
+                  style={{ background: '#FF4F17', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
+                >
+                  {ownSaving ? 'Saving...' : 'Approve and go to Edit →'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -453,97 +616,6 @@ export default function NewIdeaPage() {
               )}
             </div>
           )}
-        </div>
-      )}
-
-      {/* Step: Confirm lane */}
-      {step === 'confirm-lane' && suggestion && (
-        <div className="space-y-4 animate-fadeInUp">
-          <div className="bg-[#F4F3F0] rounded-2xl p-4">
-            <p className="text-xs text-[#A1A1AA] mb-1">Your idea</p>
-            <p className="text-sm text-[#18181B]">"{idea}"</p>
-          </div>
-
-          <div className="bg-white border border-[#E4E4E0] rounded-2xl p-5">
-            <div className="flex items-start gap-3 mb-4">
-              <div className="w-8 h-8 rounded-xl bg-[#EEF2FF] flex items-center justify-center flex-shrink-0 mt-0.5">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2">
-                  <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/>
-                  <path d="M12 8v4M12 16h.01"/>
-                </svg>
-              </div>
-              <div>
-                <p className="text-sm font-medium text-[#18181B]">AI suggests this audience</p>
-                <p className="text-xs text-[#71717A] mt-0.5">{suggestion.reasoning}</p>
-              </div>
-            </div>
-
-            <p className="text-xs font-semibold text-[#A1A1AA] uppercase tracking-wider mb-3">
-              Choose the audience for this script
-            </p>
-
-            <div className="space-y-2">
-              {LANES.map((lane, li) => {
-                const isSelected = selectedLane === lane.id
-                const isAI = suggestion.suggested_lane === lane.id
-                return (
-                  <button
-                    key={lane.id}
-                    type="button"
-                    onClick={() => setSelectedLane(lane.id)}
-                    className="animate-fadeInUp w-full flex items-start gap-3 p-3.5 rounded-xl border-2 text-left transition-all duration-150 cursor-pointer"
-                    style={{
-                      borderColor: isSelected ? lane.color : '#E4E4E0',
-                      background: isSelected ? lane.bg : 'transparent',
-                      animationDelay: `${80 + li * 60}ms`,
-                    }}
-                  >
-                    <div
-                      className="w-4 h-4 rounded-full border-2 flex-shrink-0 mt-0.5 transition-all"
-                      style={{
-                        borderColor: isSelected ? lane.color : '#CDCDC8',
-                        background: isSelected ? lane.color : 'transparent',
-                      }}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-[#18181B]">{lane.label}</span>
-                        {isAI && (
-                          <span
-                            className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                            style={{ background: lane.bg, color: lane.color }}
-                          >
-                            AI pick
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-[#71717A] mt-0.5">{lane.description}</p>
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          {error && (
-            <div className="px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
-          )}
-
-          <div className="flex gap-3">
-            <button
-              onClick={() => setStep('input')}
-              className="flex-1 py-2.5 px-4 rounded-xl border border-[#E4E4E0] text-[#71717A] text-sm font-medium hover:bg-[#F4F3F0] transition-all cursor-pointer"
-            >
-              ← Back
-            </button>
-            <button
-              onClick={handleGenerate}
-              disabled={!selectedLane}
-              className="flex-[2] py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
-            >
-              Generate script →
-            </button>
-          </div>
         </div>
       )}
 

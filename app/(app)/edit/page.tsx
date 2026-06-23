@@ -1,162 +1,165 @@
+import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
 
-const FEATURES = [
-  {
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
-        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-      </svg>
-    ),
-    title: 'AI-Assisted Cuts',
-    description: 'Upload your raw footage — AI identifies the best takes, trims silences, and assembles a rough cut matched to your script timing.',
-  },
-  {
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-      </svg>
-    ),
-    title: 'Auto-Captions & Subtitles',
-    description: 'Word-level captions generated from your script — synced automatically. Styled for short-form, fully editable.',
-  },
-  {
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="2" y="2" width="8" height="8" rx="1" />
-        <rect x="14" y="2" width="8" height="8" rx="1" />
-        <rect x="2" y="14" width="8" height="8" rx="1" />
-        <rect x="14" y="14" width="8" height="8" rx="1" />
-      </svg>
-    ),
-    title: 'B-Roll Suggestions',
-    description: 'Based on your script content, AI suggests relevant B-roll shots and overlays — with a shot list you can check off while filming.',
-  },
-  {
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
-      </svg>
-    ),
-    title: 'Music & Pacing',
-    description: 'Royalty-free music matched to your mood tag. AI adjusts clip pacing to the beat.',
-  },
-  {
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="8 17 12 21 16 17" /><line x1="12" y1="12" x2="12" y2="21" />
-        <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29" />
-      </svg>
-    ),
-    title: 'One-Click Export',
-    description: 'Export in native formats for each platform — 9:16 for Reels/TikTok, 16:9 for YouTube, 1:1 for LinkedIn.',
-  },
-  {
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /><path d="M12 8v4l3 3" />
-      </svg>
-    ),
-    title: 'Version History',
-    description: 'Every edit is saved. Roll back, compare versions, and never lose a take.',
-  },
-]
+const MOOD_COLOR: Record<string, string> = {
+  calm: '#6366F1',
+  energetic: '#FF4F17',
+  empathetic: '#EC4899',
+  educational: '#0EA5E9',
+  bold: '#EF4444',
+  'story-driven': '#F59E0B',
+}
 
-export default function EditPage() {
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+export default async function EditPage() {
+  const supabase = await createClient()
+
+  const { data: scripts } = await supabase
+    .from('scripts')
+    .select('id, hook, mood_tag, approved_at')
+    .eq('status', 'approved')
+    .order('approved_at', { ascending: false })
+
+  let jobsByScript: Record<string, { id: string; status: string; selected_variant: string | null }> = {}
+  const { data: jobs } = await supabase
+    .from('video_jobs')
+    .select('id, script_id, status, selected_variant')
+  if (jobs) {
+    for (const j of jobs) jobsByScript[j.script_id] = j
+  }
+
+  const total = scripts?.length ?? 0
+  const withFootage = Object.keys(jobsByScript).length
+  const complete = Object.values(jobsByScript).filter(j => j.status === 'complete').length
+  const selected = Object.values(jobsByScript).filter(j => j.selected_variant).length
+
   return (
-    <div className="p-6 md:p-8 max-w-3xl w-full mx-auto">
+    <div className="p-4 sm:p-6 md:p-8 max-w-3xl w-full mx-auto">
 
       {/* Header */}
-      <div
-        className="rounded-2xl p-8 mb-6 relative overflow-hidden"
-        style={{ background: 'linear-gradient(135deg, #1E1B4B 0%, #312E81 100%)' }}
-      >
-        <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(ellipse at 80% 50%, rgba(99,102,241,0.2) 0%, transparent 60%)' }} />
-        <div className="relative z-10">
-          <div className="flex items-center gap-2 mb-5">
-            <span className="text-[10px] font-bold px-2.5 py-1 rounded-full text-white tracking-widest uppercase" style={{ background: 'rgba(99,102,241,0.3)', border: '1px solid rgba(99,102,241,0.4)' }}>
-              Phase 2
-            </span>
-            <span className="text-white/30 text-xs">·</span>
-            <span className="text-white/30 text-xs">Coming soon</span>
-          </div>
+      <div className="mb-6 animate-fadeInUp" style={{ animationDelay: '0ms' }}>
+        <div className="flex items-center gap-2.5 mb-1">
           <h1
-            className="text-white font-extrabold mb-2"
-            style={{ fontSize: 28, fontFamily: 'var(--font-jakarta)', letterSpacing: '-0.5px' }}
+            className="text-2xl font-bold text-[#18181B]"
+            style={{ fontFamily: 'var(--font-jakarta)' }}
           >
-            Video Editing
+            Video Studio
           </h1>
-          <p className="text-white/50 text-sm leading-relaxed max-w-md">
-            Upload your raw footage and let AI handle the heavy lifting — cuts, captions, pacing, and export. All synced to the scripts you already approved.
-          </p>
-
-          <div
-            className="inline-flex items-center gap-2 mt-6 px-4 py-2 rounded-xl text-sm font-semibold"
-            style={{ background: 'rgba(99,102,241,0.2)', border: '1px solid rgba(99,102,241,0.3)', color: '#A5B4FC' }}
+          <span
+            className="text-[10px] font-bold px-2.5 py-1 rounded-full tracking-widest uppercase"
+            style={{ background: '#EEF2FF', color: '#6366F1' }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /><path d="M12 8v4l3 3" />
-            </svg>
-            We&apos;re building this now
-          </div>
+            Phase 2
+          </span>
         </div>
-      </div>
-
-      {/* Upload placeholder */}
-      <div
-        className="rounded-2xl p-8 mb-6 flex flex-col items-center text-center"
-        style={{ border: '2px dashed #C7D2FE', background: '#F5F3FF' }}
-      >
-        <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4" style={{ background: '#EEF2FF' }}>
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="16 16 12 12 8 16" />
-            <line x1="12" y1="12" x2="12" y2="21" />
-            <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
-          </svg>
-        </div>
-        <p className="font-semibold text-[#4338CA] mb-1" style={{ fontFamily: 'var(--font-jakarta)' }}>
-          Drop your footage here
+        <p className="text-sm text-[#71717A]">
+          Add footage to your approved scripts and generate 10 edited variants per video.
         </p>
-        <p className="text-xs text-[#6366F1]/60 mb-4">MP4, MOV up to 4GB · Launches with Phase 2</p>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6 animate-fadeInUp" style={{ animationDelay: '40ms' }}>
+        {[
+          { label: 'Approved scripts', value: total },
+          { label: 'With footage', value: withFootage },
+          { label: 'Variants ready', value: complete },
+          { label: 'Variant selected', value: selected },
+        ].map(s => (
+          <div key={s.label} className="bg-white border border-[#E4E4E0] rounded-2xl p-4">
+            <p className="text-2xl font-bold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
+              {s.value}
+            </p>
+            <p className="text-xs text-[#A1A1AA] mt-0.5">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Script list */}
+      {scripts && scripts.length > 0 ? (
+        <div className="space-y-3">
+          {scripts.map((script, i) => {
+            const job = jobsByScript[script.id]
+            const moodColor = script.mood_tag ? MOOD_COLOR[script.mood_tag] : '#A1A1AA'
+
+            let statusBadge = { label: 'No footage', bg: '#F4F3F0', color: '#A1A1AA' }
+            if (job?.selected_variant) {
+              statusBadge = { label: 'Variant selected', bg: '#DCFCE7', color: '#16A34A' }
+            } else if (job?.status === 'complete') {
+              statusBadge = { label: '10 variants ready', bg: '#FFF3EF', color: '#FF4F17' }
+            } else if (job?.status === 'processing') {
+              statusBadge = { label: 'Processing...', bg: '#FEF3C7', color: '#D97706' }
+            }
+
+            return (
+              <div
+                key={script.id}
+                className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#D0CCC8] hover:shadow-sm transition-all duration-150 hover-lift"
+                style={{ animationDelay: `${80 + i * 40}ms` }}
+              >
+                <div className="flex items-start gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                      <span
+                        className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
+                        style={{ background: statusBadge.bg, color: statusBadge.color }}
+                      >
+                        {statusBadge.label}
+                      </span>
+                      {script.mood_tag && (
+                        <span
+                          className="text-[11px] px-2.5 py-1 rounded-full"
+                          style={{ background: `${moodColor}15`, color: moodColor }}
+                        >
+                          {script.mood_tag}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm font-semibold text-[#18181B] leading-snug mb-1">
+                      &ldquo;{script.hook}&rdquo;
+                    </p>
+                    {script.approved_at && (
+                      <p className="text-xs text-[#A1A1AA]">Approved {formatDate(script.approved_at)}</p>
+                    )}
+                  </div>
+
+                  <Link
+                    href={`/edit/${script.id}`}
+                    className="flex-shrink-0 h-9 px-4 rounded-xl text-xs font-semibold cursor-pointer transition-all flex items-center"
+                    style={{
+                      background: job?.selected_variant ? '#DCFCE7' : job ? '#FFF3EF' : '#F4F3F0',
+                      color: job?.selected_variant ? '#15803D' : job ? '#FF4F17' : '#71717A',
+                    }}
+                  >
+                    {job?.selected_variant ? 'View' : job ? 'View variants' : 'Add footage'}
+                  </Link>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
         <div
-          className="px-5 py-2 rounded-xl text-sm font-semibold cursor-not-allowed"
-          style={{ background: '#C7D2FE', color: '#4338CA', opacity: 0.6 }}
+          className="text-center py-16 bg-white border border-[#E4E4E0] border-dashed rounded-2xl animate-fadeInUp"
+          style={{ animationDelay: '80ms' }}
         >
-          Upload video — coming soon
+          <div className="w-12 h-12 rounded-2xl bg-[#F4F3F0] flex items-center justify-center mx-auto mb-3">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 10l4.553-2.069A1 1 0 0 1 21 8.87v6.26a1 1 0 0 1-1.447.894L15 14M3 8a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z" />
+            </svg>
+          </div>
+          <p className="font-medium text-[#18181B] mb-1">No approved scripts yet</p>
+          <p className="text-sm text-[#A1A1AA] mb-4">Approve scripts in Review before adding footage.</p>
+          <Link
+            href="/review"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] transition-all"
+          >
+            Go to Review
+          </Link>
         </div>
-      </div>
-
-      {/* Feature grid */}
-      <div>
-        <p className="text-xs font-bold text-[#A1A1AA] uppercase tracking-widest mb-4">What you&apos;ll get</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {FEATURES.map((f) => (
-            <div key={f.title} className="bg-white border border-[#E4E4E0] rounded-2xl p-5 flex gap-4">
-              <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 text-[#6366F1]" style={{ background: '#EEF2FF' }}>
-                {f.icon}
-              </div>
-              <div>
-                <p className="font-semibold text-sm text-[#18181B] mb-0.5" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                  {f.title}
-                </p>
-                <p className="text-xs text-[#71717A] leading-relaxed">{f.description}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-5">
-        <Link
-          href="/dashboard"
-          className="flex items-center gap-2 text-sm text-[#A1A1AA] hover:text-[#71717A] transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-          Back to dashboard
-        </Link>
-      </div>
+      )}
     </div>
   )
 }

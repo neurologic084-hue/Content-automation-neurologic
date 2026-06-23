@@ -75,9 +75,9 @@ export function buildScriptGenerationMessages(
   const laneDescription = LANE_SYSTEM_DESCRIPTIONS[lane]
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
 
-  const hardRules = brand.additional_context?.trim()
+  const hardRules = brand.extra_context?.trim()
     ? `HARD RULES — NON-NEGOTIABLE (these override everything else):
-${brand.additional_context
+${brand.extra_context
   .split('\n')
   .filter((l) => l.trim())
   .map((l) => `• ${l.trim().replace(/^[-•]\s*/, '')}`)
@@ -106,14 +106,14 @@ This is fresh, real-world content pulled from the internet. Use relevant facts, 
 ${searchContext}`
     : 'No live web context available. Draw on established science and the brand context provided.'
 
-  const locationLine = brand.target_location?.trim() ? ` based in ${brand.target_location}` : ''
+  const locationLine = brand.location?.trim() ? ` based in ${brand.location}` : ''
 
-  const positioningLine = (brand.positioning || brand.what_makes_different)?.trim()
-  const icpLine = (brand.icp_definition || brand.patient_transformation)?.trim()
-  const offeringsLine = brand.core_offerings?.trim()
+  const positioningLine = brand.unique_angle?.trim()
+  const icpLine = brand.audience_description?.trim()
+  const offeringsLine = brand.offerings?.trim()
   const proofLine = brand.social_proof?.trim()
 
-  const systemMessage = `You are an elite short-form video script writer. You write for ${brand.clinic_name}${locationLine}.
+  const systemMessage = `You are an elite short-form video script writer. You write for ${brand.creator_name}${locationLine}.
 
 YOUR JOB: Write scroll-stopping 60-second scripts that educate, validate, and convert the right audience at the right moment. Every word must earn its place.
 
@@ -128,7 +128,7 @@ Content that shifts one belief converts. Content that lists achievements feels s
 ${buildHumanizerInstruction()}
 
 BRAND IDENTITY:
-• Brand: ${brand.clinic_name}${locationLine}
+• Brand: ${brand.creator_name}${locationLine}
 • Tagline: ${brand.tagline || '(none set)'}
 • Tone: ${toneList}
 ${positioningLine ? `• Founder & positioning: ${positioningLine}` : ''}
@@ -175,7 +175,7 @@ One clear action. Low pressure. NEVER default to "Book a call" — rotate throug
   • "Follow — I post about this every week and it gets more specific"
   • "Free 20-minute call, no pitch — link in my bio"
   → Match the CTA format to the emotional tone of the script. High-urgency script = DM/comment. Reflective script = save/follow. Action-ready audience = link in bio.
-  ${brand.target_location ? `Location: ${brand.target_location}. Mention it when it adds warmth or specificity — not on every script.` : ''}
+  ${brand.location ? `Location: ${brand.location}. Mention it when it adds warmth or specificity — not on every script.` : ''}
   → Never hard sell. Create curiosity or relief.
 
 TOTAL: 120–170 words. Speaking pace ~2.5 words/sec.
@@ -224,11 +224,11 @@ export function buildRevisionMessages(
   fewShotExamples: Script[]
 ): Array<{ role: 'system' | 'user'; content: string }> {
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
-  const locationLine = brand.target_location?.trim() ? ` based in ${brand.target_location}` : ''
+  const locationLine = brand.location?.trim() ? ` based in ${brand.location}` : ''
   const laneDescription = LANE_SYSTEM_DESCRIPTIONS[lane]
 
-  const hardRules = brand.additional_context?.trim()
-    ? `HARD RULES:\n${brand.additional_context
+  const hardRules = brand.extra_context?.trim()
+    ? `HARD RULES:\n${brand.extra_context
         .split('\n')
         .filter((l) => l.trim())
         .map((l) => `• ${l.trim().replace(/^[-•]\s*/, '')}`)
@@ -251,7 +251,7 @@ Content that shifts one belief converts. Content that lists achievements feels s
 
 ${buildHumanizerInstruction()}
 
-BRAND: ${brand.clinic_name}${locationLine}
+BRAND: ${brand.creator_name}${locationLine}
 TONE: ${toneList}
 ${hardRules}
 
