@@ -1,36 +1,73 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Olympus — AI Content Engine
 
-## Getting Started
+Turn one idea into a published short-form video in minutes. Olympus handles scripting, editing, captioning, and cross-platform publishing so creators can focus on showing up.
 
-First, run the development server:
+## What it does
+
+1. **Ideas** — type a rough topic, AI picks the right audience lane and generates a full hook, body, and CTA
+2. **Review** — approve or revise scripts; every decision trains your brand voice over time
+3. **Film** — approved scripts show a filming guide (shot type, setup, wardrobe) before you record
+4. **Edit** — paste a Google Drive link to your raw recording; AI cuts, adds captions, music, and optional B-roll automatically
+5. **Publish** — post to Instagram, Facebook, TikTok, and YouTube with platform-specific AI captions, instantly or scheduled
+
+## Tech stack
+
+- **Next.js 15** (App Router, Server Components)
+- **Supabase** — Postgres + Auth + Storage
+- **Remotion** — video rendering
+- **FFmpeg** — trim, overlay, silencedetect
+- **ZapCap** — auto-captions
+- **Blotato** — social publishing
+
+## Local setup
 
 ```bash
+cd vid-app
+cp .env.local.example .env.local   # fill in keys
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Required env vars
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase access |
+| `OPENAI_API_KEY` | Script generation + B-roll clip selection |
+| `ZAPCAP_API_KEY` | Auto-caption rendering |
+| `BLOTATO_API_KEY` | Social publishing |
+| `GOOGLE_DRIVE_API_KEY` | B-roll folder listing (optional) |
 
-## Learn More
+## Project structure
 
-To learn more about Next.js, take a look at the following resources:
+```
+vid-app/
+  app/
+    (app)/
+      dashboard/     # Home — stats, getting-started guide, tour
+      ideas/new/     # Idea input + audience lane selection
+      review/        # Script review queue + detail
+      edit/          # Upload footage + video studio
+      publish/       # Caption generation + social publishing
+      library/       # Approved scripts vault
+      settings/      # Brand voice configuration
+  components/        # Shared UI (tour modal, nav, etc.)
+  lib/
+    motion-renderer.ts   # Core video pipeline (trim, B-roll, captions)
+    video-pipeline.ts    # Job orchestration
+    blotato.ts           # Social publish client
+  supabase/
+    schema.sql       # Full DB schema
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Customer journey
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+New idea → AI script → Review & approve → Film (guided) → Upload footage → Edit variants → Publish
+```
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+After approving a script, the review page surfaces a "Start filming" banner that links directly to the upload page. After selecting an edited variant, the app auto-redirects to Publish with the video pre-selected.

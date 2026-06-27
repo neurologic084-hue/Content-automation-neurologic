@@ -196,6 +196,25 @@ export default function ScriptDetailPage() {
         {isApproved ? 'Library' : 'Review queue'}
       </button>
 
+      {/* Start filming banner — top of page for approved scripts */}
+      {isApproved && !editing && (
+        <div className="animate-fadeInUp mb-5" style={{ animationDelay: '40ms' }}>
+          <a
+            href={`/edit/${script.id}`}
+            className="flex items-center justify-between w-full px-5 py-4 rounded-2xl text-white transition-all"
+            style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
+          >
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-widest opacity-80 mb-0.5">Next step</p>
+              <p className="text-sm font-semibold">Start filming this script</p>
+            </div>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          </a>
+        </div>
+      )}
+
       {/* Header */}
       <div className="animate-fadeInUp flex items-start justify-between gap-4 mb-6" style={{ animationDelay: '50ms' }}>
         <div className="flex-1 min-w-0">
@@ -432,21 +451,6 @@ export default function ScriptDetailPage() {
         </details>
       )}
 
-      {/* Start filming — approved scripts only */}
-      {isApproved && !editing && (
-        <div className="animate-fadeInUp mb-4" style={{ animationDelay: '500ms' }}>
-          <a
-            href={`/edit/${script.id}`}
-            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl text-white text-sm font-semibold transition-all"
-            style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-            </svg>
-            Start filming
-          </a>
-        </div>
-      )}
 
       {/* Actions */}
       <div className="animate-fadeInUp space-y-3" style={{ animationDelay: '520ms' }}>

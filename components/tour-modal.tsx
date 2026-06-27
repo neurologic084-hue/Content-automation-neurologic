@@ -1,35 +1,44 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
 
-const TOUR_KEY = 'reel_tour_v1'
+export const TOUR_KEY = 'reel_tour_v1'
 
 const STEPS = [
   {
     selector: 'a[href="/dashboard"]',
     title: 'Dashboard',
-    body: 'Your overview. See your stats, pick up where you left off, and track your content pipeline at a glance.',
+    body: 'Your home base. See your stats, track scripts in progress, and jump into whatever needs your attention.',
   },
   {
     selector: 'a[href="/ideas/new"]',
     title: 'New Idea',
-    body: 'Where every script starts. Type a rough topic or let AI generate 10 ideas from your brand profile. Takes 30 seconds.',
+    body: 'Everything starts here. Type a rough topic — AI picks the right audience and writes a full hook, body, and CTA in under 30 seconds.',
   },
   {
     selector: 'a[href="/review"]',
     title: 'Review',
-    body: 'Scripts waiting for your decision. Read the hook, body and CTA — approve what works, request a revision, or skip it.',
+    body: 'Scripts waiting for your call. Read the hook, body, and CTA. Approve what lands, revise what doesn\'t — every decision trains your voice forever.',
   },
   {
     selector: 'a[href="/library"]',
     title: 'Library',
-    body: 'Every script you have approved, organised by audience. The more you approve, the smarter future scripts get.',
+    body: 'Every script you\'ve approved, organised by audience lane. Your growing content vault — the more you approve, the smarter future scripts get.',
+  },
+  {
+    selector: 'a[href="/edit"]',
+    title: 'Video Studio',
+    body: 'Turn an approved script into a finished video. Paste your Google Drive recording link, pick an edit style, and AI handles cutting, captions, and music automatically.',
+  },
+  {
+    selector: 'a[href="/publish"]',
+    title: 'Publish',
+    body: 'Post your video to Instagram, Facebook, TikTok, and YouTube at once. Generate platform-specific captions with AI, then publish immediately or schedule for later.',
   },
   {
     selector: 'a[href="/settings"]',
     title: 'Settings',
-    body: 'Your brand voice. Fill this in once — identity, tone, offerings, ideal client. It trains every script Olympus writes forever.',
+    body: 'Your brand voice. Fill this in once — identity, tone, audience, and transformation. Every script Olympus writes forever draws from this.',
   },
 ]
 
@@ -42,20 +51,24 @@ interface HighlightRect {
 
 type Phase = 'welcome' | 'tour'
 
-export function TourModal() {
-  const router = useRouter()
+export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean; onClose?: () => void }) {
   const [visible, setVisible] = useState(false)
   const [phase, setPhase] = useState<Phase>('welcome')
   const [step, setStep] = useState(0)
   const [rect, setRect] = useState<HighlightRect | null>(null)
 
   useEffect(() => {
+    if (forceOpen) {
+      setVisible(true)
+      setPhase('welcome')
+      setStep(0)
+      return
+    }
     try {
       if (!localStorage.getItem(TOUR_KEY)) setVisible(true)
     } catch {}
-  }, [])
+  }, [forceOpen])
 
-  // Measure the target nav element whenever step changes
   useEffect(() => {
     if (!visible || phase !== 'tour') return
     function measure() {
@@ -73,6 +86,7 @@ export function TourModal() {
   function dismiss() {
     try { localStorage.setItem(TOUR_KEY, '1') } catch {}
     setVisible(false)
+    onClose?.()
   }
 
   function startTour() {
@@ -85,7 +99,6 @@ export function TourModal() {
       setStep(s => s + 1)
     } else {
       dismiss()
-      router.push('/settings')
     }
   }
 
@@ -134,9 +147,28 @@ export function TourModal() {
             >
               Take the guided tour?
             </h2>
-            <p className="text-[15px] leading-relaxed" style={{ color: '#6B6B68' }}>
-              A quick walkthrough of every page — what it does and how to use it. Go at your own pace, leave any time.
+            <p className="text-sm leading-relaxed mb-4" style={{ color: '#6B6B68' }}>
+              A quick walkthrough of all 7 pages — what each one does and when to use it. The full loop from idea to published video.
             </p>
+
+            {/* Flow preview */}
+            <div className="flex items-center gap-1 flex-wrap">
+              {['Idea', 'Script', 'Review', 'Edit', 'Publish'].map((label, i, arr) => (
+                <span key={label} className="flex items-center gap-1">
+                  <span
+                    className="text-[11px] font-semibold px-2 py-1 rounded-lg"
+                    style={{ background: '#FFF3EF', color: '#FF4F17' }}
+                  >
+                    {label}
+                  </span>
+                  {i < arr.length - 1 && (
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#C4C0BB" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 18l6-6-6-6" />
+                    </svg>
+                  )}
+                </span>
+              ))}
+            </div>
           </div>
 
           <div style={{ height: 1, background: '#F0EFED' }} />
@@ -166,19 +198,18 @@ export function TourModal() {
   if (!rect) return null
 
   const PAD = 5
-  const SIDEBAR_W = 224 // w-56
+  const SIDEBAR_W = 224
   const current = STEPS[step]
   const isLast = step === STEPS.length - 1
 
-  // Keep tooltip vertically centred on the nav item, clamped to viewport
   const tooltipTop = Math.min(
     Math.max(rect.top + rect.height / 2 - 90, 16),
-    window.innerHeight - 220
+    window.innerHeight - 240
   )
 
   return (
     <>
-      {/* Spotlight highlight — box-shadow creates the overlay */}
+      {/* Spotlight */}
       <div
         style={{
           position: 'fixed',
@@ -201,12 +232,12 @@ export function TourModal() {
           position: 'fixed',
           top: tooltipTop,
           left: SIDEBAR_W + 18,
-          width: 288,
+          width: 296,
           zIndex: 51,
           transition: 'top 0.2s ease',
         }}
       >
-        {/* Arrow pointing left */}
+        {/* Arrow */}
         <div
           style={{
             position: 'absolute',
@@ -246,7 +277,6 @@ export function TourModal() {
           <div style={{ height: 1, background: '#F0EFED' }} />
 
           <div className="px-5 py-3.5 flex items-center justify-between">
-            {/* Progress dots */}
             <div className="flex items-center gap-1.5">
               {STEPS.map((_, i) => (
                 <div
@@ -255,7 +285,8 @@ export function TourModal() {
                   style={{
                     width: i === step ? 14 : 5,
                     height: 5,
-                    background: i === step ? '#FF4F17' : '#E4E0DA',
+                    background: i < step ? '#FF4F17' : i === step ? '#FF4F17' : '#E4E0DA',
+                    opacity: i < step ? 0.4 : 1,
                   }}
                 />
               ))}
