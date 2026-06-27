@@ -103,7 +103,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     await supabase.from('video_jobs').update({ selected_variant: variantId }).eq('id', jobId)
     setSelectedVariant(variantId)
     setSaving(false)
-    router.refresh()
+    router.push(`/publish?jobId=${jobId}`)
   }
 
   async function handleStartVariant(variantId: string) {
