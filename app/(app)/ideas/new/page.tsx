@@ -167,6 +167,19 @@ export default function NewIdeaPage() {
     setError('')
     try {
       const supabase = createClient()
+
+      // Delete all previous non-approved ideas and their scripts before creating a new one.
+      // Approved ideas are kept because they serve as few-shot examples for future generation.
+      const { data: oldIdeas } = await supabase
+        .from('ideas')
+        .select('id')
+        .neq('status', 'approved')
+      if (oldIdeas?.length) {
+        const oldIds = oldIdeas.map((i: { id: string }) => i.id)
+        await supabase.from('scripts').delete().in('idea_id', oldIds)
+        await supabase.from('ideas').delete().in('id', oldIds)
+      }
+
       const { data: newIdea, error: ideaErr } = await supabase
         .from('ideas')
         .insert({
@@ -323,7 +336,7 @@ export default function NewIdeaPage() {
                 boxShadow: tab === 'write' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
               }}
             >
-              Write my own
+              AI-assisted
             </button>
             <button
               onClick={() => setTab('generate')}
