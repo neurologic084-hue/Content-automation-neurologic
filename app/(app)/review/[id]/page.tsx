@@ -34,6 +34,11 @@ export default function ScriptDetailPage() {
   const [showRevisionInput, setShowRevisionInput] = useState(false)
   const [revisionError, setRevisionError] = useState('')
   const [copyLabel, setCopyLabel] = useState('Copy script')
+  const [editing, setEditing] = useState(false)
+  const [editHook, setEditHook] = useState('')
+  const [editBody, setEditBody] = useState('')
+  const [editCta, setEditCta] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -59,7 +64,7 @@ export default function ScriptDetailPage() {
       .eq('id', script.id)
     await supabase.from('ideas').update({ status: 'approved' }).eq('id', script.idea_id)
     setTraining(true)
-    setTimeout(() => router.push('/review'), 2000)
+    setTimeout(() => router.push('/ideas/new'), 2000)
   }
 
   async function handleRevision() {
@@ -125,6 +130,28 @@ export default function ScriptDetailPage() {
     setTimeout(() => setCopyLabel('Copy script'), 2000)
   }
 
+  function startEditing() {
+    if (!script) return
+    setEditHook(script.hook)
+    setEditBody(script.body)
+    setEditCta(script.cta)
+    setEditing(true)
+  }
+
+  async function handleSaveEdit() {
+    if (!script) return
+    setEditSaving(true)
+    const supabase = createClient()
+    const fullScript = `HOOK:\n${editHook}\n\nBODY:\n${editBody}\n\nCTA:\n${editCta}`
+    await supabase
+      .from('scripts')
+      .update({ hook: editHook.trim(), body: editBody.trim(), cta: editCta.trim(), full_script: fullScript })
+      .eq('id', script.id)
+    setScript({ ...script, hook: editHook.trim(), body: editBody.trim(), cta: editCta.trim(), full_script: fullScript })
+    setEditing(false)
+    setEditSaving(false)
+  }
+
   if (loading) {
     return (
       <div className="p-8 flex items-center justify-center min-h-64">
@@ -159,14 +186,14 @@ export default function ScriptDetailPage() {
 
       {/* Back */}
       <button
-        onClick={() => router.push('/review')}
+        onClick={() => router.push(isApproved ? '/library' : '/review')}
         className="animate-fadeInUp flex items-center gap-1.5 text-sm text-[#71717A] hover:text-[#18181B] mb-6 transition-colors cursor-pointer"
         style={{ animationDelay: '0ms' }}
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
           <path d="M15 18l-6-6 6-6" />
         </svg>
-        Review queue
+        {isApproved ? 'Library' : 'Review queue'}
       </button>
 
       {/* Header */}
@@ -201,19 +228,42 @@ export default function ScriptDetailPage() {
             <p className="text-xs text-[#A1A1AA]">Idea: "{idea.raw_idea}"</p>
           )}
         </div>
-        <button
-          onClick={copyScript}
-          className="flex-shrink-0 text-xs font-medium px-2 sm:px-3 py-1.5 rounded-lg border border-[#E4E4E0] text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer"
-        >
-          <span className="hidden sm:inline">{copyLabel}</span>
-          <span className="sm:hidden">
-            {copyLabel === 'Copied!' ? (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            )}
-          </span>
-        </button>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {editing ? (
+            <button
+              onClick={() => setEditing(false)}
+              className="text-xs font-medium px-3 py-1.5 rounded-lg border border-[#E4E4E0] text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer"
+            >
+              Cancel
+            </button>
+          ) : (
+            <button
+              onClick={startEditing}
+              className="text-xs font-medium px-3 py-1.5 rounded-lg border border-[#E4E4E0] text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer flex items-center gap-1.5"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+              Edit
+            </button>
+          )}
+          {!editing && (
+            <button
+              onClick={copyScript}
+              className="text-xs font-medium px-2 sm:px-3 py-1.5 rounded-lg border border-[#E4E4E0] text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer"
+            >
+              <span className="hidden sm:inline">{copyLabel}</span>
+              <span className="sm:hidden">
+                {copyLabel === 'Copied!' ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                )}
+              </span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Why this works */}
@@ -240,39 +290,69 @@ export default function ScriptDetailPage() {
               <span className="text-[11px] font-semibold text-[#FF4F17] tracking-wide">Hook</span>
               <span className="text-[10px]" style={{ color: '#C4C0BB' }}>0–3s</span>
             </div>
-            <p
-              className="text-[15px] sm:text-[17px] font-semibold text-[#18181B] leading-snug"
-              style={{ fontFamily: 'var(--font-jakarta)' }}
-            >
-              {script.hook}
-            </p>
+            {editing ? (
+              <textarea
+                value={editHook}
+                onChange={e => setEditHook(e.target.value)}
+                rows={2}
+                className="w-full px-3 py-2 rounded-xl border border-[#FF4F17]/40 bg-[#FAFAF8] text-[15px] sm:text-[17px] font-semibold text-[#18181B] leading-snug focus:outline-none focus:ring-2 focus:ring-[#FF4F17]/20 focus:border-[#FF4F17] transition-all resize-none"
+                style={{ fontFamily: 'var(--font-jakarta)' }}
+              />
+            ) : (
+              <p
+                className="text-[15px] sm:text-[17px] font-semibold text-[#18181B] leading-snug"
+                style={{ fontFamily: 'var(--font-jakarta)' }}
+              >
+                {script.hook}
+              </p>
+            )}
           </div>
         </div>
 
         {/* 2–4 — Body beats */}
-        {bodyBeats.map((beat, i) => {
-          const label = customLabels[i] || BEAT_FALLBACK_LABELS[i] || `Beat ${i + 2}`
-          const color = BEAT_COLORS[i] ?? '#A1A1AA'
-          return (
-            <div key={i} className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: `${220 + i * 60}ms` }}>
-              <div
-                className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
-                style={{ background: color }}
-              >
-                {i + 2}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-baseline gap-2 mb-1.5">
-                  <span className="text-[11px] font-semibold tracking-wide" style={{ color }}>
-                    {label}
-                  </span>
-                  <span className="text-[10px]" style={{ color: '#C4C0BB' }}>{BEAT_TIMINGS[i]}</span>
-                </div>
-                <p className="text-[15px] text-[#18181B] leading-relaxed">{beat}</p>
-              </div>
+        {editing ? (
+          <div className="flex items-start gap-4">
+            <div className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]" style={{ background: '#6366F1' }}>
+              2
             </div>
-          )
-        })}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="text-[11px] font-semibold text-[#6366F1] tracking-wide">Body</span>
+                <span className="text-[10px] text-[#C4C0BB]">Separate sections with a blank line</span>
+              </div>
+              <textarea
+                value={editBody}
+                onChange={e => setEditBody(e.target.value)}
+                rows={8}
+                className="w-full px-3 py-2 rounded-xl border border-[#6366F1]/40 bg-[#FAFAF8] text-[15px] text-[#18181B] leading-relaxed focus:outline-none focus:ring-2 focus:ring-[#6366F1]/20 focus:border-[#6366F1] transition-all resize-none"
+              />
+            </div>
+          </div>
+        ) : (
+          bodyBeats.map((beat, i) => {
+            const label = customLabels[i] || BEAT_FALLBACK_LABELS[i] || `Beat ${i + 2}`
+            const color = BEAT_COLORS[i] ?? '#A1A1AA'
+            return (
+              <div key={i} className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: `${220 + i * 60}ms` }}>
+                <div
+                  className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
+                  style={{ background: color }}
+                >
+                  {i + 2}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline gap-2 mb-1.5">
+                    <span className="text-[11px] font-semibold tracking-wide" style={{ color }}>
+                      {label}
+                    </span>
+                    <span className="text-[10px]" style={{ color: '#C4C0BB' }}>{BEAT_TIMINGS[i]}</span>
+                  </div>
+                  <p className="text-[15px] text-[#18181B] leading-relaxed">{beat}</p>
+                </div>
+              </div>
+            )
+          })
+        )}
 
         {/* CTA */}
         <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '400ms' }}>
@@ -287,7 +367,16 @@ export default function ScriptDetailPage() {
               <span className="text-[11px] font-semibold text-[#22C55E] tracking-wide">Call to action</span>
               <span className="text-[10px]" style={{ color: '#C4C0BB' }}>50–60s</span>
             </div>
-            <p className="text-[15px] font-medium text-[#18181B] leading-relaxed">{script.cta}</p>
+            {editing ? (
+              <textarea
+                value={editCta}
+                onChange={e => setEditCta(e.target.value)}
+                rows={2}
+                className="w-full px-3 py-2 rounded-xl border border-[#22C55E]/40 bg-[#FAFAF8] text-[15px] font-medium text-[#18181B] leading-relaxed focus:outline-none focus:ring-2 focus:ring-[#22C55E]/20 focus:border-[#22C55E] transition-all resize-none"
+              />
+            ) : (
+              <p className="text-[15px] font-medium text-[#18181B] leading-relaxed">{script.cta}</p>
+            )}
           </div>
         </div>
 
@@ -343,10 +432,38 @@ export default function ScriptDetailPage() {
         </details>
       )}
 
+      {/* Start filming — approved scripts only */}
+      {isApproved && !editing && (
+        <div className="animate-fadeInUp mb-4" style={{ animationDelay: '500ms' }}>
+          <a
+            href={`/edit/${script.id}`}
+            className="flex items-center justify-center gap-2 w-full py-3 rounded-xl text-white text-sm font-semibold transition-all"
+            style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+            </svg>
+            Start filming
+          </a>
+        </div>
+      )}
+
       {/* Actions */}
       <div className="animate-fadeInUp space-y-3" style={{ animationDelay: '520ms' }}>
-        {/* Needs revision: show notes + regenerate */}
-        {isNeedsRevision && (
+        {/* Editing: save button replaces everything else */}
+        {editing && (
+          <button
+            onClick={handleSaveEdit}
+            disabled={editSaving || !editHook.trim() || !editBody.trim()}
+            className="w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-40 transition-all cursor-pointer"
+            style={{ background: '#FF4F17', boxShadow: editSaving ? 'none' : '0 4px 14px rgba(255,79,23,0.25)' }}
+          >
+            {editSaving ? 'Saving...' : 'Save changes'}
+          </button>
+        )}
+
+        {/* Normal actions — hidden while editing */}
+        {!editing && isNeedsRevision && (
           <>
             {script.revision_notes && (
               <div className="p-4 rounded-xl bg-[#EEF2FF] border border-[#C7D2FE]">
@@ -375,7 +492,7 @@ export default function ScriptDetailPage() {
         )}
 
         {/* Pending review: approve / revise / reject */}
-        {isPendingReview && (
+        {!editing && isPendingReview && (
           <>
             <div className="flex items-center gap-2 px-1">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
