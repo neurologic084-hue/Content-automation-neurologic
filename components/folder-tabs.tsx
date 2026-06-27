@@ -199,7 +199,7 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
                 {folder.count > 0 && <span style={{ opacity: 0.5 }}>{folder.count}</span>}
               </button>
 
-              {/* 3-dot trigger — always visible, uses portal for dropdown */}
+              {/* 3-dot trigger   always visible, uses portal for dropdown */}
               <button
                 data-folder-dot
                 onClick={e => openMenu(folder.id, e.currentTarget)}
@@ -276,7 +276,7 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
         )}
       </div>
 
-      {/* Portal dropdown — renders at body level, never clipped */}
+      {/* Portal dropdown   renders at body level, never clipped */}
       {mounted && openMenuId && menuPos && activeFolder && createPortal(
         <div
           data-folder-menu

@@ -33,7 +33,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-dvh flex flex-col md:flex-row">
 
-      {/* ── Left panel — dark brand ── */}
+      {/* ── Left panel   dark brand ── */}
       <div
         className="relative flex flex-col justify-between p-10 md:w-1/2 md:min-h-screen overflow-hidden"
         style={{ background: '#0D0D0D' }}
@@ -70,7 +70,7 @@ export default function LoginPage() {
 
         <div />
 
-        {/* Center — hero */}
+        {/* Center   hero */}
         <div className="relative z-10 flex flex-col items-center text-center px-6">
           {/* Logo icon */}
           <div
@@ -137,7 +137,7 @@ export default function LoginPage() {
           </div>
         </div>
 
-        {/* Bottom — phase label */}
+        {/* Bottom   phase label */}
         <div className="relative z-10 text-center">
           <p style={{ color: 'rgba(255,255,255,0.2)', fontSize: 11, letterSpacing: '0.5px' }}>
             Phase 1 · Script Engine
@@ -145,7 +145,7 @@ export default function LoginPage() {
         </div>
       </div>
 
-      {/* ── Right panel — form ── */}
+      {/* ── Right panel   form ── */}
       <div className="flex-1 flex items-center justify-center bg-[#FAFAF9] p-8 md:p-12">
         <div className="w-full max-w-sm">
 

@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
 
   const fewShots = (fewShotsRaw ?? []) as any[]
 
-  // Search the web — dual query: research + viral angle
+  // Search the web   dual query: research + viral angle
   const lane = idea.confirmed_lane as AudienceLane
   const searchResponse = await searchWebEnhanced(idea.raw_idea, lane)
   const searchContext = formatSearchContext(searchResponse)

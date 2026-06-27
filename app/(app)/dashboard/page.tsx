@@ -1,6 +1,8 @@
 import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
 import { TourModal } from '@/components/tour-modal'
+import { TourTriggerButton } from '@/components/tour-trigger-button'
+import { DashboardBg } from '@/components/dashboard-bg'
 
 export default async function DashboardPage() {
   const supabase = await createClient()
@@ -36,14 +38,15 @@ export default async function DashboardPage() {
     burnout_professionals: { bg: '#F4F3F0', text: '#71717A' },
   }
 
-  // Steps for getting started — guide stays until ALL 3 are done
+  // Steps for getting started   guide stays until ALL 3 are done
   const step1Done = hasSettings
   const step2Done = totalIdeas > 0
   const step3Done = totalApproved > 0
   const showGettingStarted = !step1Done || !step2Done || !step3Done
 
   return (
-    <div className="p-4 sm:p-6 md:p-8 max-w-3xl w-full mx-auto space-y-4 sm:space-y-5">
+    <div className="relative p-4 sm:p-6 md:p-8 max-w-3xl w-full mx-auto space-y-4 sm:space-y-5">
+      <DashboardBg />
       <TourModal />
 
       {/* ── Hero banner ── */}
@@ -83,12 +86,15 @@ export default async function DashboardPage() {
           </div>
 
           <p className="text-white/40 text-sm mb-0.5">Good to see you,</p>
-          <h1
-            className="text-white font-extrabold mb-5"
-            style={{ fontSize: 26, fontFamily: 'var(--font-jakarta)', letterSpacing: '-0.5px' }}
-          >
-            {hasSettings ? brandName : 'Creator'}
-          </h1>
+          <div className="flex items-center justify-between gap-3 mb-5">
+            <h1
+              className="text-white font-extrabold"
+              style={{ fontSize: 26, fontFamily: 'var(--font-jakarta)', letterSpacing: '-0.5px' }}
+            >
+              {hasSettings ? brandName : 'Creator'}
+            </h1>
+            <TourTriggerButton />
+          </div>
 
           {/* Inline stats */}
           <div className="flex items-center gap-6">
@@ -160,7 +166,7 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold" style={{ color: step2Done ? '#A1A1AA' : '#18181B', textDecoration: step2Done ? 'line-through' : 'none' }}>Create your first idea</p>
-                <p className="text-xs text-[#A1A1AA]">Type anything — AI picks the audience and writes the script</p>
+                <p className="text-xs text-[#A1A1AA]">Type anything   AI picks the audience and writes the script</p>
               </div>
               {step1Done && !step2Done && (
                 <Link
@@ -186,7 +192,7 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold" style={{ color: step3Done ? '#A1A1AA' : '#18181B', textDecoration: step3Done ? 'line-through' : 'none' }}>Review & approve your first script</p>
-                <p className="text-xs text-[#A1A1AA]">Read, edit if needed, approve — it trains your voice forever</p>
+                <p className="text-xs text-[#A1A1AA]">Read, edit if needed, approve   it trains your voice forever</p>
               </div>
               {step2Done && pendingReview > 0 && (
                 <Link
@@ -219,7 +225,7 @@ export default async function DashboardPage() {
             <p className="font-semibold text-base text-white" style={{ fontFamily: 'var(--font-jakarta)' }}>
               New content idea
             </p>
-            <p className="text-white/70 text-sm mt-0.5">Type anything — AI picks the audience and writes the script</p>
+            <p className="text-white/70 text-sm mt-0.5">Type anything   AI picks the audience and writes the script</p>
           </div>
           <svg className="ml-auto flex-shrink-0 opacity-70 group-hover:translate-x-1 transition-transform" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M9 18l6-6-6-6" />
@@ -299,12 +305,12 @@ export default async function DashboardPage() {
         </div>
       )}
 
-      {/* ── Upcoming features ── */}
+      {/* ── Feature shortcuts ── */}
       <div className="animate-fadeInUp" style={{ animationDelay: '320ms' }}>
-        <p className="text-xs font-bold text-[#A1A1AA] uppercase tracking-widest mb-3">What's coming next</p>
+        <p className="text-xs font-bold text-[#A1A1AA] uppercase tracking-widest mb-3">Your full workflow</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
 
-          {/* Video editing */}
+          {/* Video Studio */}
           <Link
             href="/edit"
             className="bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#6366F1] hover:shadow-sm transition-all duration-150 group hover-lift"
@@ -318,10 +324,10 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1">
                 <p className="font-bold text-sm text-[#18181B] mb-1" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                  Video Editing
+                  Video Studio
                 </p>
                 <ul className="space-y-0.5">
-                  {['AI-assisted cuts & pacing', 'Auto-captions & subtitles', 'B-roll & music suggestions', 'One-click export'].map((f) => (
+                  {['Paste your recording from Google Drive', 'AI cuts, captions & music automatically', 'Optional B-roll from Drive', 'Download or send straight to Publish'].map((f) => (
                     <li key={f} className="text-xs text-[#71717A] flex items-center gap-1.5">
                       <span className="w-1 h-1 rounded-full bg-[#C4C4C0] flex-shrink-0" />
                       {f}
@@ -330,15 +336,15 @@ export default async function DashboardPage() {
                 </ul>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 text-xs font-medium text-[#6366F1] group-hover:gap-2.5 transition-all">
-              Coming soon
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-[#6366F1] group-hover:gap-2.5 transition-all">
+              Open Video Studio
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 18l6-6-6-6" />
               </svg>
             </div>
           </Link>
 
-          {/* Publishing */}
+          {/* Publish */}
           <Link
             href="/publish"
             className="bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#FF4F17] hover:shadow-sm transition-all duration-150 group hover-lift"
@@ -352,37 +358,22 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1">
                 <p className="font-bold text-sm text-[#18181B] mb-2" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                  Multi-Platform Publishing
+                  Publish
                 </p>
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045)' }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
-                      <circle cx="12" cy="12" r="4" />
-                      <circle cx="17.5" cy="6.5" r="1.5" fill="white" stroke="none" />
-                    </svg>
-                  </div>
-                  <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#010101' }}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="white">
-                      <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.89-2.89 2.89 2.89 0 0 1 2.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 0 0-.79-.05 6.34 6.34 0 0 0-6.34 6.34 6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.33-6.34V8.69a8.27 8.27 0 0 0 4.84 1.55V6.79a4.85 4.85 0 0 1-1.07-.1z" />
-                    </svg>
-                  </div>
-                  <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#FF0000' }}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="white">
-                      <path d="M10 15l5.19-3L10 9v6z" />
-                      <path d="M21.56 7.17a2.76 2.76 0 0 0-1.94-1.95C17.88 4.78 12 4.78 12 4.78s-5.88 0-7.62.44A2.76 2.76 0 0 0 2.44 7.17C2 8.91 2 12 2 12s0 3.09.44 4.83a2.76 2.76 0 0 0 1.94 1.95C6.12 19.22 12 19.22 12 19.22s5.88 0 7.62-.44a2.76 2.76 0 0 0 1.94-1.95C22 15.09 22 12 22 12s0-3.09-.44-4.83z" />
-                    </svg>
-                  </div>
-                  <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#0077B5' }}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="white">
-                      <path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z" />
-                      <rect x="2" y="9" width="4" height="12" />
-                      <circle cx="4" cy="4" r="2" />
-                    </svg>
-                  </div>
+                <div className="flex items-center gap-1.5 mb-2">
+                  {[
+                    { bg: 'linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045)', label: 'IG' },
+                    { bg: '#1877F2', label: 'FB' },
+                    { bg: '#010101', label: 'TT' },
+                    { bg: '#FF0000', label: 'YT' },
+                  ].map(p => (
+                    <span key={p.label} className="text-[9px] font-bold text-white px-1.5 py-0.5 rounded-md" style={{ background: p.bg }}>
+                      {p.label}
+                    </span>
+                  ))}
                 </div>
                 <ul className="space-y-0.5">
-                  {['Schedule across all platforms', 'Publish with one click', 'Analytics per platform'].map((f) => (
+                  {['Pick your edited video from the library', 'AI writes platform-specific captions', 'Publish now or schedule for later'].map((f) => (
                     <li key={f} className="text-xs text-[#71717A] flex items-center gap-1.5">
                       <span className="w-1 h-1 rounded-full bg-[#C4C4C0] flex-shrink-0" />
                       {f}
@@ -391,8 +382,8 @@ export default async function DashboardPage() {
                 </ul>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 text-xs font-medium text-[#FF4F17] group-hover:gap-2.5 transition-all">
-              Coming soon
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-[#FF4F17] group-hover:gap-2.5 transition-all">
+              Open Publish
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 18l6-6-6-6" />
               </svg>

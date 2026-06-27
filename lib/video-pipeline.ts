@@ -2,9 +2,9 @@ import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
 
 export interface SubmagicPreset {
-  // Fully autonomous mode — Submagic handles everything (music, B-roll, cuts, style)
+  // Fully autonomous mode   Submagic handles everything (music, B-roll, cuts, style)
   aiEditTemplate?: 'kelly' | 'karl' | 'ella'
-  // Manual mode fields — only used when aiEditTemplate is not set
+  // Manual mode fields   only used when aiEditTemplate is not set
   template?: string
   broll?: boolean
   brollPct?: number   // 0-100, how much of the video to fill with B-roll
@@ -55,7 +55,7 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   {
     id: 'our-v1',
     name: 'Descript Full',
-    description: 'Descript handles everything — cuts, Studio Sound, B-roll, and captions.',
+    description: 'Descript handles everything   cuts, Studio Sound, B-roll, and captions.',
     tool: 'hyperframe',
     order: 1,
     autoStart: false,
@@ -128,7 +128,7 @@ export function extractDriveFileId(url: string): string | null {
   return match?.[1] ?? null
 }
 
-// ── ElevenLabs — Transcription ────────────────────────────────────────────────
+// ── ElevenLabs   Transcription ────────────────────────────────────────────────
 
 export async function transcribeVideo(videoUrl: string): Promise<{
   transcript: string
@@ -165,7 +165,7 @@ export async function transcribeVideo(videoUrl: string): Promise<{
   }
 }
 
-// ── Submagic — Submit full-featured job ───────────────────────────────────────
+// ── Submagic   Submit full-featured job ───────────────────────────────────────
 
 export interface SubmagicJobOptions {
   title: string
@@ -182,7 +182,7 @@ export interface SubmagicJobOptions {
 }
 
 
-// ── Submagic — Fetch first available audio track for music param ──────────────
+// ── Submagic   Fetch first available audio track for music param ──────────────
 
 export async function fetchSubmagicAudioTrack(): Promise<string | null> {
   try {
@@ -201,7 +201,7 @@ export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
 ): Promise<string> {
-  // aiEditTemplate mode: Submagic controls everything — only base fields allowed
+  // aiEditTemplate mode: Submagic controls everything   only base fields allowed
   const body: Record<string, unknown> = opts.aiEditTemplate
     ? {
         title: opts.title,
@@ -245,7 +245,7 @@ export async function submitSubmagicJob(
   return data.id as string
 }
 
-// ── Submagic — Poll job status ────────────────────────────────────────────────
+// ── Submagic   Poll job status ────────────────────────────────────────────────
 
 export async function pollSubmagicJob(projectId: string): Promise<{
   status: 'processing' | 'ready' | 'failed'
@@ -276,9 +276,9 @@ export async function pollSubmagicJob(projectId: string): Promise<{
   }
 }
 
-// ── Google Drive — Verify file is accessible before processing ────────────────
+// ── Google Drive   Verify file is accessible before processing ────────────────
 
-// Validates the Drive share URL has a file ID. No HTTP fetch — Submagic downloads the file itself.
+// Validates the Drive share URL has a file ID. No HTTP fetch   Submagic downloads the file itself.
 export function verifyDriveFile(directUrl: string): { ok: boolean; resolvedUrl: string; error?: string } {
   const fileId = directUrl.match(/[?&]id=([^&]+)/)?.[1]
   if (!fileId) {

@@ -99,17 +99,36 @@ create table if not exists scripts (
 );
 
 -- ─── Video Jobs ──────────────────────────────────────────────────────────────
--- One row per filming session. Holds the state of all 10 rendered variants.
+-- One row per filming session. Holds the state of all rendered variants.
 create table if not exists video_jobs (
   id                uuid        primary key default gen_random_uuid(),
   script_id         uuid        not null references scripts(id) on delete cascade,
   source_drive_url  text        not null,
+  broll_drive_url   text,                          -- optional Google Drive folder/file for custom B-roll
   status            text        not null default 'processing'
                       check (status in ('processing', 'complete', 'failed')),
   variants          jsonb,
   selected_variant  text,
   transcript        text,
   created_at        timestamptz not null default now()
+);
+
+-- ─── Publish Jobs ────────────────────────────────────────────────────────────
+-- One row per multi-platform publish action via Blotato.
+create table if not exists publish_jobs (
+  id              uuid        primary key default gen_random_uuid(),
+  script_id       uuid        references scripts(id) on delete cascade,
+  video_job_id    uuid        references video_jobs(id) on delete set null,
+  variant_id      text,
+  download_url    text        not null,
+  caption         text        not null default '',
+  account_ids     text[]      not null default '{}',
+  platform_posts  jsonb       not null default '[]', -- [{accountId, platform, postId, status, error}]
+  status          text        not null default 'pending'
+                    check (status in ('pending', 'publishing', 'published', 'partial', 'scheduled', 'failed')),
+  scheduled_at    timestamptz,
+  published_at    timestamptz,
+  created_at      timestamptz not null default now()
 );
 
 -- ─── Performance Snapshots (Phase 2 prep) ────────────────────────────────────
@@ -133,6 +152,9 @@ create index if not exists scripts_few_shot_idx    on scripts(is_few_shot) where
 create index if not exists scripts_created_idx     on scripts(created_at desc);
 create index if not exists video_jobs_script_idx   on video_jobs(script_id);
 create index if not exists video_jobs_status_idx   on video_jobs(status);
+create index if not exists publish_jobs_script_idx on publish_jobs(script_id);
+create index if not exists publish_jobs_status_idx on publish_jobs(status);
+create index if not exists publish_jobs_created_idx on publish_jobs(created_at desc);
 
 -- ─── Auto-update updated_at ──────────────────────────────────────────────────
 create or replace function update_updated_at()
@@ -156,6 +178,7 @@ alter table ideas               enable row level security;
 alter table scripts             enable row level security;
 alter table video_jobs          enable row level security;
 alter table analytics_snapshots enable row level security;
+alter table publish_jobs         enable row level security;
 
 -- Drop existing policies before recreating (safe to re-run)
 drop policy if exists "auth_all" on brand_settings;
@@ -163,9 +186,11 @@ drop policy if exists "auth_all" on ideas;
 drop policy if exists "auth_all" on scripts;
 drop policy if exists "auth_all" on video_jobs;
 drop policy if exists "auth_all" on analytics_snapshots;
+drop policy if exists "auth_all" on publish_jobs;
 
 create policy "auth_all" on brand_settings      for all using (auth.role() = 'authenticated');
 create policy "auth_all" on ideas               for all using (auth.role() = 'authenticated');
 create policy "auth_all" on scripts             for all using (auth.role() = 'authenticated');
 create policy "auth_all" on video_jobs          for all using (auth.role() = 'authenticated');
 create policy "auth_all" on analytics_snapshots for all using (auth.role() = 'authenticated');
+create policy "auth_all" on publish_jobs        for all using (auth.role() = 'authenticated');

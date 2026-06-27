@@ -22,7 +22,7 @@ const PLATFORMS: Record<string, {
     color: '#E1306C',
     softLimit: 280,
     maxLimit: 280,
-    hint: 'Max 280 chars — fully visible, no "see more"',
+    hint: 'Max 280 chars   fully visible, no "see more"',
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
@@ -60,7 +60,7 @@ const PLATFORMS: Record<string, {
     color: '#FF0000',
     softLimit: 100,
     maxLimit: 100,
-    hint: 'Max 100 chars — short and descriptive, no hashtags',
+    hint: 'Max 100 chars   short and descriptive, no hashtags',
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
         <path d="M10 15l5.19-3L10 9v6z" />
@@ -417,7 +417,7 @@ function PublishForm() {
         <p className="mt-1 text-sm text-[#71717A]">Post to all connected platforms at once.</p>
       </div>
 
-      {/* Selected video banner — shown when coming from the edit page */}
+      {/* Selected video banner   shown when coming from the edit page */}
       {selectedJob && paramJobId && (
         <div className="bg-[#FFF4F1] border border-[#FFCAB8] rounded-2xl px-5 py-4 mb-4 flex items-start gap-3">
           <div className="w-8 h-8 rounded-xl bg-[#FF4F17] flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -616,7 +616,7 @@ function PublishForm() {
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M20 6L9 17l-5-5" />
                   </svg>
-                  Drive link detected — file must be shared as &ldquo;Anyone with the link&rdquo;
+                  Drive link detected   file must be shared as &ldquo;Anyone with the link&rdquo;
                 </p>
               )}
 
@@ -714,7 +714,7 @@ function PublishForm() {
             <p className={`text-sm font-semibold mb-3 ${allPublished ? 'text-[#15803D]' : 'text-[#92400E]'}`}>
               {result.status === 'published' && 'Published ✓'}
               {result.status === 'scheduled' && 'Scheduled ✓'}
-              {result.status === 'partial' && 'Partially published — some platforms failed'}
+              {result.status === 'partial' && 'Partially published   some platforms failed'}
               {result.status === 'failed' && 'Publish failed'}
             </p>
             <div className="space-y-1.5">

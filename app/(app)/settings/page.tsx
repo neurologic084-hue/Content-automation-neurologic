@@ -212,7 +212,7 @@ export default function SettingsPage() {
 
       <div className="space-y-4">
 
-        {/* 01 — Identity */}
+        {/* 01   Identity */}
         <Section num="01" title="Identity" description="Brand name, location and tagline injected into every hook and CTA.">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label="Brand name" required>
@@ -248,12 +248,12 @@ export default function SettingsPage() {
           </Field>
         </Section>
 
-        {/* 02 — Positioning */}
+        {/* 02   Positioning */}
         <Section num="02" title="Positioning & background" description="Your story, credentials, and what makes your approach different. The AI uses this to add credibility to every hook.">
           <textarea
             value={form.unique_angle}
             onChange={e => set('unique_angle', e.target.value)}
-            placeholder={`I'm a functional neurologist with 12 years in clinical practice. Before starting my own practice I worked at the Seattle Integrative Health Center. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine neurology, lifestyle medicine, and nervous system work — not just symptom management.`}
+            placeholder={`I'm a functional neurologist with 12 years in clinical practice. Before starting my own practice I worked at the Seattle Integrative Health Center. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine neurology, lifestyle medicine, and nervous system work   not just symptom management.`}
             rows={5}
             maxLength={1200}
             className={textareaCls}
@@ -261,7 +261,7 @@ export default function SettingsPage() {
           <p className="text-right text-[11px] text-[#C4C0BB]">{form.unique_angle.length} / 1200</p>
         </Section>
 
-        {/* 03 — Voice */}
+        {/* 03   Voice */}
         <Section
           num="03"
           title="Tone of voice"
@@ -295,7 +295,7 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* 04 — Offerings */}
+        {/* 04   Offerings */}
         <Section
           num="04"
           title="Products & programs"
@@ -357,7 +357,7 @@ export default function SettingsPage() {
           )}
         </Section>
 
-        {/* 05 — Ideal Client */}
+        {/* 05   Ideal Client */}
         <Section num="05" title="Ideal audience" description="Who you are talking to. The more specific this is, the more targeted every hook and CTA becomes.">
           <textarea
             value={form.audience_description}
@@ -370,12 +370,12 @@ export default function SettingsPage() {
           <p className="text-right text-[11px] text-[#C4C0BB]">{form.audience_description.length} / 1500</p>
         </Section>
 
-        {/* 06 — Social Proof */}
+        {/* 06   Social Proof */}
         <Section num="06" title="Results & social proof" description="Real wins from your community. The AI weaves these into scripts as specific, credible proof.">
           <textarea
             value={form.social_proof}
             onChange={e => set('social_proof', e.target.value)}
-            placeholder={`Emily — panic attacks 3x/week, zero after 12 weeks, now off Lexapro with her psychiatrist's sign-off\nSarah, burned-out marketing director — recovered energy in 8 weeks, got promoted 3 months later\n35% of clients report measurable sleep improvement within the first 30 days\n87% of 1:1 clients complete the full 90-day program`}
+            placeholder={`Emily   panic attacks 3x/week, zero after 12 weeks, now off Lexapro with her psychiatrist's sign-off\nSarah, burned-out marketing director   recovered energy in 8 weeks, got promoted 3 months later\n35% of clients report measurable sleep improvement within the first 30 days\n87% of 1:1 clients complete the full 90-day program`}
             rows={6}
             maxLength={1500}
             className={textareaCls}
@@ -383,12 +383,12 @@ export default function SettingsPage() {
           <p className="text-right text-[11px] text-[#C4C0BB]">{form.social_proof.length} / 1500</p>
         </Section>
 
-        {/* 07 — Rules */}
+        {/* 07   Rules */}
         <Section num="07" title="Rules" description="Hard constraints the AI must never break. One rule per line. These override everything else.">
           <textarea
             value={form.extra_context}
             onChange={e => set('extra_context', e.target.value)}
-            placeholder={`Never tell someone to stop their prescribed medication\nNever claim to cure or treat — say "support" or "address"\nNever name-drop other practitioners or compare to competitors\nNever use the word "journey"\nAlways keep an empowering tone — no shame, no catastrophising`}
+            placeholder={`Never tell someone to stop their prescribed medication\nNever claim to cure or treat   say "support" or "address"\nNever name-drop other practitioners or compare to competitors\nNever use the word "journey"\nAlways keep an empowering tone   no shame, no catastrophising`}
             rows={7}
             maxLength={1500}
             className={`${textareaCls} font-mono text-[12px]`}
@@ -399,7 +399,7 @@ export default function SettingsPage() {
               <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
             </svg>
             <p className="text-[12px] text-[#4F52E0] leading-relaxed">
-              Injected at the top of every prompt as non-negotiable constraints — they override tone, style, and everything else.
+              Injected at the top of every prompt as non-negotiable constraints   they override tone, style, and everything else.
             </p>
           </div>
         </Section>
@@ -440,7 +440,7 @@ export default function SettingsPage() {
               : saveState === 'saved'
               ? '✓ Saved'
               : saveState === 'error'
-              ? 'Error — retry'
+              ? 'Error   retry'
               : 'Save settings'}
           </button>
         </div>

@@ -52,7 +52,7 @@ export default async function EditScriptPage({
         </p>
       </div>
 
-      {/* Filming guide — visible before uploading */}
+      {/* Filming guide   visible before uploading */}
       {(script.filming_plan?.shot_type || script.filming_plan?.setup || script.filming_plan?.wardrobe) && (
         <div className="animate-fadeInUp bg-[#FFF4F1] border border-[#FFCAB8] rounded-2xl p-5 mb-4" style={{ animationDelay: '40ms' }}>
           <p className="text-[11px] font-bold text-[#FF4F17] uppercase tracking-widest mb-3">Filming guide</p>

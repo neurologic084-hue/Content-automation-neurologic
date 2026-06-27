@@ -10,7 +10,7 @@ export function PulseLoader({ label = 'Generating...', sublabel }: PulseLoaderPr
     <div className="flex flex-col items-center justify-center gap-5">
       {/* Concentric pulse rings + mountain core */}
       <div className="relative flex items-center justify-center" style={{ width: 88, height: 88 }}>
-        {/* Ring 3 — outermost, slowest */}
+        {/* Ring 3   outermost, slowest */}
         <div
           className="absolute rounded-full animate-ping"
           style={{
@@ -32,7 +32,7 @@ export function PulseLoader({ label = 'Generating...', sublabel }: PulseLoaderPr
             animationDelay: '0.3s',
           }}
         />
-        {/* Ring 1 — innermost */}
+        {/* Ring 1   innermost */}
         <div
           className="absolute rounded-full animate-ping"
           style={{
@@ -42,7 +42,7 @@ export function PulseLoader({ label = 'Generating...', sublabel }: PulseLoaderPr
             animationDuration: '2.4s',
           }}
         />
-        {/* Core icon — gentle pulse */}
+        {/* Core icon   gentle pulse */}
         <div
           className="relative flex items-center justify-center rounded-2xl animate-pulse"
           style={{
@@ -70,7 +70,7 @@ export function PulseLoader({ label = 'Generating...', sublabel }: PulseLoaderPr
   )
 }
 
-// Full-screen overlay — used for the relearning/training moment
+// Full-screen overlay   used for the relearning/training moment
 export function PulseOverlay({ label, sublabel }: PulseLoaderProps) {
   return (
     <div

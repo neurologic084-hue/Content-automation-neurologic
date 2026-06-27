@@ -77,7 +77,7 @@ export default async function LibraryPage({
         </p>
       </div>
 
-      {/* Folder tabs — always shown (includes New folder button) */}
+      {/* Folder tabs   always shown (includes New folder button) */}
       <div className="animate-fadeInUp mb-5" style={{ animationDelay: '60ms' }}>
         <FolderTabs
           folders={(folders ?? []).map(f => ({

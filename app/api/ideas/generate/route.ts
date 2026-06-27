@@ -39,13 +39,13 @@ export async function POST() {
 
   const newsSection =
     news.length > 0
-      ? `RECENT NEWS IN THIS NICHE — use these to inspire fresh, timely angles (you don't have to quote them, just draw on what's new and relevant):
-${news.map((n, i) => `${i + 1}. ${n.title} — ${n.snippet}`).join('\n')}`
+      ? `RECENT NEWS IN THIS NICHE   use these to inspire fresh, timely angles (you don't have to quote them, just draw on what's new and relevant):
+${news.map((n, i) => `${i + 1}. ${n.title}   ${n.snippet}`).join('\n')}`
       : ''
 
   const dedupSection =
     previousIdeas.length > 0
-      ? `ALREADY COVERED — do NOT generate ideas about the same topic or angle as any of these:
+      ? `ALREADY COVERED   do NOT generate ideas about the same topic or angle as any of these:
 ${previousIdeas.slice(0, 30).map((t) => `• ${t}`).join('\n')}`
       : ''
 
@@ -69,7 +69,7 @@ Each idea must follow this exact format:
 - One clear sentence stating what the video is about (the topic and angle)
 - One sentence saying what the viewer will learn or feel by the end
 - Plain, conversational language your ideal client would immediately understand
-- Specific, not generic — not "talk about stress" but "why you feel exhausted all day but suddenly wired at 10pm"
+- Specific, not generic   not "talk about stress" but "why you feel exhausted all day but suddenly wired at 10pm"
 - No internal directions, no "Hook:", no "End with:", no scripting notes
 - No em dashes
 
@@ -85,7 +85,7 @@ Use one of these angles (one per idea, in this order):
 9. Comparison
 10. Personal story
 
-Where possible, tie 3-5 of the ideas to something from the recent news above — a new finding, a trending topic, or a specific claim that the audience would find surprising.
+Where possible, tie 3-5 of the ideas to something from the recent news above   a new finding, a trending topic, or a specific claim that the audience would find surprising.
 
 Respond ONLY with raw JSON, no markdown:
 {"ideas": ["Idea written in plain conversational sentences.", "...", ...10 total]}`

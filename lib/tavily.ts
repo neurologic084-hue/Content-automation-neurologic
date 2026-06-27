@@ -84,7 +84,7 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
         exclude_domains: ['reddit.com', 'quora.com'],
       }),
     }),
-    // Reddit: authentic community language — real words real people use about this problem
+    // Reddit: authentic community language   real words real people use about this problem
     fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -123,7 +123,7 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
   return { query: idea, answer, results }
 }
 
-// Recent news search for idea generation — pulls from niche-specific news sources
+// Recent news search for idea generation   pulls from niche-specific news sources
 export async function searchNicheNews(topics: string): Promise<{ title: string; snippet: string }[]> {
   const apiKey = process.env.TAVILY_API_KEY
   if (!apiKey) return []

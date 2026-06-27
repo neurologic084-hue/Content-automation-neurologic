@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
 
   const now = new Date().toISOString()
 
-  // Scripts require an idea FK — create a stub idea for manually-entered scripts
+  // Scripts require an idea FK   create a stub idea for manually-entered scripts
   const { data: idea, error: ideaError } = await supabase
     .from('ideas')
     .insert({

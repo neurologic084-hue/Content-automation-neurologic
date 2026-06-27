@@ -25,7 +25,7 @@ const LANES: { id: AudienceLane; label: string; description: string; color: stri
   {
     id: 'sympathetic_overdrive',
     label: 'Sympathetic Overdrive',
-    description: 'Adults with anxiety, stress & trauma — mental health is physiologic',
+    description: 'Adults with anxiety, stress & trauma   mental health is physiologic',
     color: '#FF4F17',
     bg: '#FFF3EF',
   },
@@ -153,7 +153,7 @@ export default function NewIdeaPage() {
       if (!res.ok) throw new Error(laneData.error)
       setSuggestion(laneData)
       setSelectedLane(laneData.suggested_lane)
-      // Skip confirmation step — auto-accept AI lane and generate immediately
+      // Skip confirmation step   auto-accept AI lane and generate immediately
       await generateScript(text, laneData.suggested_lane, laneData)
     } catch (err) {
       setError(String(err))
@@ -302,7 +302,7 @@ export default function NewIdeaPage() {
               <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
             </svg>
             <p className="text-xs text-[#A1A1AA]">
-              Once saved, your settings train every future script — you only fill this out once.
+              Once saved, your settings train every future script   you only fill this out once.
             </p>
           </div>
         </div>
@@ -318,7 +318,7 @@ export default function NewIdeaPage() {
           New content idea
         </h1>
         <p className="mt-1 text-sm text-[#71717A]">
-          Type anything — or let AI generate 10 ideas from your brand profile.
+          Type anything   or let AI generate 10 ideas from your brand profile.
         </p>
       </div>
 
@@ -381,7 +381,7 @@ export default function NewIdeaPage() {
               <textarea
                 value={idea}
                 onChange={(e) => setIdea(e.target.value)}
-                placeholder="e.g. A video about why kids with ADHD can't just 'try harder' — and what's actually happening in their nervous system"
+                placeholder="e.g. A video about why kids with ADHD can't just 'try harder'   and what's actually happening in their nervous system"
                 rows={5}
                 className="w-full px-3.5 py-3 rounded-xl border border-[#E4E4E0] bg-[#FAFAF9] text-[#18181B] text-sm placeholder:text-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#FF4F17] focus:border-transparent transition-all resize-none"
                 onKeyDown={(e) => {
@@ -421,7 +421,7 @@ export default function NewIdeaPage() {
             <div className="bg-white border border-[#E4E4E0] rounded-2xl p-6 space-y-5">
               <div>
                 <p className="text-xs font-semibold text-[#A1A1AA] uppercase tracking-wider mb-1">
-                  Paste your own script — skip the AI, go straight to editing
+                  Paste your own script   skip the AI, go straight to editing
                 </p>
               </div>
 
@@ -445,7 +445,7 @@ export default function NewIdeaPage() {
                   Script body <span className="text-[#FF4F17]">*</span>
                 </label>
                 <textarea
-                  placeholder="Paste your full script here. Write it exactly as you'll say it — the pipeline will use this for captions and editing."
+                  placeholder="Paste your full script here. Write it exactly as you'll say it   the pipeline will use this for captions and editing."
                   value={ownBody}
                   onChange={e => setOwnBody(e.target.value)}
                   rows={8}
@@ -460,7 +460,7 @@ export default function NewIdeaPage() {
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. Book a free call — link in bio"
+                  placeholder="e.g. Book a free call   link in bio"
                   value={ownCta}
                   onChange={e => setOwnCta(e.target.value)}
                   className="w-full h-11 px-3.5 rounded-xl border border-[#E4E4E0] bg-[#FAFAF9] text-[#18181B] text-sm placeholder:text-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#FF4F17] focus:border-transparent transition-all"
@@ -542,7 +542,7 @@ export default function NewIdeaPage() {
                       </div>
                       <p className="text-sm font-medium text-[#18181B] mb-1">AI-generated content ideas</p>
                       <p className="text-xs text-[#71717A] leading-relaxed max-w-xs mb-5">
-                        Based on your brand profile, ICP, and positioning — 10 specific ideas across different content angles.
+                        Based on your brand profile, ICP, and positioning   10 specific ideas across different content angles.
                       </p>
                       {ideaGenError && (
                         <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm w-full">
@@ -700,7 +700,7 @@ export default function NewIdeaPage() {
               <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
             </svg>
             <p className="text-xs text-[#71717A] leading-relaxed">
-              If you approve this script, it trains your engine — future scripts will match its style and quality.
+              If you approve this script, it trains your engine   future scripts will match its style and quality.
             </p>
           </div>
 

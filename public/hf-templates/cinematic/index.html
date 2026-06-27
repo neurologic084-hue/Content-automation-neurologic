@@ -2,85 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1080, height=1920" />
   <title>Cinematic Overlay</title>
   <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      width: 1080px;
-      height: 1920px;
-      overflow: hidden;
-      background: transparent;
-      font-family: "Georgia", "Times New Roman", serif;
+    html, body { width: 1080px; height: 1920px; overflow: hidden; background: #000; }
+    #bg-video {
+      position: absolute; top: 0; left: 0;
+      width: 1080px; height: 1920px;
+      object-fit: cover;
     }
-
-    #root {
-      position: relative;
-      width: 1080px;
-      height: 1920px;
-    }
-
-    /* Letterbox bars — top and bottom */
-    #bar-top {
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 140px;
-      background: #000;
-      transform: translateY(-100%);
-    }
-
-    #bar-bottom {
-      position: absolute;
-      bottom: 0; left: 0; right: 0;
-      height: 240px;
-      background: #000;
-      transform: translateY(100%);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0 60px;
-    }
-
-    /* Vignette radial overlay */
-    #vignette {
-      position: absolute;
-      inset: 0;
-      background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.65) 100%);
-      pointer-events: none;
-    }
-
-    /* Cinematic caption inside bottom bar */
-    #caption {
-      font-family: "Georgia", "Times New Roman", serif;
-      font-size: 38px;
-      font-weight: 400;
-      color: rgba(255,255,255,0.92);
-      text-align: center;
-      letter-spacing: 0.04em;
-      line-height: 1.4;
-      font-style: italic;
-      opacity: 0;
-    }
-
-    /* Subtle grain overlay */
-    #grain {
-      position: absolute;
-      inset: 0;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
-      background-size: 256px 256px;
-      pointer-events: none;
-      mix-blend-mode: overlay;
-      opacity: 0.4;
-    }
-
-    /* Color grade overlay — desaturation simulation */
-    #grade {
-      position: absolute;
-      inset: 0;
-      background: rgba(10, 8, 15, 0.18);
-      mix-blend-mode: multiply;
-      pointer-events: none;
+    .scene-layer {
+      position: absolute; top: 0; left: 0;
+      width: 1080px; height: 1920px;
     }
   </style>
 </head>
@@ -93,49 +28,34 @@
     data-start="0"
     data-duration="__VIDEO_DURATION__"
   >
-    <div id="bar-top"    data-track-index="10" data-start="0" data-duration="__VIDEO_DURATION__"></div>
-    <div id="bar-bottom" data-track-index="10" data-start="0" data-duration="__VIDEO_DURATION__">
-      <div id="caption"></div>
-    </div>
-    <div id="vignette"  data-track-index="11" data-start="0" data-duration="__VIDEO_DURATION__"></div>
-    <div id="grain"     data-track-index="12" data-start="0" data-duration="__VIDEO_DURATION__"></div>
-    <div id="grade"     data-track-index="13" data-start="0" data-duration="__VIDEO_DURATION__"></div>
+    <video id="bg-video" src="assets/source.mp4" muted playsinline
+      data-start="0" data-duration="__VIDEO_DURATION__" data-track-index="0"></video>
+    <audio id="bg-audio" src="assets/source.mp4"
+      data-start="0" data-duration="__VIDEO_DURATION__" data-track-index="0" data-volume="1"></audio>
+
+    <div id="overlays-layer" class="scene-layer"
+      data-composition-id="overlays"
+      data-composition-src="compositions/overlays.html"
+      data-start="0" data-duration="__VIDEO_DURATION__"
+      data-track-index="1" data-width="1080" data-height="1920"></div>
+
+    <div id="captions-layer" class="scene-layer"
+      data-composition-id="captions"
+      data-composition-src="compositions/captions.html"
+      data-start="0" data-duration="__VIDEO_DURATION__"
+      data-track-index="2" data-width="1080" data-height="1920"></div>
+
+    <div id="grain-layer" class="scene-layer"
+      data-composition-id="grain-overlay"
+      data-composition-src="compositions/grain-overlay.html"
+      data-start="0" data-duration="__VIDEO_DURATION__"
+      data-track-index="10" data-width="1080" data-height="1920"></div>
 
     <script>
-      const vars = (typeof window.__hyperframes !== 'undefined' && window.__hyperframes.getVariables)
-        ? window.__hyperframes.getVariables()
-        : {};
-
-      const hook = vars.hook || '';
-      const cta  = vars.cta  || '';
-      const dur  = parseFloat('__VIDEO_DURATION__') || 30;
-
-      const captionEl = document.getElementById('caption');
-
-      const tl = gsap.timeline({ paused: true });
-
-      // Letterbox bars slide in
-      tl.to('#bar-top',    { y: 0, duration: 0.8, ease: 'power3.out' }, 0);
-      tl.to('#bar-bottom', { y: 0, duration: 0.8, ease: 'power3.out' }, 0);
-
-      // Vignette fades in
-      tl.from('#vignette', { opacity: 0, duration: 1.2, ease: 'power2.out' }, 0);
-
-      // Hook caption
-      if (hook) {
-        captionEl.textContent = hook;
-        tl.to('#caption', { opacity: 1, duration: 0.8, ease: 'power2.out' }, 1);
-        tl.to('#caption', { opacity: 0, duration: 0.5, ease: 'power2.in' }, dur * 0.5);
-      }
-
-      // CTA at end
-      if (cta) {
-        tl.call(() => { captionEl.textContent = cta; }, [], dur * 0.8);
-        tl.to('#caption', { opacity: 1, duration: 0.6, ease: 'power2.out' }, dur * 0.8);
-      }
-
       window.__timelines = window.__timelines || {};
-      window.__timelines['cinematic'] = tl;
+      var mainTl = gsap.timeline({ paused: true });
+      mainTl.set({}, {}, __VIDEO_DURATION__);
+      window.__timelines['cinematic'] = mainTl;
     </script>
   </div>
 </body>

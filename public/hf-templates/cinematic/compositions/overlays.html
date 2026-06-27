@@ -1,0 +1,36 @@
+<template id="overlays-template">
+  <div
+    data-composition-id="overlays"
+    data-start="0"
+    data-width="1080"
+    data-height="1920"
+    data-duration="__VIDEO_DURATION__"
+  >
+    <div id="vignette"></div>
+
+    <style>
+      [data-composition-id="overlays"] {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      [data-composition-id="overlays"] #vignette {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.55) 100%);
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function() {
+        var dur = __VIDEO_DURATION__;
+        var tl  = gsap.timeline({ paused: true });
+        tl.from('[data-composition-id="overlays"] #vignette', { opacity: 0, duration: 1.0, ease: 'power2.out' }, 0);
+        tl.set({}, {}, dur);
+        window.__timelines = window.__timelines || {};
+        window.__timelines['overlays'] = tl;
+      })();
+    </script>
+  </div>
+</template>

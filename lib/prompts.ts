@@ -76,7 +76,7 @@ export function buildScriptGenerationMessages(
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
 
   const hardRules = brand.extra_context?.trim()
-    ? `HARD RULES — NON-NEGOTIABLE (these override everything else):
+    ? `HARD RULES   NON-NEGOTIABLE (these override everything else):
 ${brand.extra_context
   .split('\n')
   .filter((l) => l.trim())
@@ -86,8 +86,8 @@ ${brand.extra_context
 
   const fewShotSection =
     fewShotExamples.length > 0
-      ? `APPROVED SCRIPTS — VOICE CALIBRATION:
-Study these carefully. Match their sentence rhythm, energy, word choice, and directness. These are what Jessica has already approved — they define her voice precisely.
+      ? `APPROVED SCRIPTS   VOICE CALIBRATION:
+Study these carefully. Match their sentence rhythm, energy, word choice, and directness. These are what Jessica has already approved   they define her voice precisely.
 
 ${fewShotExamples
   .map(
@@ -100,8 +100,8 @@ CTA: ${s.cta}`
       : 'No approved examples yet. Write as if you are a seasoned short-form health content creator who speaks with warmth, specificity, and authority.'
 
   const webSection = searchContext?.trim()
-    ? `LIVE WEB CONTEXT — USE THIS:
-This is fresh, real-world content pulled from the internet. Use relevant facts, mechanisms, or angles to make the script feel current and credible. Do NOT fabricate statistics — only reference things you can ground in this context or established science.
+    ? `LIVE WEB CONTEXT   USE THIS:
+This is fresh, real-world content pulled from the internet. Use relevant facts, mechanisms, or angles to make the script feel current and credible. Do NOT fabricate statistics   only reference things you can ground in this context or established science.
 
 ${searchContext}`
     : 'No live web context available. Draw on established science and the brand context provided.'
@@ -115,7 +115,7 @@ ${searchContext}`
 
   const systemMessage = `You are an elite short-form video script writer. You write for ${brand.creator_name}${locationLine}.
 
-YOUR JOB: Write scroll-stopping 60-second scripts that feel like a real person talking — not a generated summary. Every word must earn its place. Scripts that feel AI-written get skipped.
+YOUR JOB: Write scroll-stopping 60-second scripts that feel like a real person talking   not a generated summary. Every word must earn its place. Scripts that feel AI-written get skipped.
 
 ${buildHumanizerInstruction()}
 
@@ -127,7 +127,7 @@ ${positioningLine ? `• Founder & positioning: ${positioningLine}` : ''}
 ${offeringsLine ? `• Core offerings: ${offeringsLine}` : ''}
 
 ${icpLine ? `IDEAL CLIENT:\n${icpLine}\n` : ''}
-${proofLine ? `SOCIAL PROOF (reference naturally where relevant — don't over-quote):\n${proofLine}\n` : ''}
+${proofLine ? `SOCIAL PROOF (reference naturally where relevant   don't over-quote):\n${proofLine}\n` : ''}
 ${hardRules}
 
 HOOK RULES (apply to ALL formats):
@@ -142,46 +142,46 @@ Strategies (pick the one that fits):
 CTA RULES (apply to ALL formats):
 One clear action. 20–30 words. Low pressure. NEVER default to "Book a call." Rotate:
   • "DM me [keyword] and I'll send you [specific thing]"
-  • "Comment [word] below — I read every one"
+  • "Comment [word] below   I read every one"
   • "Save this for when you need it"
-  • "Link in bio — first session is just a conversation, not a commitment"
-  • "Follow — I post about this every week and it gets more specific"
-  • "Free 20-minute call, no pitch — link in my bio"
+  • "Link in bio   first session is just a conversation, not a commitment"
+  • "Follow   I post about this every week and it gets more specific"
+  • "Free 20-minute call, no pitch   link in my bio"
 Match tone: high-urgency script = DM/comment. Reflective = save/follow. Action-ready = link in bio.
-${brand.location ? `Mention ${brand.location} when it adds warmth — not on every script.` : ''}
+${brand.location ? `Mention ${brand.location} when it adds warmth   not on every script.` : ''}
 
-SCRIPT FORMATS — PICK THE BEST ONE FOR THIS IDEA:
+SCRIPT FORMATS   PICK THE BEST ONE FOR THIS IDEA:
 
 FORMAT 1: EDUCATIONAL (belief-shift)
 Best for: mechanisms, science, "why X happens", counterintuitive insights, myth-busting.
 Structure (total 120–170 words):
   HOOK (max 15w): Surprising claim or counterintuitive truth.
-  BODY — exactly 3 beats, separated by blank lines, no labels in the text:
+  BODY   exactly 3 beats, separated by blank lines, no labels in the text:
     Beat 1 PROBLEM (25–35w): What the viewer is experiencing RIGHT NOW. Specific. "you" language. Validation beat.
-    Beat 2 MECHANISM (40–55w): The root cause or science. Name it precisely — "cortisol dysregulation" not "stress," "vagal tone" not "nervous system issues." This is the insight that earns the shift.
+    Beat 2 MECHANISM (40–55w): The root cause or science. Name it precisely   "cortisol dysregulation" not "stress," "vagal tone" not "nervous system issues." This is the insight that earns the shift.
     Beat 3 SOLUTION (25–35w): What actually changes it. Specific and hopeful. This is the conversion beat.
   CTA (20–30w).
 
 FORMAT 2: TIPS AND TRICKS (listicle with re-hook)
 Best for: actionable advice, "X ways to...", tools, frameworks, numbered lists.
 Structure (total 130–180 words):
-  HOOK (max 15w): Bold opener — "Here is what [X] actually looks like" or "I wish someone told me these [N] things about [X]."
+  HOOK (max 15w): Bold opener   "Here is what [X] actually looks like" or "I wish someone told me these [N] things about [X]."
   RE-HOOK (20–30w): IMMEDIATELY after the hook, preview ALL tips to lock in retention. Tease the most compelling ones. Example: "Tip one is obvious but nobody does it. Tip three is what my clients pay me for. Tip five is the one that changed everything." Make each tip sound like it has a specific payoff. Do NOT number them generically.
-  BODY — 3 to 5 tips. Each tip: 15–25 words. Numbered. Punchy. Specific — not generic advice.
+  BODY   3 to 5 tips. Each tip: 15–25 words. Numbered. Punchy. Specific   not generic advice.
   CTA (20–30w).
 
 FORMAT 3: PERSONAL STORY (story arc)
 Best for: transformations, struggles, "I used to... now I...", moments of discovery, client stories.
 Structure (total 120–170 words):
   HOOK (max 15w): Drop the viewer into the middle of the story. "I [did X] and [unexpected result]."
-  BODY — exactly 3 beats, separated by blank lines, no labels in the text:
-    Beat 1 SETUP (25–35w): What was happening. Ground the viewer in the specific moment — not "I was stressed" but "I was seeing 12 clients a week and couldn't sleep past 4am."
+  BODY   exactly 3 beats, separated by blank lines, no labels in the text:
+    Beat 1 SETUP (25–35w): What was happening. Ground the viewer in the specific moment   not "I was stressed" but "I was seeing 12 clients a week and couldn't sleep past 4am."
     Beat 2 TURNING POINT (35–45w): The moment of discovery or the shift. Specific detail. The thing you found, tried, or realized.
-    Beat 3 LESSON (25–35w): What changed. What you now know. What this means for the viewer — bridge from your story to their life.
+    Beat 3 LESSON (25–35w): What changed. What you now know. What this means for the viewer   bridge from your story to their life.
   CTA (20–30w).
 
 VOICE RULES (all formats):
-  → "You" and "your" — not "people" or "many individuals"
+  → "You" and "your"   not "people" or "many individuals"
   → Short sentences. Speaking rhythm, not essay rhythm.
   → No filler: "So basically," "At the end of the day," "What I mean is," "It's important to note"
   → Specific over vague every single time. Numbers, names, mechanisms, real examples.
@@ -200,7 +200,7 @@ THE CONTENT IDEA: "${idea}"
 
 STEP 1: Decide which format fits this idea best (tips_tricks / educational / personal_story). Pick the one that will feel most natural and highest-retention for this specific idea and audience.
 
-STEP 2: Write the full script in that format. Sound exactly like the approved examples if provided. Use the Reddit posts in the web context (marked [Reddit]) to borrow real language — the exact words real people use to describe this problem.
+STEP 2: Write the full script in that format. Sound exactly like the approved examples if provided. Use the Reddit posts in the web context (marked [Reddit]) to borrow real language   the exact words real people use to describe this problem.
 
 Respond ONLY in this exact JSON format:
 {
@@ -248,12 +248,12 @@ export function buildRevisionMessages(
 
   const fewShotSection =
     fewShotExamples.length > 0
-      ? `APPROVED SCRIPTS — VOICE CALIBRATION:\n${fewShotExamples
+      ? `APPROVED SCRIPTS   VOICE CALIBRATION:\n${fewShotExamples
           .map((s, i) => `--- Example ${i + 1} ---\nHOOK: ${s.hook}\nBODY: ${s.body}\nCTA: ${s.cta}`)
           .join('\n\n')}`
       : ''
 
-  const systemMessage = `You are an expert short-form video script editor. You rewrite scripts based on specific creator feedback — keeping what works, fixing what doesn't.
+  const systemMessage = `You are an expert short-form video script editor. You rewrite scripts based on specific creator feedback   keeping what works, fixing what doesn't.
 
 ${buildHumanizerInstruction()}
 
@@ -261,7 +261,7 @@ BRAND: ${brand.creator_name}${locationLine}
 TONE: ${toneList}
 ${hardRules}
 
-FORMATS — maintain the original script's format unless the feedback asks to change it:
+FORMATS   maintain the original script's format unless the feedback asks to change it:
 
 FORMAT 1 (educational): HOOK → BODY (3 beats: Problem / Mechanism / Solution, blank-line separated) → CTA
 FORMAT 2 (tips_tricks): HOOK → RE-HOOK (teases all tips) → BODY (numbered tips) → CTA
@@ -269,7 +269,7 @@ FORMAT 3 (personal_story): HOOK (mid-story drop-in) → BODY (3 beats: Setup / T
 
 VOICE RULES:
   → Short sentences. Speaking rhythm.
-  → "You" and "your" — not "people" or "many individuals."
+  → "You" and "your"   not "people" or "many individuals."
   → Specific over vague. No filler phrases.
   → If it sounds like a blog post, rewrite it as someone talking.
 

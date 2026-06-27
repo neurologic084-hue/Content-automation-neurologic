@@ -57,6 +57,16 @@ const TABS = [
       </svg>
     ),
   },
+  {
+    href: '/publish',
+    label: 'Publish',
+    icon: (active: boolean) => (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active ? 2.5 : 2} strokeLinecap="round" strokeLinejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13" />
+        <polygon points="22 2 15 22 11 13 2 9 22 2" fill={active ? 'currentColor' : 'none'} />
+      </svg>
+    ),
+  },
 ]
 
 export function BottomNav() {

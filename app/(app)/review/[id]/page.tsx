@@ -89,7 +89,7 @@ export default function ScriptDetailPage() {
       router.push(`/review/${script_id}`)
     } else {
       setSaving(false)
-      setRevisionError('Revision saved. Generation failed — try again from the review queue.')
+      setRevisionError('Revision saved. Generation failed   try again from the review queue.')
       router.push('/review')
     }
   }
@@ -178,7 +178,7 @@ export default function ScriptDetailPage() {
 
   return (
     <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
-      {/* Relearning overlay — shown briefly after approving */}
+      {/* Relearning overlay   shown briefly after approving */}
       {training && (
         <PulseOverlay
           label="Training your engine..."
@@ -198,7 +198,7 @@ export default function ScriptDetailPage() {
         {isApproved ? 'Library' : 'Review queue'}
       </button>
 
-      {/* Start filming banner — top of page for approved scripts */}
+      {/* Start filming banner   top of page for approved scripts */}
       {isApproved && !editing && (
         <div className="animate-fadeInUp mb-5" style={{ animationDelay: '40ms' }}>
           <a
@@ -295,10 +295,10 @@ export default function ScriptDetailPage() {
         </div>
       )}
 
-      {/* Script — numbered beats, no dividers */}
+      {/* Script   numbered beats, no dividers */}
       <div className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl mb-5 px-4 sm:px-6 py-4 sm:py-5 space-y-5 sm:space-y-6" style={{ animationDelay: '120ms' }}>
 
-        {/* 1 — Hook */}
+        {/* 1   Hook */}
         <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '160ms' }}>
           <div
             className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
@@ -330,7 +330,7 @@ export default function ScriptDetailPage() {
           </div>
         </div>
 
-        {/* Re-hook — tips & tricks only */}
+        {/* Re-hook   tips & tricks only */}
         {!editing && script.filming_plan?.re_hook && (
           <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '190ms' }}>
             <div
@@ -487,7 +487,7 @@ export default function ScriptDetailPage() {
           </button>
         )}
 
-        {/* Normal actions — hidden while editing */}
+        {/* Normal actions   hidden while editing */}
         {!editing && isNeedsRevision && (
           <>
             {script.revision_notes && (
@@ -523,7 +523,7 @@ export default function ScriptDetailPage() {
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
               </svg>
-              <p className="text-xs text-[#A1A1AA]">Approving this script trains your engine — future scripts will match its style.</p>
+              <p className="text-xs text-[#A1A1AA]">Approving this script trains your engine   future scripts will match its style.</p>
             </div>
 
             {showRevisionInput ? (

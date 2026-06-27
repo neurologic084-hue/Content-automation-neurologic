@@ -116,7 +116,7 @@ export const LANE_LABELS: Record<AudienceLane, string> = {
 
 export const LANE_DESCRIPTIONS: Record<AudienceLane, string> = {
   adhd_parents: 'Parents seeking natural, functional approaches for their child',
-  sympathetic_overdrive: 'Adults with anxiety, stress and trauma — mental health is physiologic',
+  sympathetic_overdrive: 'Adults with anxiety, stress and trauma   mental health is physiologic',
   burnout_professionals: 'High-performing Seattle professionals who need to slow their brain down',
 }
 
@@ -124,6 +124,31 @@ export const LANE_COLORS: Record<AudienceLane, string> = {
   adhd_parents: '#6366F1',
   sympathetic_overdrive: '#FF4F17',
   burnout_professionals: '#18181B',
+}
+
+export type PublishStatus = 'pending' | 'publishing' | 'published' | 'partial' | 'scheduled' | 'failed'
+
+export interface PlatformPost {
+  accountId: string
+  platform: string
+  postId: string | null
+  status: 'published' | 'scheduled' | 'failed'
+  error: string | null
+}
+
+export interface PublishJob {
+  id: string
+  script_id: string | null
+  video_job_id: string | null
+  variant_id: string | null
+  download_url: string
+  caption: string
+  account_ids: string[]
+  platform_posts: PlatformPost[]
+  status: PublishStatus
+  scheduled_at: string | null
+  published_at: string | null
+  created_at: string
 }
 
 export const STATUS_COLORS: Record<ScriptStatus, string> = {

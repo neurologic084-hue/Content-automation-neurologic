@@ -219,7 +219,7 @@ async function getVideoStreamDuration(filePath: string): Promise<number> {
 // ── Background music via ElevenLabs Sound Generation ─────────────────────────
 
 // Derive a music prompt from the video's hook using a fast AI call.
-// This makes music match the actual content — calm for a reflective video, upbeat for energetic, etc.
+// This makes music match the actual content   calm for a reflective video, upbeat for energetic, etc.
 async function deriveMusicPrompt(hook: string): Promise<string> {
   const fallback = 'subtle ambient background music with soft piano, slow tempo, no vocals, designed for spoken word video'
   if (!hook) return fallback
@@ -242,7 +242,7 @@ async function deriveMusicPrompt(hook: string): Promise<string> {
 
 async function generateBackgroundMusic(hook: string): Promise<string | null> {
   const key = process.env.ELEVENLABS_API_KEY
-  if (!key) { console.warn('[motion-renderer] ELEVENLABS_API_KEY not set — skipping music'); return null }
+  if (!key) { console.warn('[motion-renderer] ELEVENLABS_API_KEY not set   skipping music'); return null }
   const prompt = process.env.BACKGROUND_MUSIC_PROMPT || await deriveMusicPrompt(hook)
   console.log(`[motion-renderer] generating background music: "${prompt.slice(0, 80)}..."`)
   try {
@@ -347,7 +347,7 @@ async function listBRollFiles(driveUrl: string): Promise<{ url: string; name: st
 
   const apiKey = process.env.GOOGLE_DRIVE_API_KEY
   if (!apiKey) {
-    console.warn('[motion-renderer] GOOGLE_DRIVE_API_KEY not set — cannot list Drive folder, skipping B-roll')
+    console.warn('[motion-renderer] GOOGLE_DRIVE_API_KEY not set   cannot list Drive folder, skipping B-roll')
     return []
   }
 
@@ -403,7 +403,7 @@ async function findBRollInsertionPoints(
   videoPath: string,
 ): Promise<{ insertAt: number; duration: number }[]> {
   const totalDuration = await getVideoDuration(videoPath)
-  // One clip only, placed at the single best pause — short and purposeful
+  // One clip only, placed at the single best pause   short and purposeful
   const CLIP_MAX = 2.5
   const maxInsertions = 1
 
@@ -521,7 +521,7 @@ async function insertCustomBRoll(
 }
 
 // Main pipeline:
-//   V1: Descript single pass — cuts + Studio Sound + B-roll + captions
+//   V1: Descript single pass   cuts + Studio Sound + B-roll + captions
 //   V2: Descript cuts only → ZapCap captions + B-roll
 async function renderSmartCinematic(
   jobId: string,
@@ -542,7 +542,7 @@ async function renderSmartCinematic(
   try {
     cleanTempFiles(outDir, variantId)
 
-    // Cache key includes Descript options — V1 (broll+captions) and V2 (clean) are different outputs.
+    // Cache key includes Descript options   V1 (broll+captions) and V2 (clean) are different outputs.
     // Promise stored while running so concurrent variants wait instead of launching duplicates.
     const cacheKey = `${jobId}:${descriptBroll ? 'b' : ''}${descriptCaptions ? 'c' : ''}`
     const existing = descriptUrlCache.get(cacheKey)

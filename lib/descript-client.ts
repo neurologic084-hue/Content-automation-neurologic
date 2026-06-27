@@ -47,7 +47,7 @@ async function pollJob(jobId: string, intervalMs = 8_000, maxAttempts = 90) {
 }
 
 // Download a Google Drive (or any) URL to a local temp file, following all redirects.
-// Drive shows a virus-scan HTML warning for large files — we follow through it.
+// Drive shows a virus-scan HTML warning for large files   we follow through it.
 async function downloadToTemp(sourceUrl: string): Promise<{ filePath: string; fileSize: number }> {
   // Convert Drive share URL to direct download
   let url = sourceUrl
@@ -124,8 +124,8 @@ async function agentEdit(
   const { broll = false, captions = false } = opts
   console.log(`[descript] agent edit project=${projectId} broll=${broll} captions=${captions}`)
   const extras = [
-    broll ? 'Insert relevant stock B-roll footage covering 20-25% of the video total. Place it only at sentence endings, topic transitions, and moments where a visual would reinforce the message. Before every B-roll clip, use a short smooth cross-dissolve transition under 300 milliseconds — never cut directly from the speaker to B-roll without one. Fewer, well-placed clips are better than frequent ones — 3 perfect placements beat 8 generic ones. Do not overlay B-roll while the speaker is mid-sentence.' : '',
-    captions ? 'Add bold word-level captions styled for viral short-form video. Position captions in the lower center of the frame — around 65-70% down from the top — so they sit below the speaker\'s face without covering it. Never place captions in the dead center of the screen where they block the face. Show 2-4 words at a time in large, high-contrast text. Bold or enlarge the single most impactful word in each phrase — never bold full lines, only the key word. Match timing exactly word-by-word. Style like TikTok and Instagram Reels: punchy, readable at a glance, and energetic. Vary the emphasis and sizing throughout to match the speaker\'s intensity.' : '',
+    broll ? 'Insert relevant stock B-roll footage covering 20-25% of the video total. Place it only at sentence endings, topic transitions, and moments where a visual would reinforce the message. Before every B-roll clip, use a short smooth cross-dissolve transition under 300 milliseconds   never cut directly from the speaker to B-roll without one. Fewer, well-placed clips are better than frequent ones   3 perfect placements beat 8 generic ones. Do not overlay B-roll while the speaker is mid-sentence.' : '',
+    captions ? 'Add bold word-level captions styled for viral short-form video. Position captions in the lower center of the frame   around 65-70% down from the top   so they sit below the speaker\'s face without covering it. Never place captions in the dead center of the screen where they block the face. Show 2-4 words at a time in large, high-contrast text. Bold or enlarge the single most impactful word in each phrase   never bold full lines, only the key word. Match timing exactly word-by-word. Style like TikTok and Instagram Reels: punchy, readable at a glance, and energetic. Vary the emphasis and sizing throughout to match the speaker\'s intensity.' : '',
     !broll ? 'Do not add B-roll.' : '',
     !captions ? 'Do not add captions.' : '',
     'Do not add music.',
@@ -133,7 +133,7 @@ async function agentEdit(
   const res = await req('POST', '/jobs/agent', {
     project_id: projectId,
     composition_id: compositionId,
-    prompt: 'Remove all filler words, cut silences longer than half a second, and remove all bad takes and false starts. When making each cut, always leave at least 100 milliseconds of audio before the next spoken word so the beginning of words are never clipped. Never cut the end of the video — after the last spoken word, hold the video for at least 300 milliseconds before ending so the video and audio finish together and there is no black screen while audio is still playing. Apply Studio Sound to enhance the audio and focus on the speaker\'s voice while removing background noise. ' + extras,
+    prompt: 'Remove all filler words, cut silences longer than half a second, and remove all bad takes and false starts. When making each cut, always leave at least 100 milliseconds of audio before the next spoken word so the beginning of words are never clipped. Never cut the end of the video   after the last spoken word, hold the video for at least 300 milliseconds before ending so the video and audio finish together and there is no black screen while audio is still playing. Apply Studio Sound to enhance the audio and focus on the speaker\'s voice while removing background noise. ' + extras,
   })
   await pollJob(res.job_id)
 }

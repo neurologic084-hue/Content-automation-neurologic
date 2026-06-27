@@ -151,7 +151,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
         )}
       </button>
 
-      {/* Dropdown — portaled to body so it escapes card stacking context */}
+      {/* Dropdown   portaled to body so it escapes card stacking context */}
       {mounted && menuOpen && menuPos && createPortal(
         <div
           data-script-menu
@@ -209,7 +209,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
         document.body
       )}
 
-      {/* Folder picker — portaled to body */}
+      {/* Folder picker   portaled to body */}
       {mounted && showFolderModal && createPortal(
         <div
           className="fixed inset-0 flex items-center justify-center p-4 animate-fadeIn"

@@ -57,19 +57,19 @@ export const BANNED_STRUCTURAL_PHRASES = [
 export function buildHumanizerInstruction(): string {
   const allBanned = [...BANNED_VERBS, ...BANNED_INTENSIFIERS, ...BANNED_ABSTRACT]
 
-  return `VOICE RULES — NON-NEGOTIABLE:
+  return `VOICE RULES   NON-NEGOTIABLE:
 
 PUNCTUATION (hard rules):
-- Zero em dashes (—). Zero en dashes (–). Zero double-hyphens (--). Use a comma, period, semicolon, or rewrite the sentence.
+- Zero em dashes ( ). Zero en dashes (–). Zero double-hyphens (--). Use a comma, period, semicolon, or rewrite the sentence.
 - Straight quotes only. No curly/smart quotes.
 
-BANNED WORDS — never use:
+BANNED WORDS   never use:
 ${allBanned.join(', ')}
 
-BANNED TRANSITIONS — use a period or restructure:
+BANNED TRANSITIONS   use a period or restructure:
 ${BANNED_TRANSITIONS.join(', ')}
 
-BANNED ADVERBS — cut them:
+BANNED ADVERBS   cut them:
 ${BANNED_ADVERBS.join(', ')}
 
 BANNED HOLLOW PHRASES:
@@ -79,12 +79,12 @@ BANNED STRUCTURAL PHRASES:
 ${BANNED_STRUCTURAL_PHRASES.join(', ')}
 
 STRUCTURAL RULES:
-- No forced contrasts: "Not only X, but Y" or "It's not just X, it's Y" — state both points plainly.
-- No rhetorical Q&A scaffolding: "So what does this mean? It means..." — just say it.
+- No forced contrasts: "Not only X, but Y" or "It's not just X, it's Y"   state both points plainly.
+- No rhetorical Q&A scaffolding: "So what does this mean? It means..."   just say it.
 - No rule-of-three forced groupings. Use two or four if that's more natural.
 - Vary sentence length. Short punches (under 8 words) mixed with longer sentences (20+). No 12-18 word rhythm lock.
 - Simple verbs: "is" not "serves as", "has" not "boasts", "shows" not "highlights".
 - Name specific things. Never write vague claims like "the implications are significant" or "the stakes are high".
-- No vague sources: "experts say", "studies show", "research suggests" — cite a specific source or cut the claim.
+- No vague sources: "experts say", "studies show", "research suggests"   cite a specific source or cut the claim.
 - No paragraph-ending profundity. Let facts land. Cut dramatic upswings.`
 }

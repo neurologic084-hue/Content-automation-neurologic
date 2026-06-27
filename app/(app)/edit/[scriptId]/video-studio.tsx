@@ -69,7 +69,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
         if (pollRef.current) clearInterval(pollRef.current)
       }
     } catch {
-      // silent — will retry
+      // silent   will retry
     }
   }
 
@@ -214,7 +214,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
           <div className="mb-4">
             <p className="text-xs font-semibold text-[#71717A] mb-1.5">
-              Custom B-roll <span className="font-normal text-[#A1A1AA]">(optional) — Drive file or folder link</span>
+              Custom B-roll <span className="font-normal text-[#A1A1AA]">(optional)   Drive file or folder link</span>
             </p>
             <input
               type="url"

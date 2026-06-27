@@ -60,21 +60,19 @@ const NAV = [
       </svg>
     ),
   },
-]
-
-const COMING_NAV = [
   {
     href: '/publish',
     label: 'Publish',
-    phase: '3',
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M22 2L11 13" />
-        <path d="M22 2L15 22 11 13 2 9l20-7z" />
+        <line x1="22" y1="2" x2="11" y2="13" />
+        <polygon points="22 2 15 22 11 13 2 9 22 2" />
       </svg>
     ),
   },
 ]
+
+const COMING_NAV: typeof NAV = []
 
 export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
   const pathname = usePathname()
@@ -173,31 +171,6 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
           })}
         </div>
 
-        {/* Coming soon */}
-        <div className="mt-5">
-          <p className="px-3 mb-1.5 text-[9px] font-semibold uppercase tracking-[0.13em]" style={{ color: '#C4C0BB' }}>
-            Coming next
-          </p>
-          {COMING_NAV.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(item.href + '/')
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={[
-                  'flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-150',
-                  active ? 'bg-[#F5F4F2] text-[#BFBCB8]' : 'text-[#BFBCB8] hover:bg-[#F7F5F3] hover:text-[#9B9894]',
-                ].join(' ')}
-              >
-                <span className="flex-shrink-0">{item.icon}</span>
-                <span className="flex-1 truncate">{item.label}</span>
-                <span className="flex-shrink-0 text-[9px] font-semibold tracking-wide" style={{ color: '#D0CDC9' }}>
-                  Soon
-                </span>
-              </Link>
-            )
-          })}
-        </div>
 
       </nav>
 
