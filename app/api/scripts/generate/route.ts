@@ -95,7 +95,11 @@ export async function POST(req: NextRequest) {
       body: generated.body,
       cta: generated.cta,
       full_script: generated.full_script,
-      filming_plan: generated.filming_plan,
+      filming_plan: {
+        ...((generated.filming_plan as object) ?? {}),
+        script_format: (generated as any).script_format ?? 'educational',
+        re_hook: (generated as any).re_hook ?? '',
+      },
       mood_tag: generated.mood_tag,
       why_this_works: generated.why_this_works,
       search_context: searchResponse

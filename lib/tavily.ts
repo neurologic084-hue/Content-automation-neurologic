@@ -59,7 +59,7 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
 
   const context = laneContext[lane] || 'wellness functional medicine'
 
-  const [researchRes, viralRes] = await Promise.allSettled([
+  const [researchRes, viralRes, redditRes] = await Promise.allSettled([
     fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -80,8 +80,21 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
         query: `viral short form video content "${idea}" trending health wellness creator hook`,
         search_depth: 'basic',
         include_answer: false,
-        max_results: 4,
+        max_results: 3,
         exclude_domains: ['reddit.com', 'quora.com'],
+      }),
+    }),
+    // Reddit: authentic community language — real words real people use about this problem
+    fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query: `${idea} ${context}`,
+        search_depth: 'basic',
+        include_answer: false,
+        max_results: 4,
+        include_domains: ['reddit.com'],
       }),
     }),
   ])
@@ -98,6 +111,11 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
   if (viralRes.status === 'fulfilled' && viralRes.value.ok) {
     const data: TavilyResponse = await viralRes.value.json()
     results.push(...data.results)
+  }
+
+  if (redditRes.status === 'fulfilled' && redditRes.value.ok) {
+    const data: TavilyResponse = await redditRes.value.json()
+    results.push(...data.results.map(r => ({ ...r, title: `[Reddit] ${r.title}` })))
   }
 
   if (!results.length) return null

@@ -173,6 +173,8 @@ export default function ScriptDetailPage() {
 
   const bodyBeats = (script.body || '').split(/\n\n+/).filter(Boolean)
   const customLabels = script.filming_plan?.body_labels ?? []
+  const hasReHook = !!(script.filming_plan?.re_hook)
+  const beatNumberOffset = hasReHook ? 3 : 2
 
   return (
     <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
@@ -328,7 +330,26 @@ export default function ScriptDetailPage() {
           </div>
         </div>
 
-        {/* 2–4 — Body beats */}
+        {/* Re-hook — tips & tricks only */}
+        {!editing && script.filming_plan?.re_hook && (
+          <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '190ms' }}>
+            <div
+              className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
+              style={{ background: '#F59E0B' }}
+            >
+              2
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-baseline gap-2 mb-1.5">
+                <span className="text-[11px] font-semibold text-[#F59E0B] tracking-wide">Re-hook</span>
+                <span className="text-[10px]" style={{ color: '#C4C0BB' }}>3–8s</span>
+              </div>
+              <p className="text-[15px] text-[#18181B] leading-relaxed">{script.filming_plan.re_hook}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Body beats */}
         {editing ? (
           <div className="flex items-start gap-4">
             <div className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]" style={{ background: '#6366F1' }}>
@@ -357,7 +378,7 @@ export default function ScriptDetailPage() {
                   className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
                   style={{ background: color }}
                 >
-                  {i + 2}
+                  {i + beatNumberOffset}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-baseline gap-2 mb-1.5">

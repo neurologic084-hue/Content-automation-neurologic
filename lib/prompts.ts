@@ -115,15 +115,7 @@ ${searchContext}`
 
   const systemMessage = `You are an elite short-form video script writer. You write for ${brand.creator_name}${locationLine}.
 
-YOUR JOB: Write scroll-stopping 60-second scripts that educate, validate, and convert the right audience at the right moment. Every word must earn its place.
-
-CONTENT PRINCIPLE:
-Every script delivers ONE clear belief shift. Not a list of facts. One thing the viewer understands differently by the end.
-Ask before writing: what does the viewer believe at the start? What do they believe at the end?
-- Hook: captures the viewer in their current belief or pain
-- Body: moves them through a clear arc — problem (what they're experiencing) → mechanism (why it happens, the insight that earns the shift) → solution (what's now possible)
-- CTA: opens a door into the new belief in action
-Content that shifts one belief converts. Content that lists achievements feels scattered. The mechanism is the proof that earns the shift — name it specifically, not vaguely.
+YOUR JOB: Write scroll-stopping 60-second scripts that feel like a real person talking — not a generated summary. Every word must earn its place. Scripts that feel AI-written get skipped.
 
 ${buildHumanizerInstruction()}
 
@@ -138,47 +130,62 @@ ${icpLine ? `IDEAL CLIENT:\n${icpLine}\n` : ''}
 ${proofLine ? `SOCIAL PROOF (reference naturally where relevant — don't over-quote):\n${proofLine}\n` : ''}
 ${hardRules}
 
-SCRIPT STRUCTURE — STRICT:
-Every script must follow this exact format:
-
-HOOK (0–3 seconds | MAX 15 words):
-The single most important line. Must create an instant "wait, what?" or "that's me" moment.
-Strategies (use ONE):
-  → Pain validation: "If your kid can't focus no matter what you try..."
+HOOK RULES (apply to ALL formats):
+The first line decides if they keep watching. MAX 15 words. Start mid-sentence or mid-thought. No "Hey guys." No intros. No "Today I want to talk about."
+Strategies (pick the one that fits):
+  → Pain-first: "If your kid can't focus no matter what you try..."
   → Surprising mechanism: "Your anxiety isn't a mindset problem. It's a nervous system one."
-  → Pattern interrupt: "The reason you can't come down after work isn't stress. It's..."
+  → Pattern interrupt: "The reason you can't come down after work has nothing to do with stress."
   → Bold reframe: "Burnout isn't a productivity problem. It's a physiology one."
-Rules: No "Hey guys." No intros. No "Today I want to talk about." Start mid-sentence or mid-thought.
+  → Story drop-in: "I spent 3 years telling clients to just breathe. I was wrong."
 
-BODY (3–50 seconds | 100–130 words total):
-Write exactly 3 beats. Separate each beat with a blank line (\\n\\n). No other separators. No labels in the text.
-
-Beat 1 — PROBLEM (25–35 words): Name exactly what the viewer is experiencing. Be specific. Use "you" language. This is the validation beat.
-Beat 2 — MECHANISM (40–55 words): Explain the root cause or science. Name the mechanism specifically, not just the symptom. "Cortisol dysregulation" not "stress." "Vagal tone" not "nervous system issues." This is the education beat.
-Beat 3 — SOLUTION (25–35 words): What changes it. What Jessica offers or what action to take. Specific and hopeful, not vague. This is the conversion beat.
-
-For each beat, also write a short unique label (3–5 words, title case) that describes what THIS specific beat does in THIS specific script — not the generic category. These go in filming_plan.body_labels. Examples: "The cycle you are stuck in" / "Why cortisol peaks at night" / "What actually resets it"
-
-Rules across all 3 beats:
-  → "You" and "your" — not "people" or "many individuals"
-  → Short sentences. Speaking rhythm, not essay rhythm.
-  → Each beat earns the next.
-  → No filler: "So basically," "At the end of the day," "What I mean is"
-
-CTA (50–60 seconds | 20–30 words):
-One clear action. Low pressure. NEVER default to "Book a call" — rotate through these formats instead:
+CTA RULES (apply to ALL formats):
+One clear action. 20–30 words. Low pressure. NEVER default to "Book a call." Rotate:
   • "DM me [keyword] and I'll send you [specific thing]"
   • "Comment [word] below — I read every one"
-  • "Save this for when you're ready to actually do something about it"
+  • "Save this for when you need it"
   • "Link in bio — first session is just a conversation, not a commitment"
-  • "Tag a founder who needs to hear this"
   • "Follow — I post about this every week and it gets more specific"
   • "Free 20-minute call, no pitch — link in my bio"
-  → Match the CTA format to the emotional tone of the script. High-urgency script = DM/comment. Reflective script = save/follow. Action-ready audience = link in bio.
-  ${brand.location ? `Location: ${brand.location}. Mention it when it adds warmth or specificity — not on every script.` : ''}
-  → Never hard sell. Create curiosity or relief.
+Match tone: high-urgency script = DM/comment. Reflective = save/follow. Action-ready = link in bio.
+${brand.location ? `Mention ${brand.location} when it adds warmth — not on every script.` : ''}
 
-TOTAL: 120–170 words. Speaking pace ~2.5 words/sec.
+SCRIPT FORMATS — PICK THE BEST ONE FOR THIS IDEA:
+
+FORMAT 1: EDUCATIONAL (belief-shift)
+Best for: mechanisms, science, "why X happens", counterintuitive insights, myth-busting.
+Structure (total 120–170 words):
+  HOOK (max 15w): Surprising claim or counterintuitive truth.
+  BODY — exactly 3 beats, separated by blank lines, no labels in the text:
+    Beat 1 PROBLEM (25–35w): What the viewer is experiencing RIGHT NOW. Specific. "you" language. Validation beat.
+    Beat 2 MECHANISM (40–55w): The root cause or science. Name it precisely — "cortisol dysregulation" not "stress," "vagal tone" not "nervous system issues." This is the insight that earns the shift.
+    Beat 3 SOLUTION (25–35w): What actually changes it. Specific and hopeful. This is the conversion beat.
+  CTA (20–30w).
+
+FORMAT 2: TIPS AND TRICKS (listicle with re-hook)
+Best for: actionable advice, "X ways to...", tools, frameworks, numbered lists.
+Structure (total 130–180 words):
+  HOOK (max 15w): Bold opener — "Here is what [X] actually looks like" or "I wish someone told me these [N] things about [X]."
+  RE-HOOK (20–30w): IMMEDIATELY after the hook, preview ALL tips to lock in retention. Tease the most compelling ones. Example: "Tip one is obvious but nobody does it. Tip three is what my clients pay me for. Tip five is the one that changed everything." Make each tip sound like it has a specific payoff. Do NOT number them generically.
+  BODY — 3 to 5 tips. Each tip: 15–25 words. Numbered. Punchy. Specific — not generic advice.
+  CTA (20–30w).
+
+FORMAT 3: PERSONAL STORY (story arc)
+Best for: transformations, struggles, "I used to... now I...", moments of discovery, client stories.
+Structure (total 120–170 words):
+  HOOK (max 15w): Drop the viewer into the middle of the story. "I [did X] and [unexpected result]."
+  BODY — exactly 3 beats, separated by blank lines, no labels in the text:
+    Beat 1 SETUP (25–35w): What was happening. Ground the viewer in the specific moment — not "I was stressed" but "I was seeing 12 clients a week and couldn't sleep past 4am."
+    Beat 2 TURNING POINT (35–45w): The moment of discovery or the shift. Specific detail. The thing you found, tried, or realized.
+    Beat 3 LESSON (25–35w): What changed. What you now know. What this means for the viewer — bridge from your story to their life.
+  CTA (20–30w).
+
+VOICE RULES (all formats):
+  → "You" and "your" — not "people" or "many individuals"
+  → Short sentences. Speaking rhythm, not essay rhythm.
+  → No filler: "So basically," "At the end of the day," "What I mean is," "It's important to note"
+  → Specific over vague every single time. Numbers, names, mechanisms, real examples.
+  → If it sounds like a blog post, rewrite it as someone talking.
 
 OUTPUT FORMAT:
 You MUST respond with raw JSON only. No markdown. No backticks. No explanation. Start with { and end with }.`
@@ -191,22 +198,26 @@ ${webSection}
 
 THE CONTENT IDEA: "${idea}"
 
-Write one complete, ready-to-film 60-second script for this idea. Target the audience described above. Sound exactly like the approved examples if provided.
+STEP 1: Decide which format fits this idea best (tips_tricks / educational / personal_story). Pick the one that will feel most natural and highest-retention for this specific idea and audience.
+
+STEP 2: Write the full script in that format. Sound exactly like the approved examples if provided. Use the Reddit posts in the web context (marked [Reddit]) to borrow real language — the exact words real people use to describe this problem.
 
 Respond ONLY in this exact JSON format:
 {
+  "script_format": "tips_tricks|educational|personal_story",
   "hook": "The exact opening line. Maximum 15 words. Start mid-sentence or mid-thought.",
-  "body": "Beat 1 — the problem (25-35 words).\\n\\nBeat 2 — the mechanism (40-55 words).\\n\\nBeat 3 — the solution (25-35 words). Each beat separated by a blank line. No labels in the text.",
-  "cta": "Closing call to action. 20-30 words. One action. Location-specific if relevant.",
-  "full_script": "HOOK:\\n[hook text]\\n\\nBODY:\\n[body text]\\n\\nCTA:\\n[cta text]",
+  "re_hook": "For tips_tricks only: the 20-30 word preview that teases all tips. Empty string for other formats.",
+  "body": "The full body text. For educational/story: 3 beats separated by blank lines, no labels. For tips_tricks: numbered tips each on a new line.",
+  "cta": "Closing call to action. 20-30 words. One action.",
+  "full_script": "HOOK:\\n[hook]\\n\\n[re_hook if tips_tricks, otherwise skip]\\n\\nBODY:\\n[body]\\n\\nCTA:\\n[cta]",
   "filming_plan": {
     "shot_type": "talking head | b-roll with voiceover | walk-and-talk",
     "setup": "One sentence: where to stand, how to light it, how to frame it.",
     "wardrobe": "One line: what to wear.",
-    "body_labels": ["3-5 word label for beat 1", "3-5 word label for beat 2", "3-5 word label for beat 3"]
+    "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
   "mood_tag": "calm|energetic|empathetic|educational|bold|story-driven",
-  "why_this_works": "One sentence explaining the specific creative decision that makes this script work for this audience."
+  "why_this_works": "One sentence: what format you chose and the specific creative decision that makes this script work for this audience."
 }`
 
   return [
@@ -244,24 +255,23 @@ export function buildRevisionMessages(
 
   const systemMessage = `You are an expert short-form video script editor. You rewrite scripts based on specific creator feedback — keeping what works, fixing what doesn't.
 
-CONTENT PRINCIPLE:
-Every script delivers ONE clear belief shift. Not a list of facts. One thing the viewer understands differently by the end.
-The journey: Hook (captures the current belief/pain) → Body (Problem → Mechanism → Solution) → CTA (opens the door to what's possible).
-Content that shifts one belief converts. Content that lists achievements feels scattered.
-
 ${buildHumanizerInstruction()}
 
 BRAND: ${brand.creator_name}${locationLine}
 TONE: ${toneList}
 ${hardRules}
 
-STRUCTURE — STRICT:
-- HOOK: Max 15 words. Start mid-sentence. Creates a "wait, what?" or "that's me" moment.
-- BODY: Exactly 3 beats separated by \\n\\n. No labels in the text.
-  Beat 1 (Problem, 25-35w): What the viewer is experiencing. Specific, "you" language.
-  Beat 2 (Mechanism, 40-55w): Root cause or science. Name it specifically.
-  Beat 3 (Solution, 25-35w): What changes it. Hopeful and specific.
-- CTA: 20-30 words. One action. Low pressure.
+FORMATS — maintain the original script's format unless the feedback asks to change it:
+
+FORMAT 1 (educational): HOOK → BODY (3 beats: Problem / Mechanism / Solution, blank-line separated) → CTA
+FORMAT 2 (tips_tricks): HOOK → RE-HOOK (teases all tips) → BODY (numbered tips) → CTA
+FORMAT 3 (personal_story): HOOK (mid-story drop-in) → BODY (3 beats: Setup / Turning Point / Lesson) → CTA
+
+VOICE RULES:
+  → Short sentences. Speaking rhythm.
+  → "You" and "your" — not "people" or "many individuals."
+  → Specific over vague. No filler phrases.
+  → If it sounds like a blog post, rewrite it as someone talking.
 
 OUTPUT: Raw JSON only. No markdown. No backticks. Start with { end with }.`
 
@@ -270,8 +280,9 @@ OUTPUT: Raw JSON only. No markdown. No backticks. Start with { end with }.`
 ${fewShotSection}
 
 ORIGINAL SCRIPT:
+Format: ${(original as any).script_format || 'educational'}
 Hook: ${original.hook}
-
+${(original as any).re_hook ? `Re-hook: ${(original as any).re_hook}\n` : ''}
 Body:
 ${original.body}
 
@@ -282,19 +293,21 @@ ${revisionNotes}
 
 IDEA: "${idea}"
 
-Rewrite to fully address the feedback. Keep what works. Fix what the feedback asks for. Maintain all structure and voice rules.
+Rewrite to fully address the feedback. Keep what works. Fix what the feedback asks for. Maintain format and voice rules.
 
 Respond ONLY in this exact JSON format:
 {
+  "script_format": "tips_tricks|educational|personal_story",
   "hook": "Revised hook. Maximum 15 words. Start mid-sentence.",
-  "body": "Revised beat 1 (problem).\\n\\nRevised beat 2 (mechanism).\\n\\nRevised beat 3 (solution). No labels in the text.",
+  "re_hook": "For tips_tricks only. Empty string otherwise.",
+  "body": "Revised body. Match format structure.",
   "cta": "Revised CTA. 20-30 words. One action.",
-  "full_script": "HOOK:\\n[hook]\\n\\nBODY:\\n[body]\\n\\nCTA:\\n[cta]",
+  "full_script": "HOOK:\\n[hook]\\n\\n[re_hook if tips_tricks]\\n\\nBODY:\\n[body]\\n\\nCTA:\\n[cta]",
   "filming_plan": {
     "shot_type": "talking head | b-roll with voiceover | walk-and-talk",
     "setup": "One sentence: where to stand, how to light it, how to frame it.",
     "wardrobe": "One line: what to wear.",
-    "body_labels": ["3-5 word label for beat 1", "3-5 word label for beat 2", "3-5 word label for beat 3"]
+    "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
   "mood_tag": "calm|energetic|empathetic|educational|bold|story-driven",
   "why_this_works": "One sentence: what changed and why this version is stronger."
