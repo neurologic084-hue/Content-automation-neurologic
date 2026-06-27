@@ -53,7 +53,7 @@ ${previousIdeas.slice(0, 30).map((t) => `• ${t}`).join('\n')}`
 
 ${buildHumanizerInstruction()}`
 
-  const userMessage = `Generate exactly 10 short-form video content ideas for this brand.
+  const userMessage = `Generate exactly 10 short-form video content ideas for this brand, split across 5 format categories (2 ideas per category).
 
 BRAND: ${brand.creator_name}
 POSITIONING: ${positioning}
@@ -65,30 +65,36 @@ ${newsSection}
 
 ${dedupSection}
 
-Each idea must follow this exact format:
-- One clear sentence stating what the video is about (the topic and angle)
-- One sentence saying what the viewer will learn or feel by the end
-- Plain, conversational language your ideal client would immediately understand
-- Specific, not generic   not "talk about stress" but "why you feel exhausted all day but suddenly wired at 10pm"
-- No internal directions, no "Hook:", no "End with:", no scripting notes
-- No em dashes
+CATEGORIES (exactly 2 ideas each):
+- educational: counterintuitive insight, mechanism reveal, or myth-bust. The viewer learns something surprising about WHY something happens.
+- tips_tricks: actionable numbered list. "X things / ways / steps." Viewer gets something they can do immediately.
+- personal_story: a real moment or transformation. "I used to... until..." or "A client told me..." Specific, not abstract.
+- myth_busting: one belief most people have that is wrong. Name the myth clearly, then flip it.
+- lead_magnet: teases a free resource (checklist, guide, template). Viewer is driven to DM or click for the freebie.
 
-Use one of these angles (one per idea, in this order):
-1. Mechanism reveal
-2. Myth bust
-3. Validation
-4. Urgency
-5. Result story
-6. Curiosity gap
-7. Bold take
-8. How-to
-9. Comparison
-10. Personal story
+Each idea:
+- One sentence: what the video is about, the specific angle
+- Plain conversational language, no jargon
+- Specific not generic   "why you feel wired at 10pm but exhausted at 9am" not "talk about sleep"
+- No em dashes, no scripting notes, no "Hook:" labels
 
-Where possible, tie 3-5 of the ideas to something from the recent news above   a new finding, a trending topic, or a specific claim that the audience would find surprising.
+Where possible tie 3-5 ideas to something from the recent news above.
 
 Respond ONLY with raw JSON, no markdown:
-{"ideas": ["Idea written in plain conversational sentences.", "...", ...10 total]}`
+{
+  "ideas": [
+    { "format": "educational", "idea": "..." },
+    { "format": "educational", "idea": "..." },
+    { "format": "tips_tricks", "idea": "..." },
+    { "format": "tips_tricks", "idea": "..." },
+    { "format": "personal_story", "idea": "..." },
+    { "format": "personal_story", "idea": "..." },
+    { "format": "myth_busting", "idea": "..." },
+    { "format": "myth_busting", "idea": "..." },
+    { "format": "lead_magnet", "idea": "..." },
+    { "format": "lead_magnet", "idea": "..." }
+  ]
+}`
 
   let raw: string
   try {
@@ -106,7 +112,7 @@ Respond ONLY with raw JSON, no markdown:
     return NextResponse.json({ error: String(err) }, { status: 500 })
   }
 
-  let parsed: { ideas: string[] }
+  let parsed: { ideas: Array<{ format: string; idea: string } | string> }
   try {
     parsed = JSON.parse(raw)
     if (!Array.isArray(parsed.ideas)) throw new Error('bad shape')
@@ -114,5 +120,12 @@ Respond ONLY with raw JSON, no markdown:
     return NextResponse.json({ error: 'Failed to parse generated ideas' }, { status: 500 })
   }
 
-  return NextResponse.json({ ideas: parsed.ideas.slice(0, 10) })
+  // Normalise: support both old string[] and new {format, idea}[]
+  const ideas = parsed.ideas.slice(0, 10).map((item) =>
+    typeof item === 'string'
+      ? { format: 'educational', idea: item }
+      : { format: item.format ?? 'educational', idea: item.idea ?? String(item) }
+  )
+
+  return NextResponse.json({ ideas })
 }

@@ -6,7 +6,7 @@ import { searchWebEnhanced, formatSearchContext } from '@/lib/tavily'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
-  const { idea_id } = await req.json()
+  const { idea_id, mood_tag: requestedMood, use_brand_context: useBrandContext = true, script_format: scriptFormat } = await req.json()
 
   if (!idea_id) {
     return NextResponse.json({ error: 'idea_id is required' }, { status: 400 })
@@ -32,37 +32,61 @@ export async function POST(req: NextRequest) {
   // Mark as generating
   await supabase.from('ideas').update({ status: 'generating' }).eq('id', idea_id)
 
-  // Fetch brand settings
-  const { data: brand } = await supabase.from('brand_settings').select('*').single()
-
-  if (!brand) {
-    return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
-  }
-
-  // Fetch few-shot examples (top approved scripts)
-  const { data: fewShotsRaw } = await supabase
-    .from('scripts')
-    .select('hook, body, cta')
-    .eq('status', 'approved')
-    .eq('is_few_shot', true)
-    .order('approved_at', { ascending: false })
-    .limit(3)
-
-  const fewShots = (fewShotsRaw ?? []) as any[]
-
-  // Search the web   dual query: research + viral angle
   const lane = idea.confirmed_lane as AudienceLane
-  const searchResponse = await searchWebEnhanced(idea.raw_idea, lane)
-  const searchContext = formatSearchContext(searchResponse)
 
-  // Build system+user messages and generate script
-  const messages = buildScriptGenerationMessages(
-    idea.raw_idea,
-    lane,
-    brand,
-    fewShots,
-    searchContext
-  )
+  let messages: Array<{ role: 'system' | 'user'; content: string }>
+  let searchResponse: Awaited<ReturnType<typeof searchWebEnhanced>> = null
+
+  if (useBrandContext) {
+    // Full pipeline: brand voice + few-shot examples + web search
+    const { data: brand } = await supabase.from('brand_settings').select('*').single()
+    if (!brand) {
+      return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
+    }
+
+    const { data: fewShotsRaw } = await supabase
+      .from('scripts')
+      .select('hook, body, cta')
+      .eq('status', 'approved')
+      .eq('is_few_shot', true)
+      .order('approved_at', { ascending: false })
+      .limit(3)
+
+    searchResponse = await searchWebEnhanced(idea.raw_idea, lane)
+    const searchContext = formatSearchContext(searchResponse)
+
+    messages = buildScriptGenerationMessages(
+      idea.raw_idea,
+      lane,
+      brand,
+      (fewShotsRaw ?? []) as any[],
+      searchContext,
+      requestedMood ?? undefined,
+      scriptFormat ?? undefined
+    )
+  } else {
+    // Lean pipeline: purely from the idea, no brand/audience context
+    const toneNote = requestedMood ? ` Lean ${requestedMood} in tone.` : ''
+    messages = [
+      {
+        role: 'system',
+        content: `You are an expert short-form video scriptwriter. Write compelling, direct scripts for social media (60-90 seconds when spoken aloud). Return ONLY valid JSON matching this schema exactly — no markdown, no extra keys:
+{
+  "hook": "opening line that grabs attention in under 3 seconds",
+  "body": "main content — value-dense, conversational, no fluff",
+  "cta": "clear call to action",
+  "full_script": "hook + body + cta combined as one natural flow",
+  "filming_plan": { "shot_list": ["..."], "on_screen_text": ["..."], "b_roll": ["..."] },
+  "mood_tag": "one word describing the emotional tone",
+  "why_this_works": "one sentence on why this script is effective"
+}`,
+      },
+      {
+        role: 'user',
+        content: `Write a short-form video script for this idea: "${idea.raw_idea}".${toneNote}${scriptFormat === 'lead_magnet' ? ' LEAD MAGNET FORMAT: end the body with a genuine giveaway signal ("I\'m giving this away for free." or similar), and the CTA must be exactly "Comment [WORD] below and I\'ll DM/send it to you." No other CTA.' : scriptFormat ? ` Use the ${scriptFormat} format.` : ''} Make it punchy, direct, and built for social media. No hashtags.`,
+      },
+    ]
+  }
 
   let raw: string
   try {
@@ -100,7 +124,7 @@ export async function POST(req: NextRequest) {
         script_format: (generated as any).script_format ?? 'educational',
         re_hook: (generated as any).re_hook ?? '',
       },
-      mood_tag: generated.mood_tag,
+      mood_tag: requestedMood ?? generated.mood_tag,
       why_this_works: generated.why_this_works,
       search_context: searchResponse
         ? {

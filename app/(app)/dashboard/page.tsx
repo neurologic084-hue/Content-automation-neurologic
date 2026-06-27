@@ -20,12 +20,56 @@ export default async function DashboardPage() {
   const brandName = brandRes.data?.creator_name ?? null
   const hasSettings = !!(brandName && brandName.trim().length > 0)
 
+  const ACTIVITY_TTL_DAYS = 7
+  const ttlCutoff = new Date(Date.now() - ACTIVITY_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()
+
   const { data: recentScripts } = await supabase
     .from('scripts')
     .select(`id, hook, status, mood_tag, created_at, idea:ideas(confirmed_lane, raw_idea)`)
     .eq('status', 'pending_review')
     .order('created_at', { ascending: false })
     .limit(4)
+
+  // Recent activity: approved scripts + recent publish jobs, both within TTL window
+  const [approvedRes2, publishedRes] = await Promise.all([
+    supabase
+      .from('scripts')
+      .select('id, hook, mood_tag, approved_at')
+      .eq('status', 'approved')
+      .gte('approved_at', ttlCutoff)
+      .order('approved_at', { ascending: false })
+      .limit(5),
+    supabase
+      .from('publish_jobs')
+      .select('id, status, platform_posts, published_at, scheduled_at, created_at')
+      .in('status', ['published', 'scheduled', 'partial'])
+      .gte('created_at', ttlCutoff)
+      .order('created_at', { ascending: false })
+      .limit(5),
+  ])
+
+  type ActivityItem =
+    | { kind: 'approved'; id: string; hook: string; mood_tag: string | null; at: string }
+    | { kind: 'published'; id: string; status: string; platforms: string[]; at: string }
+
+  const activityItems: ActivityItem[] = [
+    ...(approvedRes2.data ?? []).map(s => ({
+      kind: 'approved' as const,
+      id: s.id,
+      hook: s.hook,
+      mood_tag: s.mood_tag,
+      at: s.approved_at as string,
+    })),
+    ...(publishedRes.data ?? []).map(j => ({
+      kind: 'published' as const,
+      id: j.id,
+      status: j.status,
+      platforms: ((j.platform_posts ?? []) as { platform: string; status: string }[])
+        .filter(p => p.status === 'published' || p.status === 'scheduled')
+        .map(p => p.platform),
+      at: (j.published_at ?? j.scheduled_at ?? j.created_at) as string,
+    })),
+  ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()).slice(0, 6)
 
   const LANE_LABEL: Record<string, string> = {
     adhd_parents: 'ADHD Parents',
@@ -38,6 +82,23 @@ export default async function DashboardPage() {
     burnout_professionals: { bg: '#F4F3F0', text: '#71717A' },
   }
 
+  function relativeTime(iso: string): string {
+    const diff = Date.now() - new Date(iso).getTime()
+    const mins = Math.floor(diff / 60000)
+    if (mins < 60) return mins <= 1 ? 'just now' : `${mins}m ago`
+    const hrs = Math.floor(mins / 60)
+    if (hrs < 24) return hrs === 1 ? '1 hour ago' : `${hrs} hours ago`
+    const days = Math.floor(hrs / 24)
+    return days === 1 ? 'yesterday' : `${days} days ago`
+  }
+
+  const PLATFORM_META: Record<string, { label: string; bg: string }> = {
+    instagram: { label: 'IG', bg: 'linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045)' },
+    facebook:  { label: 'FB', bg: '#1877F2' },
+    tiktok:    { label: 'TT', bg: '#010101' },
+    youtube:   { label: 'YT', bg: '#FF0000' },
+  }
+
   // Steps for getting started   guide stays until ALL 3 are done
   const step1Done = hasSettings
   const step2Done = totalIdeas > 0
@@ -45,8 +106,9 @@ export default async function DashboardPage() {
   const showGettingStarted = !step1Done || !step2Done || !step3Done
 
   return (
-    <div className="relative p-4 sm:p-6 md:p-8 max-w-3xl w-full mx-auto space-y-4 sm:space-y-5">
+    <div className="relative flex-1">
       <DashboardBg />
+      <div className="relative z-10 p-4 sm:p-6 md:p-8 max-w-3xl w-full mx-auto space-y-4 sm:space-y-5">
       <TourModal />
 
       {/* ── Hero banner ── */}
@@ -305,6 +367,66 @@ export default async function DashboardPage() {
         </div>
       )}
 
+      {/* ── Recent activity ── */}
+      {activityItems.length > 0 && (
+        <div className="animate-fadeInUp" style={{ animationDelay: '290ms' }}>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
+              Recent activity
+            </h2>
+            <span className="text-[11px] text-[#A1A1AA] font-medium">Last 7 days</span>
+          </div>
+          <div className="bg-white border border-[#E4E4E0] rounded-2xl divide-y divide-[#F0F0EE] overflow-hidden">
+            {activityItems.map((item) => (
+              item.kind === 'approved' ? (
+                <a key={item.id} href={`/edit/${item.id}`} className="flex items-center gap-3.5 px-4 py-3.5 hover:bg-[#FAFAF9] transition-colors group">
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: '#DCFCE7' }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#16A34A" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-[#18181B] line-clamp-1 font-medium">&ldquo;{item.hook}&rdquo;</p>
+                    <p className="text-[11px] text-[#A1A1AA] mt-0.5">
+                      Script approved{item.mood_tag ? ` · ${item.mood_tag}` : ''} · {relativeTime(item.at)}
+                    </p>
+                  </div>
+                  <svg className="flex-shrink-0 text-[#D4D4D0] group-hover:text-[#FF4F17] transition-colors" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                </a>
+              ) : (
+                <div key={item.id} className="flex items-center gap-3.5 px-4 py-3.5">
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: item.status === 'scheduled' ? '#EFF6FF' : '#FFF3EF' }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={item.status === 'scheduled' ? '#2563EB' : '#FF4F17'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      {item.status === 'scheduled'
+                        ? <><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>
+                        : <><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></>
+                      }
+                    </svg>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      {item.platforms.slice(0, 4).map(p => {
+                        const meta = PLATFORM_META[p.toLowerCase()] ?? { label: p.slice(0,2).toUpperCase(), bg: '#A1A1AA' }
+                        return (
+                          <span key={p} className="text-[9px] font-bold text-white px-1.5 py-0.5 rounded" style={{ background: meta.bg }}>
+                            {meta.label}
+                          </span>
+                        )
+                      })}
+                    </div>
+                    <p className="text-[11px] text-[#A1A1AA]">
+                      {item.status === 'scheduled' ? 'Scheduled' : 'Published'} · {relativeTime(item.at)}
+                    </p>
+                  </div>
+                </div>
+              )
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Feature shortcuts ── */}
       <div className="animate-fadeInUp" style={{ animationDelay: '320ms' }}>
         <p className="text-xs font-bold text-[#A1A1AA] uppercase tracking-widest mb-3">Your full workflow</p>
@@ -405,6 +527,7 @@ export default async function DashboardPage() {
         </div>
       )}
 
+      </div>
     </div>
   )
 }

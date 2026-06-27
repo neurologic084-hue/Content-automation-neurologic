@@ -221,14 +221,6 @@ export default function ScriptDetailPage() {
       <div className="animate-fadeInUp flex items-start justify-between gap-4 mb-6" style={{ animationDelay: '50ms' }}>
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-2">
-            {lane && (
-              <span
-                className="text-xs font-semibold px-2.5 py-1 rounded-full"
-                style={{ background: laneColors.bg, color: laneColors.text }}
-              >
-                {LANE_LABEL[lane]}
-              </span>
-            )}
             {script.mood_tag && (
               <span className="text-xs px-2.5 py-1 rounded-full bg-[#F4F3F0] text-[#71717A]">
                 {script.mood_tag}

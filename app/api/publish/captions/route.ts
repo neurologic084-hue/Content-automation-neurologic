@@ -1,20 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
-
-// Hard character caps enforced both in the prompt and post-generation
-const PLATFORM_CAPS: Record<string, number> = {
-  instagram: 280,  // stays fully visible before "see more"
-  facebook:  450,
-  tiktok:    140,
-  youtube:   100,
-}
-
-const PLATFORM_HASHTAG_RULE: Record<string, string> = {
-  instagram: 'No hashtags.',
-  facebook:  'No hashtags.',
-  tiktok:    'No hashtags.',
-  youtube:   'No hashtags.',
-}
+import { PLATFORM_INSTRUCTIONS, PLATFORM_CAPS, enforceYouTubeLimits } from '@/lib/caption-platforms'
 
 export async function POST(req: NextRequest) {
   const { hook, body, cta, platforms } = await req.json() as {
@@ -30,51 +16,64 @@ export async function POST(req: NextRequest) {
 
   const script = [hook, body, cta].filter(Boolean).join('\n\n')
 
-  const platformSpecs = platforms.map(p => {
-    const cap = PLATFORM_CAPS[p.toLowerCase()] ?? 200
-    const hashtags = PLATFORM_HASHTAG_RULE[p.toLowerCase()] ?? 'No hashtags.'
-    return `  "${p}": strict max ${cap} characters. ${hashtags}`
-  }).join('\n')
+  const platformBlocks = platforms.map(p => {
+    const key = p.toLowerCase()
+    const instructions = PLATFORM_INSTRUCTIONS[key]
+    const caps = PLATFORM_CAPS[key as keyof typeof PLATFORM_CAPS]
+    const maxChars = caps ? ('max' in caps ? caps.max : 200) : 200
+    if (!instructions) {
+      return `Platform "${p}": Write a short, punchy caption under ${maxChars} characters. Plain text, conversational tone.`
+    }
+    return instructions
+  }).join('\n\n---\n\n')
 
-  const prompt = `You are a social media copywriter. Write platform-specific captions from the script below.
+  const prompt = `You are a social media copywriter for a health and wellness creator who helps parents of kids with ADHD and adults dealing with nervous system dysregulation. The tone is personal, direct, and warm -- never clinical, never corporate.
+
+The video script is below. Write one caption per platform. The video already shows the content -- your captions should complement it, not describe it.
 
 SCRIPT:
 ${script}
 
-RULES   apply to every caption:
-- No emojis. None at all.
-- No hashtags on any platform.
-- No markdown formatting (no asterisks, no bold, no bullet points).
-- Plain text only.
-- Structure every caption in this order:
-    1. HOOK   one punchy opening sentence that stops the scroll
-    2. PROBLEM/SOLUTION or INSIGHT   1 to 2 sentences of value, proof, or context
-    3. CALL TO ACTION   one clear, direct closing line
-- Do not label the sections. Write it as flowing copy.
+PLATFORM INSTRUCTIONS:
+${platformBlocks}
 
-PLATFORM LIMITS (you must not exceed these   count every character including spaces and hashtags):
-${platformSpecs}
+UNIVERSAL RULES:
+- Plain text. No markdown, no asterisks, no bold.
+- No em dashes. No en dashes. Use a comma or a period instead.
+- Do not label sections (no "Hook:", "CTA:", etc.).
+- Do not summarize or describe the video. The viewer is watching it.
+- One clear CTA maximum per caption. Never more than one.
+- Sound like a real person, not an AI assistant.
+
+For YouTube, the JSON value must be: "TITLE | description #Shorts #tag" where TITLE is strictly under 60 characters.
 
 Return ONLY a JSON object. Keys are the platform names exactly as given. No markdown, no extra text.
-Example: {"instagram":"caption here","facebook":"caption here"}`
+Example: {"instagram":"caption here","tiktok":"caption here"}`
 
   try {
     const raw = await chatCompletion({
       model: MODELS.fast,
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.65,
-      max_tokens: 600,
+      temperature: 0.7,
+      max_tokens: 800,
       json: true,
     })
 
     const captions = JSON.parse(raw) as Record<string, string>
 
-    // Hard-truncate at cap as a safety net (shouldn't be needed, but guarantees it)
+    // Enforce limits per platform
     for (const p of platforms) {
-      const cap = PLATFORM_CAPS[p.toLowerCase()]
-      if (cap && captions[p] && captions[p].length > cap) {
-        // Truncate at the last space before the cap to avoid cutting mid-word
-        captions[p] = captions[p].slice(0, cap).replace(/\s+\S*$/, '').trimEnd()
+      const key = p.toLowerCase()
+      if (!captions[p]) continue
+
+      if (key === 'youtube') {
+        captions[p] = enforceYouTubeLimits(captions[p])
+      } else {
+        const caps = PLATFORM_CAPS[key as keyof typeof PLATFORM_CAPS]
+        const maxChars = caps && 'max' in caps ? caps.max : 300
+        if (captions[p].length > maxChars) {
+          captions[p] = captions[p].slice(0, maxChars).replace(/\s+\S*$/, '').trimEnd()
+        }
       }
     }
 

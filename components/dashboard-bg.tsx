@@ -4,69 +4,88 @@ export function DashboardBg() {
   return (
     <>
       <style>{`
-        @keyframes orbA {
-          0%, 100% { transform: translate(0px, 0px) scale(1); }
-          33%       { transform: translate(40px, -30px) scale(1.06); }
-          66%       { transform: translate(-25px, 20px) scale(0.94); }
+        @keyframes blobA {
+          0%   { transform: translate(0px,   0px)   scale(1);    border-radius: 60% 40% 70% 30% / 50% 60% 40% 50%; }
+          25%  { transform: translate(60px,  -50px) scale(1.08); border-radius: 40% 60% 30% 70% / 60% 40% 60% 40%; }
+          50%  { transform: translate(30px,  80px)  scale(0.93); border-radius: 70% 30% 50% 50% / 40% 70% 30% 60%; }
+          75%  { transform: translate(-40px, 30px)  scale(1.05); border-radius: 30% 70% 60% 40% / 50% 30% 70% 50%; }
+          100% { transform: translate(0px,   0px)   scale(1);    border-radius: 60% 40% 70% 30% / 50% 60% 40% 50%; }
         }
-        @keyframes orbB {
-          0%, 100% { transform: translate(0px, 0px) scale(1); }
-          40%       { transform: translate(-35px, 28px) scale(1.08); }
-          70%       { transform: translate(22px, -18px) scale(0.96); }
+        @keyframes blobB {
+          0%   { transform: translate(0px,  0px)    scale(1);    border-radius: 40% 60% 50% 50% / 60% 40% 60% 40%; }
+          30%  { transform: translate(-70px, 60px)  scale(1.1);  border-radius: 60% 40% 30% 70% / 40% 60% 40% 60%; }
+          60%  { transform: translate(50px,  -40px) scale(0.9);  border-radius: 50% 50% 70% 30% / 50% 50% 30% 70%; }
+          100% { transform: translate(0px,  0px)    scale(1);    border-radius: 40% 60% 50% 50% / 60% 40% 60% 40%; }
         }
-        @keyframes orbC {
-          0%, 100% { transform: translate(-50%, -50%) scale(1); }
-          50%       { transform: translate(-50%, -50%) scale(1.12); }
+        @keyframes blobC {
+          0%   { transform: translate(0px,  0px)    scale(1);    border-radius: 50% 50% 40% 60% / 40% 60% 50% 50%; }
+          40%  { transform: translate(80px,  50px)  scale(1.07); border-radius: 70% 30% 60% 40% / 60% 40% 30% 70%; }
+          70%  { transform: translate(-30px, -60px) scale(0.92); border-radius: 30% 70% 40% 60% / 50% 50% 70% 30%; }
+          100% { transform: translate(0px,  0px)    scale(1);    border-radius: 50% 50% 40% 60% / 40% 60% 50% 50%; }
         }
-        @keyframes gridFade {
-          0%, 100% { opacity: 0.018; }
-          50%       { opacity: 0.032; }
+        @keyframes gradientShift {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.85; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          [data-dashboard-bg] * { animation: none !important; }
         }
       `}</style>
 
       <div
+        data-dashboard-bg=""
         aria-hidden="true"
         style={{
-          position: 'absolute', inset: 0,
-          overflow: 'hidden', pointerEvents: 'none', zIndex: 0,
+          position: 'absolute',
+          inset: 0,
+          overflow: 'hidden',
+          pointerEvents: 'none',
+          zIndex: 0,
+          animation: 'gradientShift 12s ease-in-out infinite',
         }}
       >
-        {/* Dot grid */}
-        <div style={{
-          position: 'absolute', inset: 0,
-          backgroundImage: 'radial-gradient(circle, #FF4F17 1px, transparent 1px)',
-          backgroundSize: '28px 28px',
-          animation: 'gridFade 8s ease-in-out infinite',
-        }} />
-
-        {/* Orb 1 — warm orange, upper area */}
+        {/* Blob 1: large warm orange, top-left */}
         <div style={{
           position: 'absolute',
-          top: '2%', left: '10%',
-          width: 520, height: 520,
-          borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(255,79,23,0.09) 0%, transparent 68%)',
-          animation: 'orbA 20s ease-in-out infinite',
+          top: '-5%',
+          left: '-8%',
+          width: 520,
+          height: 480,
+          background: 'radial-gradient(ellipse at center, rgba(255,79,23,0.22) 0%, rgba(255,120,50,0.12) 45%, transparent 72%)',
+          animation: 'blobA 18s ease-in-out infinite',
+          willChange: 'transform',
         }} />
 
-        {/* Orb 2 — amber, lower right */}
+        {/* Blob 2: amber, bottom-right */}
         <div style={{
           position: 'absolute',
-          bottom: '8%', right: '5%',
-          width: 420, height: 420,
-          borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(251,146,60,0.07) 0%, transparent 65%)',
-          animation: 'orbB 26s ease-in-out infinite',
+          bottom: '-10%',
+          right: '-6%',
+          width: 580,
+          height: 500,
+          background: 'radial-gradient(ellipse at center, rgba(251,146,60,0.20) 0%, rgba(253,186,116,0.10) 45%, transparent 70%)',
+          animation: 'blobB 24s ease-in-out infinite',
+          willChange: 'transform',
         }} />
 
-        {/* Orb 3 — subtle center pulse */}
+        {/* Blob 3: deep orange, center */}
         <div style={{
           position: 'absolute',
-          top: '45%', left: '55%',
-          width: 560, height: 560,
-          borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(255,200,140,0.04) 0%, transparent 60%)',
-          animation: 'orbC 30s ease-in-out infinite',
+          top: '30%',
+          left: '35%',
+          width: 440,
+          height: 420,
+          background: 'radial-gradient(ellipse at center, rgba(255,79,23,0.13) 0%, rgba(255,150,80,0.07) 50%, transparent 72%)',
+          animation: 'blobC 30s ease-in-out infinite',
+          willChange: 'transform',
+        }} />
+
+        {/* Subtle dot grid overlay */}
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          backgroundImage: 'radial-gradient(circle, rgba(255,79,23,0.06) 1px, transparent 1px)',
+          backgroundSize: '32px 32px',
         }} />
       </div>
     </>

@@ -14,44 +14,15 @@ const GENERATING_STEPS = [
   { label: 'Crafting hook, body & CTA...', delay: 5500 },
 ]
 
-const LANES: { id: AudienceLane; label: string; description: string; color: string; bg: string }[] = [
-  {
-    id: 'adhd_parents',
-    label: 'ADHD Parents',
-    description: 'Parents seeking natural, functional approaches for their child',
-    color: '#6366F1',
-    bg: '#EEF2FF',
-  },
-  {
-    id: 'sympathetic_overdrive',
-    label: 'Sympathetic Overdrive',
-    description: 'Adults with anxiety, stress & trauma   mental health is physiologic',
-    color: '#FF4F17',
-    bg: '#FFF3EF',
-  },
-  {
-    id: 'burnout_professionals',
-    label: 'Burned-Out Professionals',
-    description: 'High-performing Seattle professionals who need to slow their brain down',
-    color: '#18181B',
-    bg: '#F4F3F0',
-  },
-]
+const FORMAT_LABELS: Record<string, { label: string; color: string; bg: string }> = {
+  educational:    { label: 'Educational',    color: '#2563EB', bg: '#EFF6FF' },
+  tips_tricks:    { label: 'Tips & Tricks',  color: '#7C3AED', bg: '#F5F3FF' },
+  personal_story: { label: 'Personal Story', color: '#059669', bg: '#ECFDF5' },
+  myth_busting:   { label: 'Myth Busting',   color: '#D97706', bg: '#FFFBEB' },
+  lead_magnet:    { label: 'Lead Magnet',    color: '#FF4F17', bg: '#FFF8F6' },
+}
 
-const IDEA_TYPE_LABELS: string[] = [
-  'Mechanism reveal',
-  'Myth bust',
-  'Validation',
-  'Urgency',
-  'Result story',
-  'Curiosity gap',
-  'Bold take',
-  'How-to',
-  'Comparison',
-  'Personal story',
-]
-
-type Step = 'input' | 'confirm-lane' | 'generating' | 'done'
+type Step = 'input' | 'generating' | 'done' | 'choose-idea'
 type Tab = 'write' | 'generate' | 'script'
 
 const MOODS = [
@@ -63,7 +34,13 @@ const MOODS = [
   { id: 'story-driven',label: 'Story' },
 ]
 
-const DRAFT_KEY = 'reel_idea_draft'
+const FORMATS = [
+  { id: 'educational',    label: 'Educational',    color: '#2563EB', bg: '#EFF6FF' },
+  { id: 'tips_tricks',    label: 'Tips & Tricks',  color: '#7C3AED', bg: '#F5F3FF' },
+  { id: 'personal_story', label: 'Personal Story', color: '#059669', bg: '#ECFDF5' },
+  { id: 'myth_busting',   label: 'Myth Busting',   color: '#D97706', bg: '#FFFBEB' },
+  { id: 'lead_magnet',    label: 'Lead Magnet',    color: '#FF4F17', bg: '#FFF8F6' },
+]
 
 export default function NewIdeaPage() {
   const router = useRouter()
@@ -71,9 +48,6 @@ export default function NewIdeaPage() {
   const [step, setStep] = useState<Step>('input')
   const [tab, setTab] = useState<Tab>('write')
   const [idea, setIdea] = useState('')
-  const [suggestion, setSuggestion] = useState<LaneSuggestion | null>(null)
-  const [selectedLane, setSelectedLane] = useState<AudienceLane | null>(null)
-  const [ideaId, setIdeaId] = useState<string | null>(null)
   const [scriptId, setScriptId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -89,33 +63,19 @@ export default function NewIdeaPage() {
   const [visibleSteps, setVisibleSteps] = useState(0)
   const stepTimers = useRef<ReturnType<typeof setTimeout>[]>([])
 
+  // Whether to use brand profile + few-shot context when generating (AI-assisted tab)
+  const [useBrandContext, setUseBrandContext] = useState(true)
+  // Shared tone and format state (used by AI-assisted tab)
+  const [selectedFormat, setSelectedFormat] = useState('')
+  const [selectedMood, setSelectedMood] = useState('')
+  // Idea pending tone selection (generate tab)
+  const [pendingIdeaItem, setPendingIdeaItem] = useState<{ format: string; idea: string } | null>(null)
+
   // Idea generation state
-  const [generatedIdeas, setGeneratedIdeas] = useState<string[]>([])
+  const [generatedIdeas, setGeneratedIdeas] = useState<Array<{ format: string; idea: string }>>([])
   const [isGeneratingIdeas, setIsGeneratingIdeas] = useState(false)
   const [ideaGenError, setIdeaGenError] = useState('')
   const [showGenerateConfirm, setShowGenerateConfirm] = useState(false)
-
-  // Restore draft from localStorage on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(DRAFT_KEY)
-      if (saved) {
-        const draft = JSON.parse(saved)
-        if (draft.tab) setTab(draft.tab)
-        if (draft.idea) setIdea(draft.idea)
-        if (Array.isArray(draft.generatedIdeas) && draft.generatedIdeas.length) {
-          setGeneratedIdeas(draft.generatedIdeas)
-        }
-      }
-    } catch {}
-  }, [])
-
-  // Persist draft to localStorage whenever it changes
-  useEffect(() => {
-    try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ tab, idea, generatedIdeas }))
-    } catch {}
-  }, [tab, idea, generatedIdeas])
 
   useEffect(() => {
     async function checkSettings() {
@@ -137,7 +97,7 @@ export default function NewIdeaPage() {
     return () => stepTimers.current.forEach(clearTimeout)
   }, [step])
 
-  async function handleSuggestLane(overrideIdea?: string) {
+  async function handleSuggestLane(overrideIdea?: string, overrideMood?: string, overrideBrandContext?: boolean, overrideFormat?: string) {
     const text = overrideIdea ?? idea
     if (!text.trim()) return
     setLoading(true)
@@ -151,10 +111,9 @@ export default function NewIdeaPage() {
       })
       const laneData = await res.json()
       if (!res.ok) throw new Error(laneData.error)
-      setSuggestion(laneData)
-      setSelectedLane(laneData.suggested_lane)
-      // Skip confirmation step   auto-accept AI lane and generate immediately
-      await generateScript(text, laneData.suggested_lane, laneData)
+      const brandCtx = overrideBrandContext ?? useBrandContext
+      const fmt = overrideFormat ?? selectedFormat
+      await generateScript(text, laneData.suggested_lane, laneData, overrideMood ?? selectedMood, brandCtx, fmt)
     } catch (err) {
       setError(String(err))
     } finally {
@@ -162,7 +121,7 @@ export default function NewIdeaPage() {
     }
   }
 
-  async function generateScript(ideaText: string, lane: AudienceLane, suggestionData: LaneSuggestion) {
+  async function generateScript(ideaText: string, lane: AudienceLane, suggestionData: LaneSuggestion, mood?: string, brandContext = true, scriptFormat?: string) {
     setStep('generating')
     setError('')
     try {
@@ -193,12 +152,11 @@ export default function NewIdeaPage() {
         .single()
 
       if (ideaErr || !newIdea) throw new Error(ideaErr?.message ?? 'Failed to save idea')
-      setIdeaId(newIdea.id)
 
       const res = await fetch('/api/scripts/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea_id: newIdea.id }),
+        body: JSON.stringify({ idea_id: newIdea.id, ...(mood ? { mood_tag: mood } : {}), use_brand_context: brandContext, ...(scriptFormat ? { script_format: scriptFormat } : {}) }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
@@ -211,9 +169,17 @@ export default function NewIdeaPage() {
     }
   }
 
-  async function handleSelectGeneratedIdea(text: string) {
-    setIdea(text)
-    await handleSuggestLane(text)
+  function handleSelectGeneratedIdea(item: { format: string; idea: string }) {
+    setIdea(item.idea)
+    setSelectedMood('')
+    setPendingIdeaItem(item)
+  }
+
+  async function handleConfirmPendingIdea() {
+    if (!pendingIdeaItem) return
+    const fmt = pendingIdeaItem.format
+    setPendingIdeaItem(null)
+    await handleSuggestLane(pendingIdeaItem.idea, selectedMood, undefined, fmt)
   }
 
   async function handleGenerateIdeas() {
@@ -225,7 +191,11 @@ export default function NewIdeaPage() {
       const res = await fetch('/api/ideas/generate', { method: 'POST' })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      setGeneratedIdeas(data.ideas ?? [])
+      const ideas = data.ideas ?? []
+      setGeneratedIdeas(ideas)
+      if (ideas.length > 0) {
+        setStep('choose-idea')
+      }
     } catch (err) {
       setIdeaGenError(String(err))
     } finally {
@@ -391,6 +361,76 @@ export default function NewIdeaPage() {
                 }}
               />
               <p className="text-xs text-[#A1A1AA] mt-2 mb-4">⌘ + Enter to continue</p>
+
+              {/* Tone selector */}
+              <div className="mb-4">
+                <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Tone (optional)</label>
+                <div className="flex flex-wrap gap-2">
+                  {MOODS.map(m => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setSelectedMood(selectedMood === m.id ? '' : m.id)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                      style={{
+                        borderColor: selectedMood === m.id ? '#FF4F17' : '#E4E4E0',
+                        background: selectedMood === m.id ? '#FFF3EF' : 'transparent',
+                        color: selectedMood === m.id ? '#FF4F17' : '#71717A',
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Format selector */}
+              <div className="mb-4">
+                <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Format (optional)</label>
+                <div className="flex flex-wrap gap-2">
+                  {FORMATS.map(f => {
+                    const active = selectedFormat === f.id
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setSelectedFormat(active ? '' : f.id)}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                        style={{
+                          borderColor: active ? f.color : '#E4E4E0',
+                          background: active ? f.bg : 'transparent',
+                          color: active ? f.color : '#71717A',
+                        }}
+                      >
+                        {f.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Brand context toggle */}
+              <div className="flex items-center justify-between mb-4 py-2.5 px-3.5 rounded-xl bg-[#FAFAF9] border border-[#E4E4E0]">
+                <div>
+                  <p className="text-xs font-semibold text-[#18181B]">Use brand context</p>
+                  <p className="text-[11px] text-[#A1A1AA] mt-0.5">
+                    {useBrandContext ? 'Uses your brand voice, audience, and past scripts' : 'Generates purely from your idea'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setUseBrandContext(v => !v)}
+                  className="relative flex-shrink-0 w-10 h-6 rounded-full transition-colors duration-200 cursor-pointer focus:outline-none"
+                  style={{ background: useBrandContext ? '#FF4F17' : '#D1D5DB' }}
+                  aria-checked={useBrandContext}
+                  role="switch"
+                >
+                  <span
+                    className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-200"
+                    style={{ transform: useBrandContext ? 'translateX(16px)' : 'translateX(0)' }}
+                  />
+                </button>
+              </div>
 
               {error && (
                 <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
@@ -561,72 +601,157 @@ export default function NewIdeaPage() {
                 </div>
               )}
 
-              {/* Ideas grid */}
-              {generatedIdeas.length > 0 && (
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-xs font-semibold text-[#A1A1AA] uppercase tracking-wider">
-                      Click an idea to write a script from it
-                    </p>
-                    <button
-                      onClick={() => setShowGenerateConfirm(true)}
-                      className="text-xs text-[#FF4F17] hover:underline cursor-pointer"
-                    >
-                      Regenerate
-                    </button>
-                  </div>
+            </div>
+          )}
+        </div>
+      )}
 
-                  <div className="space-y-2">
-                    {generatedIdeas.map((ideaText, i) => (
-                      <button
-                        key={i}
-                        onClick={() => handleSelectGeneratedIdea(ideaText)}
-                        disabled={loading}
-                        className="animate-fadeInUp w-full group flex items-start gap-4 p-4 bg-white border border-[#E4E4E0] rounded-xl text-left hover:border-[#FF4F17] hover:bg-[#FFF8F6] active:scale-[0.99] transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover-lift"
-                        style={{ animationDelay: `${i * 50}ms` }}
-                      >
-                        <span
-                          className="flex-shrink-0 w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-bold mt-0.5"
-                          style={{ background: '#F4F3F0', color: '#A1A1AA' }}
-                        >
-                          {i + 1}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-[#FF4F17] mb-0.5">{IDEA_TYPE_LABELS[i]}</p>
-                          <p className="text-sm text-[#18181B] leading-relaxed">{ideaText}</p>
-                        </div>
-                        <svg
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="#A1A1AA"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          className="flex-shrink-0 mt-1 group-hover:stroke-[#FF4F17] transition-colors"
-                        >
-                          <path d="M9 18l6-6-6-6" />
-                        </svg>
-                      </button>
-                    ))}
-                  </div>
+      {/* Step: Choose idea */}
+      {step === 'choose-idea' && (
+        <div>
+          {/* Header */}
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h2 className="text-lg font-bold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
+                Choose an idea
+              </h2>
+              <p className="text-xs text-[#71717A] mt-0.5">{generatedIdeas.length} ideas generated from your brand profile</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setStep('input')
+                  setGeneratedIdeas([])
+                  setPendingIdeaItem(null)
+                  setSelectedMood('')
+                  setIdeaGenError('')
+                }}
+                className="h-9 px-4 rounded-xl border border-[#E4E4E0] text-sm text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setPendingIdeaItem(null)
+                  setSelectedMood('')
+                  handleGenerateIdeas()
+                }}
+                disabled={isGeneratingIdeas}
+                className="h-9 px-4 rounded-xl border border-[#E4E4E0] text-sm text-[#71717A] hover:bg-[#F4F3F0] disabled:opacity-40 transition-all cursor-pointer flex items-center gap-1.5"
+              >
+                {isGeneratingIdeas ? (
+                  <>
+                    <div className="w-3 h-3 rounded-full border-2 border-[#A1A1AA] border-t-transparent animate-spin" />
+                    Regenerating...
+                  </>
+                ) : (
+                  <>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 1 0 .49-4.5" />
+                    </svg>
+                    Regenerate
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
 
-                  {loading && (
-                    <div className="mt-4 flex items-center gap-2 text-sm text-[#71717A]">
-                      <svg className="animate-spin w-4 h-4 text-[#FF4F17]" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      Analyzing idea...
-                    </div>
-                  )}
-
-                  {error && (
-                    <div className="mt-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
-                  )}
-                </div>
+          {/* Tone step: shown after clicking an idea */}
+          {pendingIdeaItem ? (
+            <div className="bg-white border border-[#FF4F17] rounded-2xl p-6 animate-fadeInUp">
+              <button
+                type="button"
+                onClick={() => { setPendingIdeaItem(null); setSelectedMood('') }}
+                className="flex items-center gap-1.5 text-xs text-[#A1A1AA] hover:text-[#71717A] mb-4 cursor-pointer transition-colors"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M15 18l-6-6 6-6" />
+                </svg>
+                Back to ideas
+              </button>
+              {pendingIdeaItem.format === 'lead_magnet' && (
+                <p className="text-[11px] text-[#FF4F17] bg-[#FFF3EF] px-2.5 py-1.5 rounded-lg mb-3 font-medium">
+                  Lead Magnet   CTA will be "Comment [WORD] below and I'll send it to you"
+                </p>
               )}
+              <p className="text-[11px] font-bold text-[#FF4F17] uppercase tracking-widest mb-1.5">Selected idea</p>
+              <p className="text-sm font-semibold text-[#18181B] leading-snug mb-5">
+                &ldquo;{pendingIdeaItem.idea}&rdquo;
+              </p>
+              <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Tone (optional)</label>
+              <div className="flex flex-wrap gap-2 mb-5">
+                {MOODS.map(m => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setSelectedMood(selectedMood === m.id ? '' : m.id)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-all cursor-pointer"
+                    style={{
+                      borderColor: selectedMood === m.id ? '#FF4F17' : '#E4E4E0',
+                      background: selectedMood === m.id ? '#FFF3EF' : 'transparent',
+                      color: selectedMood === m.id ? '#FF4F17' : '#71717A',
+                    }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              {error && (
+                <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-[#FEE2E2] text-[#EF4444] text-sm">{error}</div>
+              )}
+              <button
+                onClick={handleConfirmPendingIdea}
+                disabled={loading}
+                className="w-full py-3 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] disabled:opacity-40 transition-all cursor-pointer"
+                style={{ boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Writing script...
+                  </span>
+                ) : selectedMood ? (
+                  `Generate script (${MOODS.find(m => m.id === selectedMood)?.label} tone) →`
+                ) : (
+                  'Generate script →'
+                )}
+              </button>
+            </div>
+          ) : (
+            /* Ideas list */
+            <div className="space-y-2">
+              {generatedIdeas.map((item, i) => {
+                const fmt = FORMAT_LABELS[item.format] ?? FORMAT_LABELS.educational
+                return (
+                  <button
+                    key={i}
+                    onClick={() => handleSelectGeneratedIdea(item)}
+                    className="w-full group flex items-start gap-4 p-4 bg-white border border-[#E4E4E0] rounded-xl text-left hover:border-[#FF4F17] hover:bg-[#FFF8F6] active:scale-[0.99] transition-all duration-150 cursor-pointer"
+                  >
+                    <span
+                      className="flex-shrink-0 w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-bold mt-0.5"
+                      style={{ background: '#F4F3F0', color: '#A1A1AA' }}
+                    >
+                      {i + 1}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <span
+                        className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full mb-1.5"
+                        style={{ background: fmt.bg, color: fmt.color }}
+                      >
+                        {fmt.label}
+                      </span>
+                      <p className="text-sm text-[#18181B] leading-relaxed">{item.idea}</p>
+                    </div>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-1 group-hover:stroke-[#FF4F17] transition-colors">
+                      <path d="M9 18l6-6-6-6" />
+                    </svg>
+                  </button>
+                )
+              })}
             </div>
           )}
         </div>
@@ -709,12 +834,9 @@ export default function NewIdeaPage() {
               onClick={() => {
                 setStep('input')
                 setIdea('')
-                setSuggestion(null)
-                setSelectedLane(null)
-                setIdeaId(null)
                 setScriptId(null)
                 setGeneratedIdeas([])
-                try { localStorage.removeItem(DRAFT_KEY) } catch {}
+                setSelectedFormat('')
               }}
               className="flex-1 py-2.5 px-4 rounded-xl border border-[#E4E4E0] text-[#71717A] text-sm font-medium hover:bg-[#F4F3F0] transition-all cursor-pointer"
             >

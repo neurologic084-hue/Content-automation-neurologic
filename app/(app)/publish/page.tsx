@@ -20,9 +20,9 @@ const PLATFORMS: Record<string, {
   instagram: {
     label: 'Instagram',
     color: '#E1306C',
-    softLimit: 280,
+    softLimit: 125,
     maxLimit: 280,
-    hint: 'Max 280 chars   fully visible, no "see more"',
+    hint: 'Hook in first 125 chars (before "more"). End with a save or share CTA.',
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
@@ -34,9 +34,9 @@ const PLATFORMS: Record<string, {
   facebook: {
     label: 'Facebook',
     color: '#1877F2',
-    softLimit: 450,
-    maxLimit: 450,
-    hint: 'Max 450 chars',
+    softLimit: 150,
+    maxLimit: 300,
+    hint: 'Warm and relatable. End with a share CTA.',
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
         <path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z" />
@@ -46,9 +46,9 @@ const PLATFORMS: Record<string, {
   tiktok: {
     label: 'TikTok',
     color: '#010101',
-    softLimit: 140,
+    softLimit: 100,
     maxLimit: 140,
-    hint: 'Max 140 chars',
+    hint: '140 chars max. POV/curiosity hook, no hashtags.',
     icon: (
       <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
         <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.89-2.89 2.89 2.89 0 0 1 2.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 0 0-.79-.05 6.34 6.34 0 0 0-6.34 6.34 6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.33-6.34V8.69a8.27 8.27 0 0 0 4.84 1.55V6.79a4.85 4.85 0 0 1-1.07-.1z" />
@@ -58,9 +58,9 @@ const PLATFORMS: Record<string, {
   youtube: {
     label: 'YouTube',
     color: '#FF0000',
-    softLimit: 100,
-    maxLimit: 100,
-    hint: 'Max 100 chars   short and descriptive, no hashtags',
+    softLimit: 60,
+    maxLimit: 200,
+    hint: 'Format: Title | description. Title (before |) is your search anchor, keep it under 60 chars. No hashtags.',
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
         <path d="M10 15l5.19-3L10 9v6z" />
@@ -120,18 +120,57 @@ function CaptionCard({
   platform,
   value,
   onChange,
+  script,
 }: {
   platform: string
   value: string
   onChange: (v: string) => void
+  script: { hook: string; body: string; cta: string } | null
 }) {
+  const [showFeedback, setShowFeedback] = useState(false)
+  const [feedback, setFeedback] = useState('')
+  const [rewriting, setRewriting] = useState(false)
+  const [rewriteError, setRewriteError] = useState('')
+
   const meta = getPlatformMeta(platform)
+  const isYouTube = platform.toLowerCase() === 'youtube'
   const len = value.length
   const overMax = len > meta.maxLimit
   const nearMax = len > meta.maxLimit * 0.85
 
+  // YouTube: parse title vs description at the pipe
+  const pipeIdx = isYouTube ? value.indexOf('|') : -1
+  const ytTitle = pipeIdx >= 0 ? value.slice(0, pipeIdx).trim() : (isYouTube ? value : '')
+  const ytTitleLen = ytTitle.length
+  const ytTitleOver = ytTitleLen > 60
+
+  async function handleRewrite() {
+    if (!feedback.trim()) return
+    setRewriting(true)
+    setRewriteError('')
+    try {
+      const res = await fetch('/api/publish/captions/rewrite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform, currentCaption: value, feedback: feedback.trim(), script }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setRewriteError(data.error ?? 'Rewrite failed'); return }
+      if (data.caption) {
+        onChange(data.caption)
+        setFeedback('')
+        setShowFeedback(false)
+      }
+    } catch (e) {
+      setRewriteError((e as Error).message)
+    } finally {
+      setRewriting(false)
+    }
+  }
+
   return (
     <div className="rounded-2xl border border-[#E4E4E0] overflow-hidden transition-colors">
+      {/* Header */}
       <div
         className="flex items-center gap-2 px-4 py-2.5"
         style={{ background: meta.color + '12', borderBottom: '1px solid ' + meta.color + '22' }}
@@ -143,11 +182,24 @@ function CaptionCard({
         <span className="text-sm font-semibold flex-1" style={{ color: meta.color }}>
           {meta.label}
         </span>
-        <span className="text-[11px] font-medium tabular-nums"
-          style={{ color: overMax ? '#EF4444' : nearMax ? '#F59E0B' : '#A1A1AA' }}>
-          {len}/{meta.maxLimit}
-        </span>
+        {isYouTube ? (
+          <div className="flex items-center gap-3 text-[11px] font-medium tabular-nums">
+            <span style={{ color: ytTitleOver ? '#EF4444' : '#A1A1AA' }}>
+              Title {ytTitleLen}/60
+            </span>
+            <span style={{ color: overMax ? '#EF4444' : nearMax ? '#F59E0B' : '#A1A1AA' }}>
+              Total {len}/{meta.maxLimit}
+            </span>
+          </div>
+        ) : (
+          <span className="text-[11px] font-medium tabular-nums"
+            style={{ color: overMax ? '#EF4444' : nearMax ? '#F59E0B' : '#A1A1AA' }}>
+            {len}/{meta.maxLimit}
+          </span>
+        )}
       </div>
+
+      {/* Textarea */}
       <textarea
         value={value}
         onChange={e => onChange(e.target.value.slice(0, meta.maxLimit))}
@@ -156,9 +208,100 @@ function CaptionCard({
         className="w-full px-4 py-3 text-sm leading-relaxed outline-none resize-none bg-white"
         style={{ color: '#18181B' }}
       />
+
+      {/* YouTube: live split preview */}
+      {isYouTube && value.trim() && (
+        <div className="mx-4 mb-3 rounded-xl overflow-hidden" style={{ border: '1px solid #FFE4D6' }}>
+          <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest" style={{ background: '#FFF3EF', color: '#FF4F17' }}>
+            Shorts preview
+          </div>
+          <div className="px-3 py-2.5 bg-white space-y-1.5">
+            <div>
+              <p className="text-[10px] font-semibold text-[#A1A1AA] uppercase tracking-wider mb-0.5">Title</p>
+              <p className="text-sm font-semibold text-[#18181B] leading-snug" style={{ fontFamily: 'var(--font-jakarta)' }}>
+                {pipeIdx >= 0 ? value.slice(0, pipeIdx).trim() : value.trim()}
+              </p>
+              {ytTitleOver && (
+                <p className="text-[11px] text-[#EF4444] mt-0.5">
+                  {ytTitleLen - 60} chars over limit. Shorten what comes before the |.
+                </p>
+              )}
+            </div>
+            {pipeIdx >= 0 && value.slice(pipeIdx + 1).trim() && (
+              <div style={{ borderTop: '1px solid #F4F3F0', paddingTop: 8 }}>
+                <p className="text-[10px] font-semibold text-[#A1A1AA] uppercase tracking-wider mb-0.5">Description</p>
+                <p className="text-xs text-[#71717A] leading-relaxed">
+                  {value.slice(pipeIdx + 1).trim()}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {meta.hint && (
         <p className="px-4 pb-2.5 text-[11px]" style={{ color: '#A1A1AA' }}>{meta.hint}</p>
       )}
+
+      {/* Rewrite with feedback */}
+      <div style={{ borderTop: '1px solid #F0EFED' }}>
+        {showFeedback ? (
+          <div className="px-4 py-3 space-y-2">
+            <textarea
+              autoFocus
+              placeholder="What to change? e.g. make it shorter, more casual, lead with the sleep angle..."
+              value={feedback}
+              onChange={e => setFeedback(e.target.value)}
+              rows={2}
+              className="w-full px-3 py-2 rounded-xl border border-[#E4E4E0] text-xs text-[#18181B] placeholder:text-[#A1A1AA] outline-none resize-none bg-[#FAFAF9] focus:border-[#FF4F17] transition-colors"
+            />
+            {rewriteError && (
+              <p className="text-[11px] text-[#EF4444]">{rewriteError}</p>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleRewrite}
+                disabled={rewriting || !feedback.trim()}
+                className="flex items-center gap-1.5 h-8 px-3 rounded-xl text-xs font-semibold text-white transition-all disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+                style={{ background: '#FF4F17' }}
+              >
+                {rewriting ? (
+                  <>
+                    <div className="w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                    Rewriting...
+                  </>
+                ) : (
+                  <>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 1 0 .49-4.5" />
+                    </svg>
+                    Rewrite
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowFeedback(false); setFeedback(''); setRewriteError('') }}
+                className="h-8 px-3 rounded-xl text-xs text-[#71717A] hover:text-[#18181B] transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowFeedback(true)}
+            className="w-full flex items-center gap-1.5 px-4 py-2.5 text-[11px] text-[#A1A1AA] hover:text-[#71717A] hover:bg-[#FAFAF9] transition-colors cursor-pointer"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 4v6h6" /><path d="M3.51 15a9 9 0 1 0 .49-4.5" />
+            </svg>
+            Rewrite with feedback
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -199,6 +342,8 @@ function PublishForm() {
   // Schedule
   const [scheduleMode, setScheduleMode] = useState<'now' | 'later'>('now')
   const [scheduledAt, setScheduledAt] = useState('')  // datetime-local value
+  const [dayTaken, setDayTaken] = useState(false)
+  const [checkingDay, setCheckingDay] = useState(false)
 
   // Submit
   const [submitting, setSubmitting] = useState(false)
@@ -278,6 +423,31 @@ function PublishForm() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJobId, accounts.length, loadingAccounts])
 
+  // Check if the chosen schedule day already has a post
+  useEffect(() => {
+    if (scheduleMode !== 'later' || !scheduledAt) { setDayTaken(false); return }
+    let cancelled = false
+    setCheckingDay(true)
+    const supabase = createClient()
+    const d = new Date(scheduledAt)
+    const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0).toISOString()
+    const dayEnd   = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59).toISOString()
+    supabase
+      .from('publish_jobs')
+      .select('id')
+      .gte('scheduled_at', dayStart)
+      .lte('scheduled_at', dayEnd)
+      .in('status', ['scheduled', 'publishing'])
+      .limit(1)
+      .then(({ data }) => {
+        if (!cancelled) {
+          setDayTaken(!!(data && data.length > 0))
+          setCheckingDay(false)
+        }
+      })
+    return () => { cancelled = true }
+  }, [scheduledAt, scheduleMode])
+
   // ── Derived ─────────────────────────────────────────────────────────────────
 
   const selectedJob = jobs.find(j => j.id === selectedJobId) ?? null
@@ -294,7 +464,7 @@ function PublishForm() {
   const canGenerate = hasScript && selectedPlatforms.length > 0
   const captionsFilled = selectedPlatforms.length > 0 &&
     selectedPlatforms.every(p => (captions[p] ?? '').trim().length > 0)
-  const canPublish = !!videoUrl.trim() && captionsFilled && selectedIds.size > 0 && !loadingAccounts
+  const canPublish = !!videoUrl.trim() && captionsFilled && selectedIds.size > 0 && !loadingAccounts && !dayTaken
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
@@ -385,7 +555,7 @@ function PublishForm() {
         variantId: selectedJob?.selected_variant ?? null,
         downloadUrl: videoUrl.trim(),
         captions,
-        accounts: selectedAccounts.map(a => ({ id: a.id, platform: a.platform })),
+        accounts: selectedAccounts.map(a => ({ id: a.id, platform: a.platform, pageId: a.pageId })),
         scheduledAt: scheduleMode === 'later' && scheduledAt
           ? new Date(scheduledAt).toISOString()
           : undefined,
@@ -690,6 +860,7 @@ function PublishForm() {
                   platform={platform}
                   value={captions[platform] ?? ''}
                   onChange={v => setCaptions(prev => ({ ...prev, [platform]: v }))}
+                  script={selectedJob?.script ?? null}
                 />
               ))}
             </div>
@@ -785,24 +956,53 @@ function PublishForm() {
 
             {scheduleMode === 'later' && (
               <div>
-                <input
-                  type="datetime-local"
-                  value={scheduledAt}
-                  onChange={e => setScheduledAt(e.target.value)}
-                  min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
-                  required={scheduleMode === 'later'}
-                  className="h-11 px-4 rounded-xl border border-[#E4E4E0] text-sm outline-none bg-[#FAFAFA] transition-colors"
-                  style={{ colorScheme: 'light' }}
-                  onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
-                  onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
-                />
-                {scheduledAt && (
+                <div className="flex items-center gap-3">
+                  <input
+                    type="datetime-local"
+                    value={scheduledAt}
+                    onChange={e => setScheduledAt(e.target.value)}
+                    min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
+                    required={scheduleMode === 'later'}
+                    className="h-11 px-4 rounded-xl border text-sm outline-none bg-[#FAFAFA] transition-colors"
+                    style={{
+                      colorScheme: 'light',
+                      borderColor: dayTaken ? '#FCA5A5' : '#E4E4E0',
+                    }}
+                    onFocus={e => { if (!dayTaken) e.currentTarget.style.borderColor = '#FF4F17' }}
+                    onBlur={e => { e.currentTarget.style.borderColor = dayTaken ? '#FCA5A5' : '#E4E4E0' }}
+                  />
+                  {checkingDay && (
+                    <div className="w-4 h-4 rounded-full border-2 border-[#FF4F17] border-t-transparent animate-spin" />
+                  )}
+                  {scheduledAt && !checkingDay && !dayTaken && (
+                    <span className="text-xs text-[#059669] flex items-center gap-1">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M20 6L9 17l-5-5" />
+                      </svg>
+                      Day free
+                    </span>
+                  )}
+                </div>
+
+                {dayTaken && (
+                  <div className="mt-2 flex items-start gap-2 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-3 py-2.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-0.5">
+                      <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+                    </svg>
+                    <div>
+                      <p className="text-xs font-semibold text-[#DC2626]">This day already has a post scheduled.</p>
+                      <p className="text-[11px] text-[#DC2626] opacity-80 mt-0.5">Pick a different day to keep one post per day.</p>
+                    </div>
+                  </div>
+                )}
+
+                {scheduledAt && !dayTaken && (
                   <p className="mt-2 text-xs text-[#71717A]">
                     Scheduled for {new Date(scheduledAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}
                   </p>
                 )}
                 <p className="mt-3 text-[11px] text-[#A1A1AA]">
-                  The post will be queued in Blotato at that time.{' '}
+                  One post per day keeps your reach consistent.{' '}
                   <a
                     href="https://my.blotato.com/queue/schedules"
                     target="_blank"

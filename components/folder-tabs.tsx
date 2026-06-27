@@ -27,6 +27,7 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
   const [folders, setFolders] = useState(initialFolders)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [newName2, setNewName2] = useState('')
   const [saving, setSaving] = useState(false)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
@@ -96,19 +97,25 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
   }
 
   async function createFolder() {
-    if (!newName.trim()) return
+    const first = newName.trim()
+    const second = newName2.trim()
+    if (!first) return
     setSaving(true)
     const supabase = createClient()
     const { data: { user } } = await supabase.auth.getUser()
+
+    const inserts = [{ name: first, user_id: user?.id }]
+    if (second) inserts.push({ name: second, user_id: user?.id })
+
     const { data, error } = await supabase
       .from('folders')
-      .insert({ name: newName.trim(), user_id: user?.id })
+      .insert(inserts)
       .select('id, name')
-      .single()
     setSaving(false)
     if (!error && data) {
-      setFolders(f => [...f, { ...data, count: 0 }])
+      setFolders(f => [...f, ...data.map((d: { id: string; name: string }) => ({ ...d, count: 0 }))])
       setNewName('')
+      setNewName2('')
       setCreating(false)
       router.refresh()
     }
@@ -234,18 +241,29 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
 
         {/* New folder */}
         {creating ? (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <input
               autoFocus
-              placeholder="Folder name..."
+              placeholder="Folder 1..."
               value={newName}
               onChange={e => setNewName(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Enter') createFolder()
-                if (e.key === 'Escape') { setCreating(false); setNewName('') }
+                if (e.key === 'Escape') { setCreating(false); setNewName(''); setNewName2('') }
               }}
               className="h-9 px-3.5 rounded-full text-xs border border-[#FF4F17] outline-none"
-              style={{ background: '#FFF3EF', color: '#FF4F17', width: 130 }}
+              style={{ background: '#FFF3EF', color: '#FF4F17', width: 120 }}
+            />
+            <input
+              placeholder="Folder 2 (optional)"
+              value={newName2}
+              onChange={e => setNewName2(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') createFolder()
+                if (e.key === 'Escape') { setCreating(false); setNewName(''); setNewName2('') }
+              }}
+              className="h-9 px-3.5 rounded-full text-xs border outline-none"
+              style={{ background: '#F4F3F0', color: '#71717A', borderColor: '#D4D4D0', width: 148 }}
             />
             <button
               onClick={createFolder}
@@ -256,7 +274,7 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
               {saving ? '...' : 'Add'}
             </button>
             <button
-              onClick={() => { setCreating(false); setNewName('') }}
+              onClick={() => { setCreating(false); setNewName(''); setNewName2('') }}
               className="text-xs text-[#A1A1AA] cursor-pointer px-2"
             >
               Cancel

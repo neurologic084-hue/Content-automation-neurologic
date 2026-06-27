@@ -70,10 +70,13 @@ export function buildScriptGenerationMessages(
   lane: AudienceLane,
   brand: BrandSettings,
   fewShotExamples: Script[],
-  searchContext: string
+  searchContext: string,
+  moodTag?: string,
+  scriptFormat?: string
 ): Array<{ role: 'system' | 'user'; content: string }> {
   const laneDescription = LANE_SYSTEM_DESCRIPTIONS[lane]
-  const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
+  const baseTone = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
+  const toneList = moodTag ? `${baseTone} -- lean ${moodTag} for this script` : baseTone
 
   const hardRules = brand.extra_context?.trim()
     ? `HARD RULES   NON-NEGOTIABLE (these override everything else):
@@ -139,16 +142,19 @@ Strategies (pick the one that fits):
   → Bold reframe: "Burnout isn't a productivity problem. It's a physiology one."
   → Story drop-in: "I spent 3 years telling clients to just breathe. I was wrong."
 
-CTA RULES (apply to ALL formats):
+CTA RULES (non-lead-magnet formats):
 One clear action. 20–30 words. Low pressure. NEVER default to "Book a call." Rotate:
   • "DM me [keyword] and I'll send you [specific thing]"
-  • "Comment [word] below   I read every one"
   • "Save this for when you need it"
   • "Link in bio   first session is just a conversation, not a commitment"
   • "Follow   I post about this every week and it gets more specific"
   • "Free 20-minute call, no pitch   link in my bio"
-Match tone: high-urgency script = DM/comment. Reflective = save/follow. Action-ready = link in bio.
+Match tone: reflective = save/follow. Action-ready = link in bio. High-urgency = DM.
 ${brand.location ? `Mention ${brand.location} when it adds warmth   not on every script.` : ''}
+
+LEAD MAGNET CTA   STRICTLY NON-NEGOTIABLE:
+  → ONLY for lead_magnet format: the CTA must be EXACTLY "Comment [ONE WORD IN ALL CAPS] below and I'll DM/send it to you." No other CTA is acceptable for this format.
+  → ALL OTHER FORMATS: NEVER use "Comment X and I'll..." pattern. This is reserved exclusively for lead magnets.
 
 SCRIPT FORMATS   PICK THE BEST ONE FOR THIS IDEA:
 
@@ -167,7 +173,13 @@ Best for: actionable advice, "X ways to...", tools, frameworks, numbered lists.
 Structure (total 130–180 words):
   HOOK (max 15w): Bold opener   "Here is what [X] actually looks like" or "I wish someone told me these [N] things about [X]."
   RE-HOOK (20–30w): IMMEDIATELY after the hook, preview ALL tips to lock in retention. Tease the most compelling ones. Example: "Tip one is obvious but nobody does it. Tip three is what my clients pay me for. Tip five is the one that changed everything." Make each tip sound like it has a specific payoff. Do NOT number them generically.
-  BODY   3 to 5 tips. Each tip: 15–25 words. Numbered. Punchy. Specific   not generic advice.
+  BODY   3 to 5 tips. STRICT FORMAT PER TIP:
+    - One line per tip. Max 12 words. No sub-clauses. No "and then" chains.
+    - Numbered: "1.", "2.", "3." etc.
+    - Each tip is a standalone short sentence. Period. Done.
+    - WRONG: "Tip one is to make sure you drink water before eating because hydration affects your cortisol."
+    - RIGHT: "1. Drink water before breakfast. Cortisol drops fast when you're dehydrated."
+    - Two short punchy sentences max per tip. Never one long one.
   CTA (20–30w).
 
 FORMAT 3: PERSONAL STORY (story arc)
@@ -179,6 +191,30 @@ Structure (total 120–170 words):
     Beat 2 TURNING POINT (35–45w): The moment of discovery or the shift. Specific detail. The thing you found, tried, or realized.
     Beat 3 LESSON (25–35w): What changed. What you now know. What this means for the viewer   bridge from your story to their life.
   CTA (20–30w).
+
+FORMAT 4: MYTH BUSTING (belief challenge)
+Best for: debunking common advice, "X is actually wrong," counterintuitive truths, paradigm shifts.
+Structure (total 120–170 words):
+  HOOK (max 15w): State the myth as a provocative truth-challenge. "Everyone says X. Here's why that's wrong."
+  BODY   exactly 3 beats, separated by blank lines, no labels:
+    Beat 1 THE MYTH (20–30w): What people believe and why it feels true. Validate the common thinking without agreeing.
+    Beat 2 THE TRUTH (40–55w): The specific mechanism or evidence that contradicts it. Precise. Name the science or the real pattern.
+    Beat 3 THE SHIFT (25–35w): What to do or think differently now.
+  CTA (20–30w): Standard rotation above. Never comment-gate.
+
+FORMAT 5: LEAD MAGNET (comment gate)
+Best for: free guides, checklists, templates, mini-courses, PDFs   anything being given away for free.
+Structure (total 110–150 words):
+  HOOK (max 15w): Specific promise tied to what you're giving away.
+  BODY   exactly 3 beats, separated by blank lines, no labels:
+    Beat 1 PROBLEM (20–30w): The exact pain or gap they feel right now. Specific. "You" language.
+    Beat 2 VALUE (30–40w): What the free resource is, what's inside, why it solves it. Name it specifically.
+    Beat 3 TEASER (15–20w): End the body with a genuine giveaway signal. Must be one of:
+      → "I'm giving this away for free."
+      → "I put everything I know about [topic] into this [resource name], and it's yours."
+      → "This [guide/checklist/template] is free   [brief reason]."
+      This line MUST feel like a real gift, not a pitch. Do not end with a question or a tease of the CTA.
+  CTA   STRICT: "Comment [ONE WORD IN ALL CAPS] below and I'll DM/send it to you." Nothing else. No link in bio. No variations.
 
 VOICE RULES (all formats):
   → "You" and "your"   not "people" or "many individuals"
@@ -198,13 +234,13 @@ ${webSection}
 
 THE CONTENT IDEA: "${idea}"
 
-STEP 1: Decide which format fits this idea best (tips_tricks / educational / personal_story). Pick the one that will feel most natural and highest-retention for this specific idea and audience.
+${scriptFormat ? `FORCED FORMAT: Write this script ONLY in the "${scriptFormat}" format. Do not choose a different format regardless of the idea.\n` : ''}STEP 1: ${scriptFormat ? `Format is pre-selected as "${scriptFormat}". Proceed directly to writing.` : 'Decide which format fits this idea best (tips_tricks / educational / personal_story / myth_busting). Do NOT choose lead_magnet unless explicitly forced above.'}
 
 STEP 2: Write the full script in that format. Sound exactly like the approved examples if provided. Use the Reddit posts in the web context (marked [Reddit]) to borrow real language   the exact words real people use to describe this problem.
 
 Respond ONLY in this exact JSON format:
 {
-  "script_format": "tips_tricks|educational|personal_story",
+  "script_format": "tips_tricks|educational|personal_story|myth_busting|lead_magnet",
   "hook": "The exact opening line. Maximum 15 words. Start mid-sentence or mid-thought.",
   "re_hook": "For tips_tricks only: the 20-30 word preview that teases all tips. Empty string for other formats.",
   "body": "The full body text. For educational/story: 3 beats separated by blank lines, no labels. For tips_tricks: numbered tips each on a new line.",
