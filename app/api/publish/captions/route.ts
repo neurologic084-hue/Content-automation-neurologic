@@ -45,40 +45,83 @@ UNIVERSAL RULES:
 - One clear CTA maximum per caption. Never more than one.
 - Sound like a real person, not an AI assistant.
 
-For YouTube, the JSON value must be: "TITLE | description #Shorts #tag" where TITLE is strictly under 60 characters.
+For YouTube, the JSON value must be: "TITLE | description" where TITLE is strictly under 60 characters. No hashtags.
 
 Return ONLY a JSON object. Keys are the platform names exactly as given. No markdown, no extra text.
 Example: {"instagram":"caption here","tiktok":"caption here"}`
 
-  try {
-    const raw = await chatCompletion({
-      model: MODELS.fast,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7,
-      max_tokens: 800,
-      json: true,
-    })
+  // The model is asked to use exact platform-name keys, but occasionally drifts on
+  // casing (e.g. "Instagram" instead of "instagram") and silently drops a platform.
+  // Normalize keys case-insensitively, and retry automatically if any are still missing
+  // instead of making the user click "Generate" repeatedly.
+  const maxAttempts = 3
+  let lastError: string | undefined
 
-    const captions = JSON.parse(raw) as Record<string, string>
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const raw = await chatCompletion({
+        model: MODELS.fast,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.7,
+        max_tokens: 800,
+        json: true,
+      })
 
-    // Enforce limits per platform
-    for (const p of platforms) {
-      const key = p.toLowerCase()
-      if (!captions[p]) continue
+      const rawCaptions = JSON.parse(raw) as Record<string, string>
+      const lowerCased = Object.fromEntries(
+        Object.entries(rawCaptions).map(([k, v]) => [k.toLowerCase().trim(), v])
+      )
 
-      if (key === 'youtube') {
-        captions[p] = enforceYouTubeLimits(captions[p])
-      } else {
-        const caps = PLATFORM_CAPS[key as keyof typeof PLATFORM_CAPS]
-        const maxChars = caps && 'max' in caps ? caps.max : 300
-        if (captions[p].length > maxChars) {
-          captions[p] = captions[p].slice(0, maxChars).replace(/\s+\S*$/, '').trimEnd()
+      const captions: Record<string, string> = {}
+      for (const p of platforms) {
+        const key = p.toLowerCase()
+        if (key in lowerCased) {
+          // Key matched exactly. An empty value is a content problem, not a key
+          // problem, fuzzy-matching another key wouldn't fix it, so leave it missing.
+          if (lowerCased[key].trim()) captions[p] = lowerCased[key]
+          continue
+        }
+        // Defensive fallback: the model occasionally returns a variant key
+        // (e.g. "youtube_shorts" instead of "youtube"). Match on substring/normalized form.
+        const normalized = key.replace(/[^a-z]/g, '')
+        const fuzzyKey = Object.keys(lowerCased).find((k) => {
+          const kNorm = k.replace(/[^a-z]/g, '')
+          return kNorm.includes(normalized) || normalized.includes(kNorm)
+        })
+        if (fuzzyKey && lowerCased[fuzzyKey].trim()) captions[p] = lowerCased[fuzzyKey]
+      }
+
+      const missing = platforms.filter(p => !captions[p])
+      if (missing.length > 0) {
+        lastError = `Model omitted: ${missing.join(', ')}`
+        if (attempt < maxAttempts) continue
+        // Final attempt still missing platforms   fail loudly instead of
+        // silently returning 200 with an incomplete captions object.
+        return NextResponse.json({ error: `Caption generation failed: ${lastError}` }, { status: 500 })
+      }
+
+      // Enforce limits per platform
+      for (const p of platforms) {
+        const key = p.toLowerCase()
+        if (!captions[p]) continue
+
+        if (key === 'youtube') {
+          captions[p] = enforceYouTubeLimits(captions[p])
+        } else {
+          const caps = PLATFORM_CAPS[key as keyof typeof PLATFORM_CAPS]
+          const maxChars = caps && 'max' in caps ? caps.max : 300
+          if (captions[p].length > maxChars) {
+            captions[p] = captions[p].slice(0, maxChars).replace(/\s+\S*$/, '').trimEnd()
+          }
         }
       }
-    }
 
-    return NextResponse.json({ captions })
-  } catch (e) {
-    return NextResponse.json({ error: `Caption generation failed: ${(e as Error).message}` }, { status: 500 })
+      return NextResponse.json({ captions })
+    } catch (e) {
+      lastError = (e as Error).message
+      if (attempt < maxAttempts) continue
+    }
   }
+
+  return NextResponse.json({ error: `Caption generation failed: ${lastError}` }, { status: 500 })
 }

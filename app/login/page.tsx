@@ -107,7 +107,7 @@ export default function LoginPage() {
               className="font-semibold tracking-widest uppercase"
               style={{ fontSize: 10, color: '#FF6B3D', letterSpacing: '0.2em', lineHeight: 1 }}
             >
-              AI Script Engine
+              AI Creator Mode
             </span>
           </div>
 
@@ -140,7 +140,7 @@ export default function LoginPage() {
         {/* Bottom   phase label */}
         <div className="relative z-10 text-center">
           <p style={{ color: 'rgba(255,255,255,0.2)', fontSize: 11, letterSpacing: '0.5px' }}>
-            Phase 1 · Script Engine
+            Phase 1 · Creator Mode
           </p>
         </div>
       </div>

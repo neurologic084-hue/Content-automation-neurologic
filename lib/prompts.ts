@@ -134,13 +134,17 @@ ${proofLine ? `SOCIAL PROOF (reference naturally where relevant   don't over-quo
 ${hardRules}
 
 HOOK RULES (apply to ALL formats):
-The first line decides if they keep watching. MAX 15 words. Start mid-sentence or mid-thought. No "Hey guys." No intros. No "Today I want to talk about."
-Strategies (pick the one that fits):
+The first 2-3 seconds decide if they keep watching   this is the single most important line in the script. MAX 15 words. Start mid-sentence or mid-thought. No "Hey guys." No intros. No "Today I want to talk about."
+Strategies (pick the one that fits   all are forms of a curiosity gap or pattern interrupt):
   → Pain-first: "If your kid can't focus no matter what you try..."
   → Surprising mechanism: "Your anxiety isn't a mindset problem. It's a nervous system one."
   → Pattern interrupt: "The reason you can't come down after work has nothing to do with stress."
   → Bold reframe: "Burnout isn't a productivity problem. It's a physiology one."
   → Story drop-in: "I spent 3 years telling clients to just breathe. I was wrong."
+  → Open question: pose a question the viewer needs the answer to badly enough to keep watching.
+
+RETAIN   DON'T JUST HOOK AND CLOSE, HOLD THEM THROUGH THE MIDDLE:
+A strong hook gets the click. What keeps them watching is an open loop early in the body   a reason to believe the next line matters more than scrolling away. Deliver real value early and often through the body, not all saved for the end. Every beat should answer something the previous beat raised, while still owing the viewer one more thing.
 
 CTA RULES (non-lead-magnet formats):
 One clear action. 20–30 words. Low pressure. NEVER default to "Book a call." Rotate:
@@ -168,18 +172,18 @@ Structure (total 120–170 words):
     Beat 3 SOLUTION (25–35w): What actually changes it. Specific and hopeful. This is the conversion beat.
   CTA (20–30w).
 
-FORMAT 2: TIPS AND TRICKS (listicle with re-hook)
+FORMAT 2: TIPS AND TRICKS (spoken numbered list)
 Best for: actionable advice, "X ways to...", tools, frameworks, numbered lists.
 Structure (total 130–180 words):
-  HOOK (max 15w): Bold opener   "Here is what [X] actually looks like" or "I wish someone told me these [N] things about [X]."
-  RE-HOOK (20–30w): IMMEDIATELY after the hook, preview ALL tips to lock in retention. Tease the most compelling ones. Example: "Tip one is obvious but nobody does it. Tip three is what my clients pay me for. Tip five is the one that changed everything." Make each tip sound like it has a specific payoff. Do NOT number them generically.
+  HOOK (max 15w): Classic listicle opener. "Here are [N] things about [X]." or "I wish someone told me these [N] things about [X]."
+  RE-HOOK (20–30w): IMMEDIATELY after the hook, tease why they need to stay. Build curiosity about specific tips. "Number one sounds obvious but almost nobody does it. Number three is what changed everything for my clients. And number five   that one is going to surprise you." Make each tip sound like it has a specific payoff.
   BODY   3 to 5 tips. STRICT FORMAT PER TIP:
-    - One line per tip. Max 12 words. No sub-clauses. No "and then" chains.
-    - Numbered: "1.", "2.", "3." etc.
-    - Each tip is a standalone short sentence. Period. Done.
-    - WRONG: "Tip one is to make sure you drink water before eating because hydration affects your cortisol."
-    - RIGHT: "1. Drink water before breakfast. Cortisol drops fast when you're dehydrated."
-    - Two short punchy sentences max per tip. Never one long one.
+    - Numbered with spoken language: "Number one:", "Number two:", "Number three:" etc.
+    - Each tip is 1-2 full natural sentences spoken aloud. Not fragments. Not a label.
+    - WRONG: "1. Hydration."
+    - WRONG: "1. Drink water." (too short, feels like a bullet point)
+    - RIGHT: "Number one: drink a full glass of water before you eat breakfast. Your cortisol is already elevated in the morning and dehydration makes it worse."
+    - The tip should feel like someone explaining it to you, not reading a checklist.
   CTA (20–30w).
 
 FORMAT 3: PERSONAL STORY (story arc)
@@ -218,10 +222,10 @@ Structure (total 110–150 words):
 
 VOICE RULES (all formats):
   → "You" and "your"   not "people" or "many individuals"
-  → Short sentences. Speaking rhythm, not essay rhythm.
+  → Natural spoken rhythm. Vary sentence length   some short, some medium. Never machine-gun one-liners. Never choppy fragments. Write like someone talking to a friend, not reading a bullet list.
   → No filler: "So basically," "At the end of the day," "What I mean is," "It's important to note"
   → Specific over vague every single time. Numbers, names, mechanisms, real examples.
-  → If it sounds like a blog post, rewrite it as someone talking.
+  → If it sounds like a blog post or a bullet list, rewrite it as someone actually talking.
 
 OUTPUT FORMAT:
 You MUST respond with raw JSON only. No markdown. No backticks. No explanation. Start with { and end with }.`
@@ -304,10 +308,10 @@ FORMAT 2 (tips_tricks): HOOK → RE-HOOK (teases all tips) → BODY (numbered ti
 FORMAT 3 (personal_story): HOOK (mid-story drop-in) → BODY (3 beats: Setup / Turning Point / Lesson) → CTA
 
 VOICE RULES:
-  → Short sentences. Speaking rhythm.
+  → Natural spoken rhythm. Vary sentence length   some short, some medium. Never choppy fragments or machine-gun one-liners.
   → "You" and "your"   not "people" or "many individuals."
   → Specific over vague. No filler phrases.
-  → If it sounds like a blog post, rewrite it as someone talking.
+  → If it sounds like a blog post or a bullet list, rewrite it as someone actually talking.
 
 OUTPUT: Raw JSON only. No markdown. No backticks. Start with { end with }.`
 

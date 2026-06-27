@@ -99,6 +99,47 @@ function driveToDownloadUrl(url: string): string | null {
   return `https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`
 }
 
+// ── Calendar helpers ──────────────────────────────────────────────────────────
+
+function toLocalISODate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+interface CalendarCell {
+  date: Date
+  iso: string
+  inMonth: boolean
+  isPast: boolean
+}
+
+function buildCalendarGrid(month: Date): CalendarCell[] {
+  const year = month.getFullYear()
+  const m = month.getMonth()
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  const firstDay = new Date(year, m, 1)
+  const startOffset = firstDay.getDay()
+  const daysInMonth = new Date(year, m + 1, 0).getDate()
+
+  const cells: CalendarCell[] = []
+  for (let i = startOffset; i > 0; i--) {
+    const d = new Date(year, m, 1 - i)
+    cells.push({ date: d, iso: toLocalISODate(d), inMonth: false, isPast: d < today })
+  }
+  for (let day = 1; day <= daysInMonth; day++) {
+    const d = new Date(year, m, day)
+    cells.push({ date: d, iso: toLocalISODate(d), inMonth: true, isPast: d < today })
+  }
+  while (cells.length % 7 !== 0) {
+    const last = cells[cells.length - 1].date
+    const d = new Date(last)
+    d.setDate(d.getDate() + 1)
+    cells.push({ date: d, iso: toLocalISODate(d), inMonth: false, isPast: d < today })
+  }
+  return cells
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface VideoJobRow {
@@ -341,9 +382,16 @@ function PublishForm() {
 
   // Schedule
   const [scheduleMode, setScheduleMode] = useState<'now' | 'later'>('now')
-  const [scheduledAt, setScheduledAt] = useState('')  // datetime-local value
-  const [dayTaken, setDayTaken] = useState(false)
-  const [checkingDay, setCheckingDay] = useState(false)
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const d = new Date()
+    d.setDate(1)
+    d.setHours(0, 0, 0, 0)
+    return d
+  })
+  const [scheduledPlatformsByDay, setScheduledPlatformsByDay] = useState<Record<string, Set<string>>>({})
+  const [loadingCalendar, setLoadingCalendar] = useState(false)
+  const [selectedDate, setSelectedDate] = useState('')  // YYYY-MM-DD
+  const [selectedTime, setSelectedTime] = useState('09:00')
 
   // Submit
   const [submitting, setSubmitting] = useState(false)
@@ -378,19 +426,30 @@ function PublishForm() {
     setLoadingJobs(true)
     try {
       const supabase = createClient()
-      const { data } = await supabase
-        .from('video_jobs')
-        .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
-        .eq('status', 'complete')
-        .not('selected_variant', 'is', null)
-        .order('created_at', { ascending: false })
-        .limit(20)
+      const [jobsRes, publishedRes] = await Promise.all([
+        supabase
+          .from('video_jobs')
+          .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
+          .eq('status', 'complete')
+          .not('selected_variant', 'is', null)
+          .order('created_at', { ascending: false })
+          .limit(30),
+        supabase
+          .from('publish_jobs')
+          .select('video_job_id')
+          .eq('status', 'published')
+          .not('video_job_id', 'is', null),
+      ])
+
+      const publishedJobIds = new Set((publishedRes.data ?? []).map(r => r.video_job_id as string))
 
       setJobs(
-        (data ?? []).map((row: Record<string, unknown>) => ({
-          ...row,
-          script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
-        })) as VideoJobRow[]
+        (jobsRes.data ?? [])
+          .filter((row: Record<string, unknown>) => !publishedJobIds.has(row.id as string))
+          .map((row: Record<string, unknown>) => ({
+            ...row,
+            script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
+          })) as VideoJobRow[]
       )
     } finally {
       setLoadingJobs(false)
@@ -423,30 +482,35 @@ function PublishForm() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJobId, accounts.length, loadingAccounts])
 
-  // Check if the chosen schedule day already has a post
+  // Fetch which platforms are already scheduled on each day in the visible month.
+  // Blocking is per-platform: Facebook today doesn't block Instagram today, only another Facebook.
   useEffect(() => {
-    if (scheduleMode !== 'later' || !scheduledAt) { setDayTaken(false); return }
+    if (scheduleMode !== 'later') return
     let cancelled = false
-    setCheckingDay(true)
+    setLoadingCalendar(true)
     const supabase = createClient()
-    const d = new Date(scheduledAt)
-    const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0).toISOString()
-    const dayEnd   = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59).toISOString()
+    const monthStart = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1)
+    const monthEnd = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0, 23, 59, 59)
     supabase
       .from('publish_jobs')
-      .select('id')
-      .gte('scheduled_at', dayStart)
-      .lte('scheduled_at', dayEnd)
+      .select('scheduled_at, platform_posts')
+      .gte('scheduled_at', monthStart.toISOString())
+      .lte('scheduled_at', monthEnd.toISOString())
       .in('status', ['scheduled', 'publishing'])
-      .limit(1)
       .then(({ data }) => {
-        if (!cancelled) {
-          setDayTaken(!!(data && data.length > 0))
-          setCheckingDay(false)
+        if (cancelled) return
+        const byDay: Record<string, Set<string>> = {}
+        for (const row of data ?? []) {
+          const day = toLocalISODate(new Date(row.scheduled_at as string))
+          const posts = (row.platform_posts as Array<{ platform: string }>) ?? []
+          if (!byDay[day]) byDay[day] = new Set()
+          for (const p of posts) byDay[day].add(p.platform.toLowerCase())
         }
+        setScheduledPlatformsByDay(byDay)
+        setLoadingCalendar(false)
       })
     return () => { cancelled = true }
-  }, [scheduledAt, scheduleMode])
+  }, [scheduleMode, calendarMonth])
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
@@ -460,11 +524,24 @@ function PublishForm() {
     selectedAccounts.some(a => a.platform.toLowerCase() === p)
   )
 
+  // scheduledAt is fully derived from the calendar pick   no need for separate state synced via effect
+  const scheduledAt = selectedDate && selectedTime ? `${selectedDate}T${selectedTime}` : ''
+  // The calendar only blocks days before today   picking today still needs a time-of-day check,
+  // otherwise a past time (e.g. 9am when it's already 3pm) silently submits a past schedule.
+  const scheduledInPast = scheduledAt !== '' && new Date(scheduledAt).getTime() <= Date.now()
+
+  // Blocking is per-platform: a day is "taken" only for the platforms already
+  // scheduled there. Facebook today doesn't block scheduling Instagram today too.
+  const takenPlatformsToday = selectedDate ? scheduledPlatformsByDay[selectedDate] ?? new Set<string>() : new Set<string>()
+  const conflictingPlatforms = selectedPlatforms.filter(p => takenPlatformsToday.has(p))
+  const dayTaken = conflictingPlatforms.length > 0
+
   const hasScript = !!(selectedJob?.script?.hook)
   const canGenerate = hasScript && selectedPlatforms.length > 0
   const captionsFilled = selectedPlatforms.length > 0 &&
     selectedPlatforms.every(p => (captions[p] ?? '').trim().length > 0)
-  const canPublish = !!videoUrl.trim() && captionsFilled && selectedIds.size > 0 && !loadingAccounts && !dayTaken
+  const canPublish = !!videoUrl.trim() && captionsFilled && selectedIds.size > 0 && !loadingAccounts && !dayTaken &&
+    (scheduleMode === 'now' || (!!scheduledAt && !scheduledInPast))
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
@@ -907,7 +984,7 @@ function PublishForm() {
             {allPublished && (
               <div className="mt-4 flex items-center gap-4 flex-wrap">
                 <button type="button"
-                  onClick={() => { setResult(null); setSelectedJobId(null); setVideoUrl(''); setDriveInput(''); setDriveResolved(null); setCaptions({}); setScheduleMode('now'); setScheduledAt('') }}
+                  onClick={() => { setResult(null); setSelectedJobId(null); setVideoUrl(''); setDriveInput(''); setDriveResolved(null); setCaptions({}); setScheduleMode('now'); setSelectedDate(''); setSelectedTime('09:00') }}
                   className="text-xs text-[#16A34A] underline">
                   Publish another
                 </button>
@@ -956,53 +1033,143 @@ function PublishForm() {
 
             {scheduleMode === 'later' && (
               <div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="datetime-local"
-                    value={scheduledAt}
-                    onChange={e => setScheduledAt(e.target.value)}
-                    min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
-                    required={scheduleMode === 'later'}
-                    className="h-11 px-4 rounded-xl border text-sm outline-none bg-[#FAFAFA] transition-colors"
-                    style={{
-                      colorScheme: 'light',
-                      borderColor: dayTaken ? '#FCA5A5' : '#E4E4E0',
-                    }}
-                    onFocus={e => { if (!dayTaken) e.currentTarget.style.borderColor = '#FF4F17' }}
-                    onBlur={e => { e.currentTarget.style.borderColor = dayTaken ? '#FCA5A5' : '#E4E4E0' }}
-                  />
-                  {checkingDay && (
-                    <div className="w-4 h-4 rounded-full border-2 border-[#FF4F17] border-t-transparent animate-spin" />
-                  )}
-                  {scheduledAt && !checkingDay && !dayTaken && (
-                    <span className="text-xs text-[#059669] flex items-center gap-1">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M20 6L9 17l-5-5" />
-                      </svg>
-                      Day free
-                    </span>
-                  )}
+                {/* Month nav */}
+                <div className="flex items-center justify-between mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setCalendarMonth(d => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-[#F4F3F0] transition-colors cursor-pointer"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#71717A" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+                  </button>
+                  <p className="text-sm font-semibold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
+                    {calendarMonth.toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setCalendarMonth(d => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+                    className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-[#F4F3F0] transition-colors cursor-pointer"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#71717A" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
+                  </button>
                 </div>
 
+                {/* Weekday labels */}
+                <div className="grid grid-cols-7 mb-1">
+                  {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+                    <div key={i} className="text-center text-[10px] font-semibold text-[#A1A1AA] py-1">{d}</div>
+                  ))}
+                </div>
+
+                {/* Calendar grid */}
+                <div className="grid grid-cols-7 gap-1 relative">
+                  {loadingCalendar && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-white/60 z-10 rounded-xl">
+                      <div className="w-4 h-4 rounded-full border-2 border-[#FF4F17] border-t-transparent animate-spin" />
+                    </div>
+                  )}
+                  {buildCalendarGrid(calendarMonth).map(cell => {
+                    const platformsTaken = scheduledPlatformsByDay[cell.iso] ?? new Set<string>()
+                    // Conflict = one of the platforms you currently have selected is already taken that day.
+                    // Other platforms being scheduled that day doesn't count   posting is per-platform.
+                    const hasConflict = selectedPlatforms.some(p => platformsTaken.has(p))
+                    const hasAnyPost = platformsTaken.size > 0
+                    const isSelected = selectedDate === cell.iso
+                    const disabled = !cell.inMonth || cell.isPast
+                    return (
+                      <button
+                        key={cell.iso}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setSelectedDate(cell.iso)}
+                        title={hasAnyPost ? `Already scheduled: ${[...platformsTaken].join(', ')}` : undefined}
+                        className="h-9 rounded-lg text-xs font-medium transition-all relative cursor-pointer disabled:cursor-not-allowed"
+                        style={{
+                          background: isSelected ? '#FF4F17' : hasConflict ? '#FEF2F2' : 'transparent',
+                          color: disabled ? '#D4D4D1' : isSelected ? 'white' : hasConflict ? '#DC2626' : '#18181B',
+                          fontWeight: isSelected ? 700 : 500,
+                        }}
+                      >
+                        {cell.date.getDate()}
+                        {hasAnyPost && !isSelected && (
+                          <span
+                            className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full"
+                            style={{ background: hasConflict ? '#DC2626' : '#A1A1AA' }}
+                          />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                {/* Legend */}
+                <div className="flex items-center gap-4 mt-3 text-[11px] text-[#A1A1AA]">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-[#DC2626]" /> Conflicts with your selected platform(s)
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-[#A1A1AA]" /> Other platform scheduled
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-[#FF4F17]" /> Selected
+                  </span>
+                </div>
+
+                {/* Time picker */}
+                {selectedDate && (
+                  <div className="mt-4 flex items-center gap-3">
+                    <input
+                      type="time"
+                      value={selectedTime}
+                      onChange={e => setSelectedTime(e.target.value)}
+                      className="h-11 px-4 rounded-xl border text-sm outline-none bg-[#FAFAFA] transition-colors"
+                      style={{ colorScheme: 'light', borderColor: dayTaken ? '#FCA5A5' : '#E4E4E0' }}
+                    />
+                    {dayTaken ? (
+                      <span className="text-xs text-[#DC2626]">Already taken</span>
+                    ) : scheduledInPast ? (
+                      <span className="text-xs text-[#DC2626]">That time has already passed</span>
+                    ) : (
+                      <span className="text-xs text-[#059669] flex items-center gap-1">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M20 6L9 17l-5-5" />
+                        </svg>
+                        Day free
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {scheduledInPast && !dayTaken && (
+                  <div className="mt-3 flex items-start gap-2 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-3 py-2.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-0.5">
+                      <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+                    </svg>
+                    <p className="text-xs font-semibold text-[#DC2626]">That time has already passed today. Pick a later time.</p>
+                  </div>
+                )}
+
                 {dayTaken && (
-                  <div className="mt-2 flex items-start gap-2 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-3 py-2.5">
+                  <div className="mt-3 flex items-start gap-2 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-3 py-2.5">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-0.5">
                       <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
                     </svg>
                     <div>
-                      <p className="text-xs font-semibold text-[#DC2626]">This day already has a post scheduled.</p>
-                      <p className="text-[11px] text-[#DC2626] opacity-80 mt-0.5">Pick a different day to keep one post per day.</p>
+                      <p className="text-xs font-semibold text-[#DC2626]">
+                        {conflictingPlatforms.map(p => getPlatformMeta(p).label).join(', ')} already {conflictingPlatforms.length > 1 ? 'have' : 'has'} a post scheduled this day.
+                      </p>
+                      <p className="text-[11px] text-[#DC2626] opacity-80 mt-0.5">Pick a different day, or deselect that platform   one post per platform per day.</p>
                     </div>
                   </div>
                 )}
 
                 {scheduledAt && !dayTaken && (
-                  <p className="mt-2 text-xs text-[#71717A]">
+                  <p className="mt-3 text-xs text-[#71717A]">
                     Scheduled for {new Date(scheduledAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}
                   </p>
                 )}
                 <p className="mt-3 text-[11px] text-[#A1A1AA]">
-                  One post per day keeps your reach consistent.{' '}
+                  One post per platform per day keeps your reach consistent   other platforms can still post the same day.{' '}
                   <a
                     href="https://my.blotato.com/queue/schedules"
                     target="_blank"

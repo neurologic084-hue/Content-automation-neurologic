@@ -6,7 +6,6 @@ import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import type { AudienceLane, LaneSuggestion } from '@/lib/types'
 import { PulseLoader } from '@/components/pulse-loader'
-import { ConfirmModal } from '@/components/confirm-modal'
 
 const GENERATING_STEPS = [
   { label: 'Searching the web for relevant context...', delay: 0 },
@@ -75,7 +74,6 @@ export default function NewIdeaPage() {
   const [generatedIdeas, setGeneratedIdeas] = useState<Array<{ format: string; idea: string }>>([])
   const [isGeneratingIdeas, setIsGeneratingIdeas] = useState(false)
   const [ideaGenError, setIdeaGenError] = useState('')
-  const [showGenerateConfirm, setShowGenerateConfirm] = useState(false)
 
   useEffect(() => {
     async function checkSettings() {
@@ -178,17 +176,27 @@ export default function NewIdeaPage() {
   async function handleConfirmPendingIdea() {
     if (!pendingIdeaItem) return
     const fmt = pendingIdeaItem.format
+    const ideaText = pendingIdeaItem.idea
+    // Switch to the loading screen immediately, in the same tick as clearing
+    // pendingIdeaItem, so the UI never flashes back to the ideas list while
+    // the suggest-lane network call is in flight.
+    setStep('generating')
     setPendingIdeaItem(null)
-    await handleSuggestLane(pendingIdeaItem.idea, selectedMood, undefined, fmt)
+    await handleSuggestLane(ideaText, selectedMood, undefined, fmt)
   }
 
-  async function handleGenerateIdeas() {
+  async function handleGenerateIdeas(avoidIdeas?: Array<{ format: string; idea: string }>) {
+    if (isGeneratingIdeas) return  // guard against double-fire from a fast double-click
     setIsGeneratingIdeas(true)
     setIdeaGenError('')
     setGeneratedIdeas([])
 
     try {
-      const res = await fetch('/api/ideas/generate', { method: 'POST' })
+      const res = await fetch('/api/ideas/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ avoid: avoidIdeas ?? [] }),
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       const ideas = data.ideas ?? []
@@ -364,7 +372,7 @@ export default function NewIdeaPage() {
 
               {/* Tone selector */}
               <div className="mb-4">
-                <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Tone (optional)</label>
+                <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Tone <span className="text-[#FF4F17]">*</span></label>
                 <div className="flex flex-wrap gap-2">
                   {MOODS.map(m => (
                     <button
@@ -386,7 +394,7 @@ export default function NewIdeaPage() {
 
               {/* Format selector */}
               <div className="mb-4">
-                <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Format (optional)</label>
+                <label className="block text-xs font-semibold text-[#71717A] uppercase tracking-wider mb-2">Format <span className="text-[#FF4F17]">*</span></label>
                 <div className="flex flex-wrap gap-2">
                   {FORMATS.map(f => {
                     const active = selectedFormat === f.id
@@ -438,7 +446,7 @@ export default function NewIdeaPage() {
 
               <button
                 onClick={() => handleSuggestLane()}
-                disabled={!idea.trim() || loading}
+                disabled={!idea.trim() || !selectedMood || !selectedFormat || loading}
                 className="w-full py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
               >
                 {loading ? (
@@ -590,7 +598,7 @@ export default function NewIdeaPage() {
                         </div>
                       )}
                       <button
-                        onClick={() => setShowGenerateConfirm(true)}
+                        onClick={() => handleGenerateIdeas()}
                         className="px-6 py-2.5 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] transition-all cursor-pointer"
                         style={{ boxShadow: '0 4px 14px rgba(255,79,23,0.3)' }}
                       >
@@ -634,7 +642,7 @@ export default function NewIdeaPage() {
                 onClick={() => {
                   setPendingIdeaItem(null)
                   setSelectedMood('')
-                  handleGenerateIdeas()
+                  handleGenerateIdeas(generatedIdeas)
                 }}
                 disabled={isGeneratingIdeas}
                 className="h-9 px-4 rounded-xl border border-[#E4E4E0] text-sm text-[#71717A] hover:bg-[#F4F3F0] disabled:opacity-40 transition-all cursor-pointer flex items-center gap-1.5"
@@ -852,14 +860,6 @@ export default function NewIdeaPage() {
         </div>
       )}
 
-      <ConfirmModal
-        open={showGenerateConfirm}
-        title="Generate ideas"
-        message="Generate 10 ideas using your brand profile? This uses AI credits."
-        confirmLabel="Generate"
-        onConfirm={() => { setShowGenerateConfirm(false); handleGenerateIdeas() }}
-        onCancel={() => setShowGenerateConfirm(false)}
-      />
     </div>
   )
 }

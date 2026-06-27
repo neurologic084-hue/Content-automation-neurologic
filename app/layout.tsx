@@ -21,7 +21,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: 'Olympus | AI Script Engine',
+    default: 'Olympus | AI Creator Mode',
     template: '%s | Olympus',
   },
   description: 'Turn any idea into a scroll-stopping short-form script. AI picks the audience, writes the script, learns from every approval.',

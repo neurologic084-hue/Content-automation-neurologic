@@ -1,20 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
+import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { publishPost } from '@/lib/blotato'
+import { uploadToStorage } from '@/lib/storage'
 
-/** Convert a relative path like /renders/xxx/file.mp4 into an absolute URL.
- *  Blotato requires a publicly accessible https:// URL. */
-function toAbsoluteUrl(url: string, req: NextRequest): string {
-  if (url.startsWith('http://') || url.startsWith('https://')) return url
+/** If the URL is a local /renders/... path, upload it to Supabase Storage
+ *  and return the public URL. Otherwise return as-is. */
+async function resolveMediaUrl(url: string): Promise<string> {
+  if (!url.startsWith('/renders/')) return url
 
-  // Try the configured public URL first (set in env for production)
-  const base = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '')
-  if (base) return `${base}${url.startsWith('/') ? url : `/${url}`}`
+  // /renders/<jobId>/<fileName>
+  const parts = url.replace(/^\/renders\//, '').split('/')
+  const jobId = parts[0]
+  const fileName = parts[1]
+  if (!jobId || !fileName) return url
 
-  // Fall back to reconstructing from the request's origin headers
-  const host = req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? 'localhost:3000'
-  const proto = req.headers.get('x-forwarded-proto') ?? (host.startsWith('localhost') ? 'http' : 'https')
-  return `${proto}://${host}${url.startsWith('/') ? url : `/${url}`}`
+  const localPath = path.join(process.cwd(), 'public', 'renders', jobId, fileName)
+  return uploadToStorage(localPath, fileName, jobId)
 }
 
 export async function POST(req: NextRequest) {
@@ -38,24 +40,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing downloadUrl, captions, or accounts.' }, { status: 400 })
   }
 
-  // Ensure the media URL is absolute — Blotato rejects relative paths
-  const absoluteUrl = toAbsoluteUrl(downloadUrl, req)
-
   const fallbackCaption = Object.values(captions).find(c => c?.trim()) ?? ''
 
   const supabase = await createClient()
 
+  // Insert the job row first, before the upload, so a failed upload still leaves a
+  // traceable record instead of vanishing with just a transient error response.
   const { data: job, error: jobErr } = await supabase
     .from('publish_jobs')
     .insert({
       script_id: scriptId ?? null,
       video_job_id: videoJobId ?? null,
       variant_id: variantId ?? null,
-      download_url: absoluteUrl,
+      download_url: downloadUrl,
       caption: fallbackCaption,
       account_ids: accounts.map(a => a.id),
       platform_posts: [],
-      status: 'publishing',
+      status: 'pending',
       scheduled_at: scheduledAt ?? null,
     })
     .select('id')
@@ -64,6 +65,17 @@ export async function POST(req: NextRequest) {
   if (jobErr || !job) {
     return NextResponse.json({ error: jobErr?.message ?? 'Could not create publish job.' }, { status: 500 })
   }
+
+  // Upload to Supabase Storage if it's a local file, otherwise use URL as-is
+  let absoluteUrl: string
+  try {
+    absoluteUrl = await resolveMediaUrl(downloadUrl)
+  } catch (err) {
+    await supabase.from('publish_jobs').update({ status: 'failed' }).eq('id', job.id)
+    return NextResponse.json({ error: `Failed to upload video to storage: ${String(err)}` }, { status: 500 })
+  }
+
+  await supabase.from('publish_jobs').update({ download_url: absoluteUrl, status: 'publishing' }).eq('id', job.id)
 
   const results = await Promise.allSettled(
     accounts.map(acc => {

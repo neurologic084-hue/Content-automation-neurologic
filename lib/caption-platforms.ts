@@ -49,7 +49,7 @@ Tone: Warm, accessible, genuine. A bit more personal than Instagram.
 Avoid: Anything that sounds like an ad. Describing the video. Corporate language.
 Emojis: 1-2 max.`,
 
-  youtube: `YOUTUBE SHORTS
+  youtube: `YOUTUBE (JSON key must be exactly "youtube", not "youtube_shorts" or any variant)
 Purpose: search discovery and click-through. The title is the primary lever.
 
 Format -- CRITICAL:

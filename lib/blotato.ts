@@ -92,8 +92,10 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
         mediaUrls: opts.mediaUrls,
         platform: opts.platform,
       },
-      ...(opts.scheduledAt ? { scheduledTime: opts.scheduledAt } : {}),
     },
+    // scheduledTime must be a ROOT-LEVEL field, sibling of "post" — nesting it inside
+    // "post" causes Blotato to silently ignore it and publish immediately.
+    ...(opts.scheduledAt ? { scheduledTime: opts.scheduledAt } : {}),
   }
 
   const res = await fetch(`${BASE_URL}/posts`, {
@@ -108,7 +110,49 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
   }
 
   const data = await res.json()
-  const postId = data.id ?? data.postId ?? null
-  const scheduled = !!opts.scheduledAt
-  return { postId, status: scheduled ? 'scheduled' : 'published' }
+  const postSubmissionId: string | null = data.postSubmissionId ?? null
+
+  // Scheduled posts can't be confirmed now   the scheduled time is in the future.
+  // Acceptance here just means Blotato successfully queued it.
+  if (opts.scheduledAt) {
+    return { postId: postSubmissionId, status: 'scheduled' }
+  }
+
+  if (!postSubmissionId) {
+    return { postId: null, status: 'published' }
+  }
+
+  // Blotato processes the post asynchronously after accepting it   poll for the
+  // real outcome instead of assuming success the moment the request is accepted.
+  const outcome = await pollPostStatus(postSubmissionId)
+  if (outcome.status === 'failed') {
+    return { postId: postSubmissionId, status: 'failed', error: outcome.error ?? 'Blotato reported a failure.' }
+  }
+  // 'published' or still 'in-progress' after the poll window   report published either way
+  // (in-progress almost always resolves quickly after); the postId lets it be checked later.
+  return { postId: postSubmissionId, status: 'published' }
+}
+
+async function pollPostStatus(
+  postSubmissionId: string,
+  maxAttempts = 8,
+  intervalMs = 2000
+): Promise<{ status: 'published' | 'failed' | 'in-progress'; error?: string }> {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const res = await fetch(`${BASE_URL}/posts/${postSubmissionId}`, {
+        headers: headers(),
+        cache: 'no-store',
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.status === 'published') return { status: 'published' }
+        if (data.status === 'failed') return { status: 'failed', error: data.error }
+      }
+    } catch {
+      // network hiccup mid-poll   keep trying within the budget
+    }
+    if (i < maxAttempts - 1) await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  return { status: 'in-progress' }
 }

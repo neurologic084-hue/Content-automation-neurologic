@@ -48,9 +48,8 @@ export async function POST(req: NextRequest) {
       .from('scripts')
       .select('hook, body, cta')
       .eq('status', 'approved')
-      .eq('is_few_shot', true)
       .order('approved_at', { ascending: false })
-      .limit(3)
+      .limit(15)
 
     searchResponse = await searchWebEnhanced(idea.raw_idea, lane)
     const searchContext = formatSearchContext(searchResponse)

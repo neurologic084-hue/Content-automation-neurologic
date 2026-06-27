@@ -29,9 +29,8 @@ export async function POST(req: NextRequest) {
     .from('scripts')
     .select('hook, body, cta')
     .eq('status', 'approved')
-    .eq('is_few_shot', true)
     .order('approved_at', { ascending: false })
-    .limit(3)
+    .limit(15)
 
   const fewShots = (fewShotsRaw ?? []) as any[]
 

@@ -121,7 +121,7 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
               </span>
               <span className="text-[9px] font-light" style={{ color: '#D0CCC8' }}>|</span>
               <span className="text-[9px] font-semibold tracking-[0.05em] uppercase" style={{ color: '#FF4F17', letterSpacing: '0.06em' }}>
-                AI Script
+                AI Creator
               </span>
             </div>
           </div>

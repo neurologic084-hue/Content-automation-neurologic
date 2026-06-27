@@ -185,7 +185,7 @@ export default async function DashboardPage() {
             <h2 className="font-bold text-[#18181B] text-base" style={{ fontFamily: 'var(--font-jakarta)' }}>
               Getting started
             </h2>
-            <p className="text-xs text-[#A1A1AA] mt-0.5">Complete these steps to activate your script engine.</p>
+            <p className="text-xs text-[#A1A1AA] mt-0.5">Complete these steps to activate your creator mode.</p>
           </div>
           <div className="divide-y divide-[#F0F0EE]">
             {/* Step 1 */}
