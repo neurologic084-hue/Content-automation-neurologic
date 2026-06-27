@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 export const TOUR_KEY = 'reel_tour_v1'
 
@@ -52,10 +53,13 @@ interface HighlightRect {
 type Phase = 'welcome' | 'tour'
 
 export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean; onClose?: () => void }) {
+  const [mounted, setMounted] = useState(false)
   const [visible, setVisible] = useState(false)
   const [phase, setPhase] = useState<Phase>('welcome')
   const [step, setStep] = useState(0)
   const [rect, setRect] = useState<HighlightRect | null>(null)
+
+  useEffect(() => { setMounted(true) }, [])
 
   useEffect(() => {
     if (forceOpen) {
@@ -102,11 +106,11 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
     }
   }
 
-  if (!visible) return null
+  if (!visible || !mounted) return null
 
   // ── Welcome slide ──────────────────────────────────────────────
   if (phase === 'welcome') {
-    return (
+    return createPortal(
       <div
         className="fixed inset-0 z-50 flex items-center justify-center p-4"
         style={{ background: 'rgba(0,0,0,0.32)', backdropFilter: 'blur(6px)' }}
@@ -190,7 +194,8 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
             </button>
           </div>
         </div>
-      </div>
+      </div>,
+      document.body
     )
   }
 
@@ -207,7 +212,7 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
     window.innerHeight - 240
   )
 
-  return (
+  return createPortal(
     <>
       {/* Spotlight */}
       <div
@@ -311,6 +316,7 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
           </div>
         </div>
       </div>
-    </>
+    </>,
+    document.body
   )
 }
