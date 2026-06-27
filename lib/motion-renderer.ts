@@ -1,14 +1,22 @@
 import { exec } from 'child_process'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import { createClient } from '@supabase/supabase-js'
-import { transcribeVideo, pollSubmagicJob } from './video-pipeline'
 import { tryUploadToStorage, storageFileName } from './storage'
+import { chatCompletion, MODELS } from './openrouter'
 import type { VideoVariant } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob } from './video-pipeline'
+import { processWithDescript } from './descript-client'
+import { processWithZapcap } from './zapcap-client'
 
 const active = new Set<string>()
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Cache Descript-edited URLs per job so multiple variants don't re-encode the same footage.
+// Stores either a pending Promise (first variant is running Descript) or a resolved URL.
+// Second variant arriving while the first is mid-run waits on the same Promise instead of
+// starting a duplicate Descript job.
+const descriptUrlCache = new Map<string, Promise<string> | { url: string; expiresAt: number }>()
 
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -18,31 +26,115 @@ function supabaseAdmin() {
 
 function run(cmd: string, timeoutMs = 300_000): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = exec(cmd, { timeout: timeoutMs }, (err) => (err ? reject(err) : resolve()))
-    proc.stderr?.on('data', (d) => process.stdout.write(`[ffmpeg] ${d}`))
+    let stderrBuf = ''
+    const proc = exec(cmd, { timeout: timeoutMs, maxBuffer: 512 * 1024 * 1024 }, (err) => {
+      if (err) {
+        const detail = stderrBuf.slice(-800).trim()
+        reject(new Error(detail || err.message))
+      } else {
+        resolve()
+      }
+    })
+    proc.stderr?.on('data', (d) => {
+      const line = String(d)
+      process.stdout.write(`[ffmpeg] ${line}`)
+      stderrBuf += line
+    })
   })
 }
 
-function runHF(args: string, timeoutMs = 600_000): Promise<void> {
-  const hfBin = path.join(process.cwd(), 'node_modules/.bin/hyperframes')
-  return new Promise((resolve, reject) => {
-    exec(`"${hfBin}" ${args}`, { timeout: timeoutMs }, (err) => (err ? reject(err) : resolve()))
+async function getVideoDuration(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    exec(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      (_err, stdout) => resolve(parseFloat(stdout.trim()) || 60)
+    )
+  })
+}
+
+async function streamBodyToFile(body: ReadableStream<Uint8Array>, dest: string): Promise<void> {
+  const file = fs.createWriteStream(dest)
+  const reader = body.getReader()
+  await new Promise<void>((resolve, reject) => {
+    file.on('error', reject)
+    file.on('finish', resolve)
+    const pump = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) { file.end(); break }
+          if (!file.write(Buffer.from(value))) await new Promise<void>(r => file.once('drain', r))
+        }
+      } catch (e) { file.destroy(e as Error) }
+    }
+    pump()
   })
 }
 
 async function downloadFile(url: string, dest: string): Promise<void> {
-  const res = await fetch(url, { redirect: 'follow' })
-  if (!res.ok || !res.body) throw new Error(`Download failed: ${res.status}`)
-  fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()))
-}
+  const isGdrive = url.includes('drive.google.com') || url.includes('drive.usercontent.google.com')
 
-function detectFont(): string {
-  const candidates = [
-    '/System/Library/Fonts/Helvetica.ttc',
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
-  ]
-  return candidates.find((p) => fs.existsSync(p)) ?? ''
+  let res = await fetch(url, { redirect: 'follow' })
+  if (!res.ok || !res.body) throw new Error(`Download failed: HTTP ${res.status}`)
+
+  const contentType = res.headers.get('content-type') ?? ''
+
+  if (isGdrive && contentType.includes('text/html')) {
+    const html = await res.text()
+    let realUrl: string | null = null
+
+    const actionMatch = html.match(/action="(https:\/\/drive\.usercontent\.google\.com\/download[^"]*)"/)
+    if (actionMatch) {
+      const base = actionMatch[1].replace(/&amp;/g, '&')
+      const params: Record<string, string> = {}
+      const re = /<input\b[^>]*>/gi
+      let tag: RegExpExecArray | null
+      while ((tag = re.exec(html)) !== null) {
+        const t = tag[0]
+        if (!/type=["']hidden["']/i.test(t)) continue
+        const name = t.match(/\bname=["']([^"']+)["']/i)?.[1]
+        const value = t.match(/\bvalue=["']([^"']*)["']/i)?.[1] ?? ''
+        if (name) params[name] = value
+      }
+      realUrl = Object.keys(params).length
+        ? `${base}?${new URLSearchParams(params).toString()}`
+        : base
+    }
+
+    if (!realUrl) {
+      const confirmMatch = html.match(/[?&]confirm=([0-9A-Za-z_-]+)/)
+      const idMatch = url.match(/[?&]id=([^&]+)/)
+      if (confirmMatch && idMatch) {
+        realUrl = `https://drive.google.com/uc?export=download&id=${idMatch[1]}&confirm=${confirmMatch[1]}`
+      }
+    }
+
+    if (!realUrl) {
+      throw new Error(
+        'Google Drive returned a confirmation page and no download link was found. ' +
+        'Set the file sharing to "Anyone with the link can view" and try again.'
+      )
+    }
+
+    res = await fetch(realUrl, { redirect: 'follow' })
+    if (!res.ok || !res.body) throw new Error(`Google Drive confirmed download failed: HTTP ${res.status}`)
+  }
+
+  await streamBodyToFile(res.body!, dest)
+
+  const buf = Buffer.alloc(12)
+  const fd = fs.openSync(dest, 'r')
+  fs.readSync(fd, buf, 0, 12, 0)
+  fs.closeSync(fd)
+  const boxType = buf.slice(4, 8).toString('ascii')
+  if (boxType !== 'ftyp' && boxType !== 'moov' && boxType !== 'mdat' && boxType !== 'wide') {
+    const preview = buf.slice(0, 12).toString('utf8').replace(/[^\x20-\x7e]/g, '.')
+    throw new Error(
+      `Downloaded file is not a valid video (expected MP4, got "${preview}"). ` +
+      'The Google Drive link may have returned an HTML page. ' +
+      'Set the file sharing to "Anyone with the link can view".'
+    )
+  }
 }
 
 async function markVariant(
@@ -58,7 +150,7 @@ async function markVariant(
 
   const variants = (job.variants as VideoVariant[]).map((v) =>
     v.id === variantId
-      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error }
+      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null }
       : v
   )
 
@@ -69,7 +161,24 @@ async function markVariant(
     .eq('id', jobId)
 }
 
-// Upload to Supabase Storage, fall back to local path, then mark variant ready.
+async function setVariantProgress(
+  jobId: string,
+  variantId: string,
+  step: number,
+  total: number,
+  label: string
+): Promise<void> {
+  try {
+    const db = supabaseAdmin()
+    const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    if (!job?.variants) return
+    const variants = (job.variants as VideoVariant[]).map((v) =>
+      v.id === variantId ? { ...v, progress: { step, total, label } } : v
+    )
+    await db.from('video_jobs').update({ variants }).eq('id', jobId)
+  } catch { /* best-effort */ }
+}
+
 async function finishVariant(
   jobId: string,
   variantId: string,
@@ -80,440 +189,464 @@ async function finishVariant(
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
-// ── Background music generation (ElevenLabs Sound Effects API) ───────────────
-
-// Generate a background music MP3 via ElevenLabs Sound Generation and cache it
-// locally for the job. Returns null if music is not configured.
-async function generateBackgroundMusic(outDir: string, moodTag?: string): Promise<string | null> {
-  const prompt = process.env.BACKGROUND_MUSIC_PROMPT
-  const fallbackUrl = process.env.BACKGROUND_MUSIC_URL
-  const destPath = path.join(outDir, 'background_music.mp3')
-
-  // ElevenLabs Sound Generation — prompt-based music
-  if (prompt && process.env.ELEVENLABS_API_KEY) {
-    const moodHint = moodTag ? `, ${moodTag} mood` : ''
-    const fullPrompt = `${prompt}${moodHint}`
-    try {
-      const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
-        method: 'POST',
-        headers: {
-          'xi-api-key': process.env.ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text: fullPrompt,
-          duration_seconds: 22,   // max for ElevenLabs, looped by FFmpeg
-          prompt_influence: 0.5,
-        }),
-      })
-      if (res.ok) {
-        fs.writeFileSync(destPath, Buffer.from(await res.arrayBuffer()))
-        return destPath
+function cleanTempFiles(outDir: string, variantId: string): void {
+  try {
+    const tmpDir = os.tmpdir()
+    for (const f of fs.readdirSync(tmpDir)) {
+      if (f.startsWith('descript-src-') && f.endsWith('.mp4')) {
+        try { fs.unlinkSync(path.join(tmpDir, f)) } catch { /* best-effort */ }
       }
-    } catch { /* fall through */ }
+    }
+  } catch { /* best-effort */ }
+  for (const suffix of ['_edited.mp4', '.mp4', '_captions.ass', '_edited_tmp.mp4', '_mx.mp4', '_dt.mp4', '_broll.mp4']) {
+    const p = path.join(outDir, `${variantId}${suffix}`)
+    try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch { /* best-effort */ }
   }
+}
 
-  // Direct MP3 URL fallback
-  if (fallbackUrl) {
-    try {
-      await downloadFile(fallbackUrl, destPath)
-      return destPath
-    } catch { /* fall through */ }
+async function getVideoStreamDuration(filePath: string): Promise<number> {
+  return new Promise((resolve) => {
+    exec(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      (_err, stdout) => {
+        const d = parseFloat(stdout.trim())
+        resolve(d > 0 ? d : 0)
+      }
+    )
+  })
+}
+
+// ── Background music via ElevenLabs Sound Generation ─────────────────────────
+
+// Derive a music prompt from the video's hook using a fast AI call.
+// This makes music match the actual content — calm for a reflective video, upbeat for energetic, etc.
+async function deriveMusicPrompt(hook: string): Promise<string> {
+  const fallback = 'subtle ambient background music with soft piano, slow tempo, no vocals, designed for spoken word video'
+  if (!hook) return fallback
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      messages: [{
+        role: 'user',
+        content: `A short-form video has this opening hook: "${hook.slice(0, 200)}"\n\nIn one sentence under 20 words, describe the ideal background music for this video. Focus only on: tempo, mood, and instruments. Do not mention the video topic. Always end with "no vocals". Example: "slow ambient piano with warm pads, calm and grounding, no vocals"`,
+      }],
+      max_tokens: 60,
+    })
+    const prompt = raw.trim().replace(/^["']|["']$/g, '')
+    console.log(`[motion-renderer] derived music prompt: "${prompt}"`)
+    return prompt
+  } catch {
+    return fallback
   }
+}
 
+async function generateBackgroundMusic(hook: string): Promise<string | null> {
+  const key = process.env.ELEVENLABS_API_KEY
+  if (!key) { console.warn('[motion-renderer] ELEVENLABS_API_KEY not set — skipping music'); return null }
+  const prompt = process.env.BACKGROUND_MUSIC_PROMPT || await deriveMusicPrompt(hook)
+  console.log(`[motion-renderer] generating background music: "${prompt.slice(0, 80)}..."`)
+  try {
+    const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
+      method: 'POST',
+      headers: { 'xi-api-key': key, 'Content-Type': 'application/json' },
+      // Always generate 22s (max quality); FFmpeg loops it to fill any video length.
+      body: JSON.stringify({ text: prompt, duration_seconds: 22, prompt_influence: 0.4 }),
+      signal: AbortSignal.timeout(90_000),
+    })
+    if (!res.ok) {
+      console.warn(`[motion-renderer] ElevenLabs music gen ${res.status}:`, await res.text().catch(() => ''))
+      return null
+    }
+    const buf = Buffer.from(await res.arrayBuffer())
+    const out = path.join(os.tmpdir(), `bgmusic_${Date.now()}.mp3`)
+    fs.writeFileSync(out, buf)
+    console.log(`[motion-renderer] music ready: ${(buf.byteLength / 1024).toFixed(0)} KB`)
+    return out
+  } catch (e) {
+    console.warn('[motion-renderer] music generation error:', (e as Error).message)
+    return null
+  }
+}
+
+// Mix generated music under the video. Fades in/out, ducks under the voice via sidechain compression.
+async function mixBackgroundMusic(videoPath: string, hook: string): Promise<void> {
+  const duration = await getVideoDuration(videoPath)
+  const musicPath = await generateBackgroundMusic(hook)
+  if (!musicPath) return
+
+  // Fade in over 1.5s at start, fade out in the last 1.5s
+  const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
+  const tmp = videoPath + '_mx.mp4'
+
+  try {
+    // Music chain: loop → fade in/out → set level → sidechain-compress under voice
+    // sidechaincompress ducks music when voice is present (ratio=6), releases slowly (300ms) so it breathes naturally
+    await run(
+      `ffmpeg -y -i "${videoPath}" -stream_loop -1 -i "${musicPath}" ` +
+      `-filter_complex ` +
+      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,volume=0.28[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=0.02:ratio=6:attack=5:release=300[ducked];` +
+      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0[out]" ` +
+      `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
+      300_000
+    )
+    if (fs.existsSync(tmp)) fs.renameSync(tmp, videoPath)
+    else console.warn('[motion-renderer] music mix produced no output, keeping original')
+  } catch (e) {
+    console.warn('[motion-renderer] music mix failed, keeping original:', (e as Error).message)
+    try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+  } finally {
+    try { fs.unlinkSync(musicPath) } catch { /* best-effort */ }
+  }
+}
+
+// Trim trailing audio tail from Descript exports (video stream ends before container duration).
+// Uses video stream duration via getVideoStreamDuration.
+async function trimDescriptTail(filePath: string): Promise<void> {
+  const videoSec = await getVideoStreamDuration(filePath)
+  if (!videoSec || videoSec <= 0) return
+  const containerSec = await getVideoDuration(filePath)
+  if (containerSec - videoSec < 0.2) return // nothing meaningful to trim
+  console.log(`[motion-renderer] trimming Descript tail: ${containerSec.toFixed(2)}s → ${videoSec.toFixed(2)}s`)
+  const tmp = filePath + '_dt.mp4'
+  try {
+    await run(
+      `ffmpeg -y -i "${filePath}" -t ${videoSec.toFixed(3)} -c:v copy -c:a aac -movflags +faststart "${tmp}"`,
+      120_000
+    )
+    fs.renameSync(tmp, filePath)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+    throw e
+  }
+}
+
+// ── Custom B-roll from Google Drive ──────────────────────────────────────────
+
+function parseDriveUrl(url: string): { type: 'file' | 'folder'; id: string } | null {
+  const fileMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
+  if (fileMatch) return { type: 'file', id: fileMatch[1] }
+  const folderMatch = url.match(/\/folders\/([a-zA-Z0-9_-]+)/) ?? url.match(/[?&]id=([^&]+)/)
+  if (folderMatch) return { type: 'folder', id: folderMatch[1] }
   return null
 }
 
-// Mix a pre-generated music file into a video file (in-place replacement).
-// musicPath: local path to the MP3 (from generateBackgroundMusic).
-async function mixMusic(videoPath: string, musicPath: string | null): Promise<void> {
-  if (!musicPath || !fs.existsSync(musicPath)) return
+async function listBRollFiles(driveUrl: string): Promise<{ url: string; name: string }[]> {
+  const parsed = parseDriveUrl(driveUrl)
+  if (!parsed) {
+    console.warn('[motion-renderer] could not parse Drive URL for B-roll:', driveUrl)
+    return []
+  }
 
-  const tmpPath = videoPath.replace(/\.mp4$/, '_music_tmp.mp4')
+  const toUrl = (id: string) =>
+    `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`
+
+  if (parsed.type === 'file') {
+    return [{ url: toUrl(parsed.id), name: parsed.id }]
+  }
+
+  const apiKey = process.env.GOOGLE_DRIVE_API_KEY
+  if (!apiKey) {
+    console.warn('[motion-renderer] GOOGLE_DRIVE_API_KEY not set — cannot list Drive folder, skipping B-roll')
+    return []
+  }
+
   try {
-    await run(
-      `ffmpeg -y -i "${videoPath}" -i "${musicPath}" ` +
-      `-filter_complex "[1:a]volume=0.15,aloop=loop=-1:size=2e+09[music];[0:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]" ` +
-      `-map 0:v -map "[aout]" -c:v copy -c:a aac -shortest "${tmpPath}"`
-    )
-    fs.renameSync(tmpPath, videoPath)
-  } catch {
-    // music mixing is best-effort
-    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath)
+    const params = new URLSearchParams({
+      q: `'${parsed.id}' in parents and mimeType contains 'video/' and trashed=false`,
+      fields: 'files(id,name)',
+      key: apiKey,
+    })
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, {
+      signal: AbortSignal.timeout(30_000),
+    })
+    if (!res.ok) throw new Error(`Drive API ${res.status}`)
+    const data = await res.json() as { files?: { id: string; name: string }[] }
+    const files = data.files ?? []
+    console.log(`[motion-renderer] found ${files.length} B-roll files in Drive folder`)
+    return files.map(f => ({ url: toUrl(f.id), name: f.name }))
+  } catch (e) {
+    console.warn('[motion-renderer] Drive folder listing failed:', (e as Error).message)
+    return []
   }
 }
 
-// ── HyperFrames overlay compositor ───────────────────────────────────────────
-
-async function hfComposite(opts: {
-  templateDir: string
-  sourceVideo: string
-  outputPath: string
-  variables: Record<string, unknown>
-  resolution?: 'portrait' | 'square' | 'landscape'
-}): Promise<void> {
-  const { templateDir, sourceVideo, outputPath, variables, resolution = 'portrait' } = opts
-  const overlayPath = outputPath.replace(/\.mp4$/, '_hf_overlay.mov')
-
-  const varsJson = JSON.stringify(variables).replace(/'/g, "\\'")
-
-  await runHF(
-    `render "${templateDir}" ` +
-    `--variables '${varsJson}' ` +
-    `--format mov ` +
-    `--resolution ${resolution} ` +
-    `--quiet ` +
-    `-o "${overlayPath}"`
-  )
-
-  await run(
-    `ffmpeg -y -i "${sourceVideo}" -i "${overlayPath}" ` +
-    `-filter_complex "[0:v][1:v]overlay=0:0[v]" ` +
-    `-map "[v]" -map 0:a ` +
-    `-c:v libx264 -preset fast -crf 22 -c:a copy "${outputPath}"`
-  )
-
-  if (fs.existsSync(overlayPath)) fs.unlinkSync(overlayPath)
-}
-
-// ── Submagic polling + Drive upload ──────────────────────────────────────────
-// Polls each Submagic variant until done, downloads the output, uploads to Drive.
-
-async function pollAndUploadSubmagic(jobId: string, outDir: string) {
-  const db = supabaseAdmin()
-  const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-  if (!job?.variants) return
-
-  const submagicVariants = (job.variants as VideoVariant[]).filter(
-    (v) => v.external_id && (v.status === 'processing' || v.status === 'pending')
-  )
-  if (!submagicVariants.length) return
-
-  await Promise.allSettled(
-    submagicVariants.map(async (v) => {
-      const projectId = v.external_id!
-      let attempts = 0
-      const MAX_ATTEMPTS = 60   // 60 * 20s = 20 min max wait
-      const POLL_INTERVAL = 20_000
-
-      while (attempts < MAX_ATTEMPTS) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL))
-        attempts++
-
-        const result = await pollSubmagicJob(projectId).catch(() => null)
-        if (!result) continue
-
-        if (result.status === 'failed') {
-          await markVariant(jobId, v.id, 'failed', null, result.error)
-          return
-        }
-
-        if (result.status === 'ready' && result.downloadUrl) {
-          // Download Submagic output locally, then upload to Supabase Storage
-          const localPath = path.join(outDir, `${v.id}.mp4`)
-          try {
-            await downloadFile(result.downloadUrl, localPath)
-            await finishVariant(jobId, v.id, localPath)
-          } catch {
-            // Storage upload failed — use Submagic's CDN URL directly
-            await markVariant(jobId, v.id, 'ready', result.downloadUrl, null)
-          }
-          return
-        }
-      }
-
-      await markVariant(jobId, v.id, 'failed', null, 'Submagic job timed out after 20 minutes')
-    })
-  )
-}
-
-// ── Variant IDs ───────────────────────────────────────────────────────────────
-
-const HF_VARIANT_IDS = [
-  'liquid-glass', 'branded', 'broll-med', 'broll-life', 'cinematic', 'format-916', 'format-11',
-]
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
-export async function startMotionRender(
-  jobId: string,
-  sourceUrl: string,
-  brollMed: string[],
-  brollLife: string[],
-  clinicName: string,
-  tagline: string,
-  hook?: string,
-  cta?: string,
-  words?: { text: string; start: number; end: number }[]
-) {
-  if (active.has(jobId)) return
-  active.add(jobId)
-  renderAll(jobId, sourceUrl, brollMed, brollLife, clinicName, tagline, hook ?? '', cta ?? '', words ?? [])
-    .catch((e) => console.error('[motion-renderer] fatal:', e))
-    .finally(() => active.delete(jobId))
-}
-
-// ── Core renderer ─────────────────────────────────────────────────────────────
-
-async function renderAll(
-  jobId: string,
-  sourceUrl: string,
-  brollMed: string[],
-  brollLife: string[],
-  clinicName: string,
-  tagline: string,
+// AI picks the most relevant clip from a folder based on filenames vs video content.
+async function pickBestBRollClip(
+  files: { url: string; name: string }[],
   hook: string,
   cta: string,
-  words: { text: string; start: number; end: number }[]
-) {
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
-  fs.mkdirSync(outDir, { recursive: true })
-
-  const inputPath = path.join(outDir, 'source.mp4')
-
+): Promise<{ url: string; name: string }> {
+  if (files.length === 1) return files[0]
   try {
-    await downloadFile(sourceUrl, inputPath)
+    const list = files.map((f, i) => `${i + 1}. ${f.name}`).join('\n')
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      messages: [{
+        role: 'user',
+        content: `A short-form video opens with: "${hook.slice(0, 200)}"\nCTA: "${cta.slice(0, 100)}"\n\nWhich B-roll clip would visually reinforce this message best? Reply with only the number.\n\n${list}`,
+      }],
+      max_tokens: 10,
+    })
+    const idx = parseInt(raw.trim()) - 1
+    if (idx >= 0 && idx < files.length) {
+      console.log(`[motion-renderer] AI selected B-roll clip: "${files[idx].name}"`)
+      return files[idx]
+    }
   } catch (e) {
-    const msg = `Could not download source video: ${(e as Error).message}`
-    for (const id of HF_VARIANT_IDS) await markVariant(jobId, id, 'failed', null, msg)
+    console.warn('[motion-renderer] B-roll AI selection failed, using first clip:', (e as Error).message)
+  }
+  return files[0]
+}
+
+async function findBRollInsertionPoints(
+  videoPath: string,
+): Promise<{ insertAt: number; duration: number }[]> {
+  const totalDuration = await getVideoDuration(videoPath)
+  // One clip only, placed at the single best pause — short and purposeful
+  const CLIP_MAX = 2.5
+  const maxInsertions = 1
+
+  return new Promise((resolve) => {
+    let stderr = ''
+    const proc = exec(
+      `ffmpeg -i "${videoPath}" -af "silencedetect=noise=-38dB:d=0.4" -f null -`,
+      { timeout: 60_000 },
+      () => {
+        const starts: number[] = []
+        const ends: number[] = []
+        for (const m of stderr.matchAll(/silence_start: ([\d.]+)/g)) starts.push(parseFloat(m[1]))
+        for (const m of stderr.matchAll(/silence_end: ([\d.]+)/g)) ends.push(parseFloat(m[1]))
+
+        const gaps: { insertAt: number; gap: number }[] = []
+        for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
+          const gap = ends[i] - starts[i]
+          if (gap >= 0.4 && starts[i] > 2 && ends[i] < totalDuration - 2) {
+            gaps.push({ insertAt: starts[i], gap })
+          }
+        }
+
+        const points = gaps
+          .sort((a, b) => b.gap - a.gap)
+          .slice(0, maxInsertions)
+          .sort((a, b) => a.insertAt - b.insertAt)
+          .map(p => ({ insertAt: p.insertAt, duration: Math.min(p.gap * 0.6, CLIP_MAX) }))
+
+        console.log(`[motion-renderer] found ${points.length} B-roll insertion points (target ~10% of ${totalDuration.toFixed(1)}s)`)
+        resolve(points)
+      }
+    )
+    proc.stderr?.on('data', d => { stderr += String(d) })
+  })
+}
+
+async function insertBRoll(
+  inputPath: string,
+  brollPaths: string[],
+  insertionPoints: { insertAt: number; duration: number }[],
+  outputPath: string,
+): Promise<void> {
+  const pairs = Math.min(brollPaths.length, insertionPoints.length)
+  if (pairs === 0) return
+
+  const allInputs = [inputPath, ...brollPaths.slice(0, pairs)]
+  const inputFlags = allInputs.map(p => `-i "${p}"`).join(' ')
+  const filterParts: string[] = []
+  let currentLayer = '[0:v]'
+
+  for (let i = 0; i < pairs; i++) {
+    const { insertAt, duration: windowDuration } = insertionPoints[i]
+    const bIdx = i + 1
+    const brLabel = `[br${i}]`
+    const outLabel = i < pairs - 1 ? `[ov${i}]` : '[outv]'
+
+    filterParts.push(
+      `[${bIdx}:v]trim=duration=${windowDuration.toFixed(3)},setpts=PTS-STARTPTS+${insertAt.toFixed(3)}/TB,` +
+      `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black${brLabel}`
+    )
+    filterParts.push(
+      `${currentLayer}${brLabel}overlay=0:0:enable='between(t,${insertAt.toFixed(3)},${(insertAt + windowDuration).toFixed(3)})'${outLabel}`
+    )
+    currentLayer = outLabel
+  }
+
+  await run(
+    `ffmpeg -y ${inputFlags} ` +
+    `-filter_complex "${filterParts.join(';')}" ` +
+    `-map "[outv]" -map "0:a" ` +
+    `-c:v libx264 -preset fast -crf 22 -c:a copy -pix_fmt yuv420p -movflags +faststart "${outputPath}"`,
+    300_000
+  )
+}
+
+async function insertCustomBRoll(
+  videoPath: string,
+  brollDriveUrl: string,
+  hook: string,
+  cta: string,
+): Promise<void> {
+  console.log('[motion-renderer] inserting custom B-roll from:', brollDriveUrl)
+  const files = await listBRollFiles(brollDriveUrl)
+  if (!files.length) {
+    console.warn('[motion-renderer] no B-roll files found, skipping')
     return
   }
 
-  // Load script mood for music prompt tuning, then generate music + transcribe in parallel
-  const db2 = supabaseAdmin()
-  const { data: jobRow } = await db2.from('video_jobs').select('script_id').eq('id', jobId).single()
-  let moodTag: string | undefined
-  if (jobRow?.script_id) {
-    const { data: script } = await db2.from('scripts').select('mood_tag').eq('id', jobRow.script_id).single()
-    moodTag = script?.mood_tag ?? undefined
+  const chosen = await pickBestBRollClip(files, hook, cta)
+
+  const insertionPoints = await findBRollInsertionPoints(videoPath)
+  if (!insertionPoints.length) {
+    console.warn('[motion-renderer] no suitable insertion points found, skipping custom B-roll')
+    return
   }
 
-  // Generate background music (ElevenLabs) + transcription run concurrently
-  const [musicPath, transcriptResult] = await Promise.all([
-    generateBackgroundMusic(outDir, moodTag).catch(() => null),
-    (async () => {
-      if (words.length || !process.env.ELEVENLABS_API_KEY) return null
-      try { return await transcribeVideo(sourceUrl) } catch { return null }
-    })(),
-  ])
+  const tmpPath = path.join(os.tmpdir(), `broll_${Date.now()}.mp4`)
+  try {
+    await downloadFile(chosen.url, tmpPath)
+  } catch (e) {
+    console.warn('[motion-renderer] failed to download B-roll clip:', (e as Error).message)
+    return
+  }
 
-  const resolvedWords = transcriptResult?.words ?? words
-
-  // HyperFrames variants + Submagic polling all run concurrently
-  await Promise.all([
-    // 7 HyperFrames/FFmpeg variants
-    renderLiquidGlass(jobId, inputPath, outDir, hook, cta, resolvedWords),
-    renderBranded(jobId, inputPath, outDir, clinicName, tagline, hook),
-    renderBroll(jobId, inputPath, outDir, brollMed, 'broll-med', musicPath),
-    renderBroll(jobId, inputPath, outDir, brollLife, 'broll-life', musicPath),
-    renderCinematic(jobId, inputPath, outDir, hook, cta, musicPath),
-    renderFormat916(jobId, inputPath, outDir),
-    renderFormat11(jobId, inputPath, outDir),
-    // 3 Submagic variants — poll until done then upload to Drive
-    pollAndUploadSubmagic(jobId, outDir),
-  ])
+  const outPath = videoPath + '_broll.mp4'
+  try {
+    await insertBRoll(videoPath, [tmpPath], insertionPoints, outPath)
+    if (fs.existsSync(outPath)) fs.renameSync(outPath, videoPath)
+  } catch (e) {
+    console.warn('[motion-renderer] B-roll insertion failed, keeping original:', (e as Error).message)
+    try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
+  } finally {
+    try { fs.unlinkSync(tmpPath) } catch { /* best-effort */ }
+  }
 }
 
-// ── Liquid Glass ──────────────────────────────────────────────────────────────
-
-async function renderLiquidGlass(
+// Main pipeline:
+//   V1: Descript single pass — cuts + Studio Sound + B-roll + captions
+//   V2: Descript cuts only → ZapCap captions + B-roll
+async function renderSmartCinematic(
   jobId: string,
-  inputPath: string,
+  variantId: string,
+  sourceUrl: string,
   outDir: string,
   hook: string,
   cta: string,
-  words: { text: string; start: number; end: number }[]
-) {
-  const outputPath = path.join(outDir, 'liquid-glass.mp4')
-  const templateDir = path.join(process.cwd(), 'public', 'hf-templates', 'liquid-glass')
-
+  zapcapTemplateIndex?: 1 | 2,
+  zapcapBrollPercent?: number,
+  descriptBroll?: boolean,
+  descriptCaptions?: boolean,
+  brollDriveUrl?: string,
+): Promise<void> {
+  // Steps: Descript + optional custom B-roll + optional ZapCap + music
+  const STEPS = 1 + (brollDriveUrl ? 1 : 0) + (zapcapTemplateIndex ? 1 : 0) + 1
+  let step = 1
   try {
-    await hfComposite({
-      templateDir,
-      sourceVideo: inputPath,
-      outputPath,
-      variables: { hook, cta, words },
-      resolution: 'portrait',
-    })
-    await finishVariant(jobId, 'liquid-glass', outputPath)
-  } catch {
-    try {
-      const font = detectFont()
-      const fa = font ? `:fontfile=${font}` : ''
-      const safeHook = hook.replace(/'/g, '').replace(/:/g, '\\:').slice(0, 80)
-      const filter = [
-        `drawbox=y=ih*3/4:color=#FFFFFF@0.15:width=iw:height=ih/4:t=fill`,
-        `drawtext=text='${safeHook || 'Watch till the end'}':x=(w-tw)/2:y=h*3/4+60:fontsize=48:fontcolor=white${fa}`,
-      ].join(',')
-      await run(`ffmpeg -y -i "${inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a copy "${outputPath}"`)
-      await finishVariant(jobId, 'liquid-glass', outputPath)
-    } catch (e2) {
-      await markVariant(jobId, 'liquid-glass', 'failed', null, (e2 as Error).message)
-    }
-  }
-}
+    cleanTempFiles(outDir, variantId)
 
-// ── Branded ───────────────────────────────────────────────────────────────────
+    // Cache key includes Descript options — V1 (broll+captions) and V2 (clean) are different outputs.
+    // Promise stored while running so concurrent variants wait instead of launching duplicates.
+    const cacheKey = `${jobId}:${descriptBroll ? 'b' : ''}${descriptCaptions ? 'c' : ''}`
+    const existing = descriptUrlCache.get(cacheKey)
+    let editedUrl: string
 
-async function renderBranded(
-  jobId: string,
-  inputPath: string,
-  outDir: string,
-  clinicName: string,
-  tagline: string,
-  hook: string
-) {
-  const outputPath = path.join(outDir, 'branded.mp4')
-  const templateDir = path.join(process.cwd(), 'public', 'hf-templates', 'branded')
+    await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Descript')
 
-  try {
-    await hfComposite({
-      templateDir,
-      sourceVideo: inputPath,
-      outputPath,
-      variables: { clinicName, tagline, hook },
-      resolution: 'portrait',
-    })
-    await finishVariant(jobId, 'branded', outputPath)
-  } catch {
-    try {
-      const font = detectFont()
-      const fa = font ? `:fontfile=${font}` : ''
-      const safeName = clinicName.replace(/'/g, '').replace(/:/g, '\\:')
-      const safeSub  = tagline.replace(/'/g, '').replace(/:/g, '\\:')
-      const filter = [
-        `drawbox=y=ih-320:color=#FF4F17@0.92:width=iw:height=320:t=fill`,
-        `drawtext=text='${safeName}':x=60:y=h-260:fontsize=56:fontcolor=white${fa}`,
-        `drawtext=text='${safeSub}':x=60:y=h-188:fontsize=30:fontcolor=white@0.9${fa}`,
-      ].join(',')
-      await run(`ffmpeg -y -i "${inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a copy "${outputPath}"`)
-      await finishVariant(jobId, 'branded', outputPath)
-    } catch (e2) {
-      await markVariant(jobId, 'branded', 'failed', null, (e2 as Error).message)
-    }
-  }
-}
-
-// ── B-Roll ────────────────────────────────────────────────────────────────────
-
-async function renderBroll(
-  jobId: string,
-  inputPath: string,
-  outDir: string,
-  clips: string[],
-  variantId: 'broll-med' | 'broll-life',
-  musicPath: string | null
-) {
-  const outputPath = path.join(outDir, `${variantId}.mp4`)
-
-  try {
-    if (!clips.length) {
-      fs.copyFileSync(inputPath, outputPath)
-      await finishVariant(jobId, variantId, outputPath)
-      return
-    }
-
-    const clipsToUse = clips.slice(0, 4)
-    const listPath = path.join(outDir, `${variantId}_list.txt`)
-    const entries: string[] = [`file '${inputPath}'`]
-
-    for (let i = 0; i < clipsToUse.length; i++) {
-      const clipPath = path.join(outDir, `${variantId}_clip_${i}.mp4`)
+    if (existing instanceof Promise) {
+      console.log(`[motion-renderer] waiting for in-progress Descript edit (${cacheKey})`)
+      editedUrl = await existing
+    } else if (existing && existing.expiresAt > Date.now()) {
+      console.log(`[motion-renderer] reusing cached Descript URL (${cacheKey})`)
+      editedUrl = existing.url
+    } else {
+      const projectName = `cinematic-${jobId.slice(0, 8)}`
+      const promise = processWithDescript(sourceUrl, projectName, { broll: descriptBroll, captions: descriptCaptions })
+      descriptUrlCache.set(cacheKey, promise)
       try {
-        await downloadFile(clipsToUse[i], clipPath)
-        const normPath = path.join(outDir, `${variantId}_clip_norm_${i}.mp4`)
-        await run(
-          `ffmpeg -y -i "${clipPath}" -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" ` +
-          `-r 30 -c:v libx264 -preset fast -crf 23 -an "${normPath}"`
-        )
-        entries.push(`file '${normPath}'`)
-      } catch { /* skip unavailable clip */ }
+        editedUrl = await promise
+        descriptUrlCache.set(cacheKey, { url: editedUrl, expiresAt: Date.now() + 2 * 60 * 60 * 1000 })
+        console.log(`[motion-renderer] Descript done, URL cached (${cacheKey})`)
+      } catch (e) {
+        descriptUrlCache.delete(cacheKey)
+        throw e
+      }
     }
 
-    fs.writeFileSync(listPath, entries.join('\n'))
-    await run(`ffmpeg -y -f concat -safe 0 -i "${listPath}" -c:v libx264 -preset fast -crf 22 -c:a aac "${outputPath}"`)
-    await mixMusic(outputPath, musicPath)
+    const outputPath = path.join(outDir, `${variantId}.mp4`)
+
+    if (zapcapTemplateIndex) {
+      // Download Descript output to temp, trim the black tail, optionally insert custom B-roll,
+      // then let ZapCap add captions (and stock B-roll if not using custom).
+      const tmpEdited = path.join(outDir, `${variantId}_edited_tmp.mp4`)
+      await downloadFile(editedUrl, tmpEdited)
+      await trimDescriptTail(tmpEdited)
+
+      if (brollDriveUrl) {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
+        await insertCustomBRoll(tmpEdited, brollDriveUrl, hook, cta)
+      }
+
+      // Vary stock B-roll coverage slightly each run for natural variety (target ±5%)
+      const actualBrollPct = zapcapBrollPercent !== undefined
+        ? Math.max(7, zapcapBrollPercent + (Math.floor(Math.random() * 3) - 1) * 3)
+        : undefined
+
+      const label = actualBrollPct ? 'Adding captions + B-roll with ZapCap' : 'Adding captions with ZapCap'
+      await setVariantProgress(jobId, variantId, step++, STEPS, label)
+      const captionedUrl = await processWithZapcap(tmpEdited, zapcapTemplateIndex, actualBrollPct)
+      console.log('[motion-renderer] ZapCap done')
+      try { fs.unlinkSync(tmpEdited) } catch { /* best-effort */ }
+      await downloadFile(captionedUrl, outputPath)
+    } else {
+      await downloadFile(editedUrl, outputPath)
+      await trimDescriptTail(outputPath)
+
+      if (brollDriveUrl) {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
+        await insertCustomBRoll(outputPath, brollDriveUrl, hook, cta)
+      }
+    }
+
+    console.log('[motion-renderer] output ready, adding music')
+    await setVariantProgress(jobId, variantId, STEPS, STEPS, 'Adding background music')
+    await mixBackgroundMusic(outputPath, hook)
     await finishVariant(jobId, variantId, outputPath)
   } catch (e) {
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
   }
 }
 
-// ── Cinematic ─────────────────────────────────────────────────────────────────
-
-async function renderCinematic(
+export function startSingleVariant(
   jobId: string,
-  inputPath: string,
-  outDir: string,
+  variantId: string,
+  sourceUrl: string,
   hook: string,
   cta: string,
-  musicPath: string | null
+  zapcapTemplateIndex?: 1 | 2,
+  zapcapBrollPercent?: number,
+  descriptBroll?: boolean,
+  descriptCaptions?: boolean,
+  brollDriveUrl?: string,
 ) {
-  const outputPath = path.join(outDir, 'cinematic.mp4')
-  const templateDir = path.join(process.cwd(), 'public', 'hf-templates', 'cinematic')
+  const key = jobId + ':' + variantId
+  if (active.has(key)) return
+  active.add(key)
 
-  try {
-    const gradedPath = path.join(outDir, 'cinematic_graded.mp4')
-    await run(
-      `ffmpeg -y -i "${inputPath}" ` +
-      `-vf "eq=saturation=0.8:contrast=1.05:brightness=-0.02,vignette=PI/5" ` +
-      `-c:v libx264 -preset fast -crf 22 -c:a copy "${gradedPath}"`
+  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  fs.mkdirSync(outDir, { recursive: true })
+
+  // When custom B-roll is provided, disable stock B-roll from Descript/ZapCap to avoid stacking.
+  const effectiveDescriptBroll = brollDriveUrl ? false : descriptBroll
+  const effectiveZapcapBrollPercent = brollDriveUrl ? undefined : zapcapBrollPercent
+
+  const launch = async () => {
+    await renderSmartCinematic(
+      jobId, variantId, sourceUrl, outDir, hook, cta,
+      zapcapTemplateIndex, effectiveZapcapBrollPercent,
+      effectiveDescriptBroll, descriptCaptions,
+      brollDriveUrl,
     )
-    await hfComposite({
-      templateDir,
-      sourceVideo: gradedPath,
-      outputPath,
-      variables: { hook, cta },
-      resolution: 'portrait',
-    })
-    if (fs.existsSync(gradedPath)) fs.unlinkSync(gradedPath)
-    await mixMusic(outputPath, musicPath)
-    await finishVariant(jobId, 'cinematic', outputPath)
-  } catch {
-    try {
-      const filter = [
-        `eq=saturation=0.82:contrast=1.05`,
-        `vignette=PI/5`,
-        `drawbox=y=0:color=black:width=iw:height=ih/14:t=fill`,
-        `drawbox=y=ih-ih/14:color=black:width=iw:height=ih/14:t=fill`,
-      ].join(',')
-      await run(`ffmpeg -y -i "${inputPath}" -vf "${filter}" -c:v libx264 -preset fast -crf 22 -c:a copy "${outputPath}"`)
-      await mixMusic(outputPath, musicPath)
-      await finishVariant(jobId, 'cinematic', outputPath)
-    } catch (e2) {
-      await markVariant(jobId, 'cinematic', 'failed', null, (e2 as Error).message)
-    }
   }
-}
 
-// ── Format: 9:16 Vertical ─────────────────────────────────────────────────────
-
-async function renderFormat916(jobId: string, inputPath: string, outDir: string) {
-  const outputPath = path.join(outDir, 'format-916.mp4')
-  try {
-    await run(
-      `ffmpeg -y -i "${inputPath}" ` +
-      `-vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black" ` +
-      `-c:v libx264 -preset fast -crf 22 -c:a copy "${outputPath}"`
-    )
-    await finishVariant(jobId, 'format-916', outputPath)
-  } catch (e) {
-    await markVariant(jobId, 'format-916', 'failed', null, (e as Error).message)
-  }
-}
-
-// ── Format: 1:1 Square ────────────────────────────────────────────────────────
-
-async function renderFormat11(jobId: string, inputPath: string, outDir: string) {
-  const outputPath = path.join(outDir, 'format-11.mp4')
-  try {
-    await run(
-      `ffmpeg -y -i "${inputPath}" ` +
-      `-vf "scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2:color=black" ` +
-      `-c:v libx264 -preset fast -crf 22 -c:a copy "${outputPath}"`
-    )
-    await finishVariant(jobId, 'format-11', outputPath)
-  } catch (e) {
-    await markVariant(jobId, 'format-11', 'failed', null, (e as Error).message)
-  }
+  launch()
+    .catch(e => console.error('[motion-renderer] startSingleVariant fatal:', e))
+    .finally(() => active.delete(key))
 }

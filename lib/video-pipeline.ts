@@ -1,12 +1,18 @@
 import FormData from 'form-data'
+import { chatCompletion, MODELS } from './openrouter'
 
 export interface SubmagicPreset {
-  template: string
-  broll: boolean
-  zoom: boolean
-  hookTitle: boolean
-  silencePace: 'natural' | 'fast' | 'extra-fast'
-  badTakes: boolean
+  // Fully autonomous mode — Submagic handles everything (music, B-roll, cuts, style)
+  aiEditTemplate?: 'kelly' | 'karl' | 'ella'
+  // Manual mode fields — only used when aiEditTemplate is not set
+  template?: string
+  broll?: boolean
+  brollPct?: number   // 0-100, how much of the video to fill with B-roll
+  zoom?: boolean
+  hookTitle?: boolean
+  silencePace?: 'natural' | 'fast' | 'extra-fast'
+  badTakes?: boolean
+  music?: boolean     // true = use audio track from Submagic library if available
 }
 
 export interface VideoVariantDef {
@@ -15,7 +21,12 @@ export interface VideoVariantDef {
   description: string
   tool: 'submagic' | 'hyperframe'
   order: number
+  autoStart: boolean   // true = runs immediately on job creation; false = user starts manually
   submagicPreset?: SubmagicPreset
+  zapcapTemplateIndex?: 1 | 2  // 1 = ZAPCAP_TEMPLATE_ID, 2 = ZAPCAP_TEMPLATE_ID_2
+  zapcapBrollPercent?: number  // 0-100, enables ZapCap auto B-roll
+  descriptBroll?: boolean      // ask Underlord to insert stock B-roll
+  descriptCaptions?: boolean   // ask Underlord to add captions
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -25,12 +36,14 @@ export interface VideoVariant extends VideoVariantDef {
   download_url: string | null
   duration_seconds: number | null
   error: string | null
+  progress?: { step: number; total: number; label: string } | null
 }
 
 export interface VideoJob {
   id: string
   script_id: string
   source_drive_url: string
+  broll_drive_url: string | null
   status: 'processing' | 'complete' | 'failed'
   variants: VideoVariant[] | null
   selected_variant: string | null
@@ -38,33 +51,77 @@ export interface VideoJob {
   created_at: string
 }
 
-// 3 Submagic (full premium: B-roll + zoom + silences + captions) + 7 HyperFrames (motion, format)
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
-  // ── Submagic — full-feature variants ────────────────────────────────────────
   {
-    id: 'bold', name: 'Bold', tool: 'submagic', order: 1,
-    description: 'Hormozi bold captions + AI B-roll + auto zoom + silence cuts',
-    submagicPreset: { template: 'Hormozi 1', broll: true, zoom: true, hookTitle: true, silencePace: 'natural', badTakes: true },
+    id: 'our-v1',
+    name: 'Descript Full',
+    description: 'Descript handles everything — cuts, Studio Sound, B-roll, and captions.',
+    tool: 'hyperframe',
+    order: 1,
+    autoStart: false,
+    descriptBroll: true,
+    descriptCaptions: true,
   },
   {
-    id: 'minimal', name: 'Minimal', tool: 'submagic', order: 2,
-    description: 'Sara clean captions + auto zoom + silence cuts (no B-roll)',
-    submagicPreset: { template: 'Sara', broll: false, zoom: true, hookTitle: false, silencePace: 'natural', badTakes: true },
+    id: 'our-v2',
+    name: 'ZapCap Captions + B-roll',
+    description: 'Descript cuts only, then ZapCap adds captions and auto B-roll.',
+    tool: 'hyperframe',
+    order: 2,
+    autoStart: false,
+    zapcapTemplateIndex: 1,
+    zapcapBrollPercent: 10,
   },
-  {
-    id: 'karaoke', name: 'Karaoke', tool: 'submagic', order: 3,
-    description: 'Beast word-by-word highlight + AI B-roll + zoom + silence cuts',
-    submagicPreset: { template: 'Beast', broll: true, zoom: true, hookTitle: true, silencePace: 'fast', badTakes: true },
-  },
-  // ── HyperFrames motion variants ──────────────────────────────────────────────
-  { id: 'liquid-glass', name: 'Liquid Glass',      tool: 'hyperframe', order: 4,  description: 'iOS-style frosted glass cards synced to transcript' },
-  { id: 'branded',      name: 'Branded',           tool: 'hyperframe', order: 5,  description: 'Clinic lower-third + brand orange overlay' },
-  { id: 'broll-med',    name: 'B-Roll: Medical',   tool: 'hyperframe', order: 6,  description: 'Medical Pexels clips intercut + captions' },
-  { id: 'broll-life',   name: 'B-Roll: Lifestyle', tool: 'hyperframe', order: 7,  description: 'Wellness Pexels clips intercut + captions' },
-  { id: 'cinematic',    name: 'Cinematic',         tool: 'hyperframe', order: 8,  description: 'Dark vignette + desaturation + letterbox bars' },
-  { id: 'format-916',   name: '9:16 Vertical',     tool: 'hyperframe', order: 9,  description: '1080x1920 for Reels and TikTok' },
-  { id: 'format-11',    name: '1:1 Square',        tool: 'hyperframe', order: 10, description: '1080x1080 for feed posts' },
 ]
+
+// Generates 2 Submagic variants with AI-named styles tailored to the script mood
+// Names describe the feel/energy, not the underlying template
+export async function generateSubmagicVariants(
+  script: { hook: string; body: string; cta: string; mood_tag: string | null }
+): Promise<VideoVariantDef[]> {
+  const prompt = [
+    'You are naming two short-form video editing styles for this script.',
+    '',
+    'Hook: ' + (script.hook || ''),
+    'Mood: ' + (script.mood_tag || 'unspecified'),
+    '',
+    'Generate exactly 2 distinct editing style names that suit this script.',
+    'Rules:',
+    '- Each name is 2-4 words, style/energy focused (e.g. "Bold & Direct", "Warm & Cinematic", "Clean & Fast", "Sharp & Minimal")',
+    '- Each description is one short sentence about how it will feel to watch',
+    '- Make them genuinely different from each other in energy and tone',
+    '- Do NOT use template names (kelly, ella, etc.)',
+    '',
+    'Return JSON only: {"styles":[{"name":"...","description":"..."},{"name":"...","description":"..."}]}',
+  ].join('\n')
+
+  const FALLBACKS = [
+    { name: 'Bold & Direct', description: 'Fast cuts, strong captions, high energy.' },
+    { name: 'Clean & Cinematic', description: 'Smooth pace, polished captions, premium feel.' },
+  ]
+
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 300,
+    })
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim()
+    const data = JSON.parse(cleaned) as { styles: { name: string; description: string }[] }
+    const styles = data.styles?.slice(0, 2) ?? []
+    if (styles.length < 2) throw new Error('not enough styles')
+
+    return [
+      { id: 'submagic-a', name: styles[0].name, description: styles[0].description, tool: 'submagic', order: 4, autoStart: false, submagicPreset: { aiEditTemplate: 'kelly' } },
+      { id: 'submagic-b', name: styles[1].name, description: styles[1].description, tool: 'submagic', order: 5, autoStart: false, submagicPreset: { aiEditTemplate: 'ella' } },
+    ]
+  } catch {
+    return [
+      { id: 'submagic-a', name: FALLBACKS[0].name, description: FALLBACKS[0].description, tool: 'submagic', order: 4, autoStart: false, submagicPreset: { aiEditTemplate: 'kelly' } },
+      { id: 'submagic-b', name: FALLBACKS[1].name, description: FALLBACKS[1].description, tool: 'submagic', order: 5, autoStart: false, submagicPreset: { aiEditTemplate: 'ella' } },
+    ]
+  }
+}
 
 export function extractDriveFileId(url: string): string | null {
   const match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
@@ -111,37 +168,64 @@ export async function transcribeVideo(videoUrl: string): Promise<{
 // ── Submagic — Submit full-featured job ───────────────────────────────────────
 
 export interface SubmagicJobOptions {
-  templateName: string
   title: string
-  // Premium features
-  magicBrolls?: boolean          // AI auto B-roll insertion
-  magicBrollsPercentage?: number // 0-100, how much of the video to fill with B-roll
-  magicZooms?: boolean           // Auto punch-in zoom on key moments
+  aiEditTemplate?: 'kelly' | 'karl' | 'ella'
+  templateName?: string
+  magicBrolls?: boolean
+  magicBrollsPercentage?: number
+  magicZooms?: boolean
   hookTitle?: boolean | { text?: string; template?: string; top?: number; size?: number }
-  removeSilencePace?: 'natural' | 'fast' | 'extra-fast' // cut silences
-  removeBadTakes?: boolean       // AI removes bad takes
-  cleanAudio?: boolean           // background noise removal
+  removeSilencePace?: 'natural' | 'fast' | 'extra-fast'
+  removeBadTakes?: boolean
+  cleanAudio?: boolean
+  musicTrackId?: string
+}
+
+
+// ── Submagic — Fetch first available audio track for music param ──────────────
+
+export async function fetchSubmagicAudioTrack(): Promise<string | null> {
+  try {
+    const res = await fetch('https://api.submagic.co/v1/user-media?type=AUDIO&limit=1', {
+      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.items?.[0]?.id ?? null
+  } catch {
+    return null
+  }
 }
 
 export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
 ): Promise<string> {
-  const body: Record<string, unknown> = {
-    title: opts.title,
-    language: 'en',
-    videoUrl,
-    templateName: opts.templateName,
-    // Premium features — enabled per variant
-    magicBrolls: opts.magicBrolls ?? false,
-    magicZooms: opts.magicZooms ?? false,
-    cleanAudio: opts.cleanAudio ?? true,
-    removeSilencePace: opts.removeSilencePace ?? 'natural',
-    removeBadTakes: opts.removeBadTakes ?? false,
-  }
+  // aiEditTemplate mode: Submagic controls everything — only base fields allowed
+  const body: Record<string, unknown> = opts.aiEditTemplate
+    ? {
+        title: opts.title,
+        language: 'en',
+        videoUrl,
+        aiEditTemplate: opts.aiEditTemplate,
+      }
+    : {
+        title: opts.title,
+        language: 'en',
+        videoUrl,
+        templateName: opts.templateName,
+        magicBrolls: opts.magicBrolls ?? false,
+        magicZooms: opts.magicZooms ?? false,
+        cleanAudio: opts.cleanAudio ?? true,
+        removeSilencePace: opts.removeSilencePace ?? 'extra-fast',
+        removeBadTakes: opts.removeBadTakes ?? false,
+      }
 
-  if (opts.magicBrolls) body.magicBrollsPercentage = opts.magicBrollsPercentage ?? 40
-  if (opts.hookTitle !== undefined) body.hookTitle = opts.hookTitle
+  if (!opts.aiEditTemplate) {
+    if (opts.magicBrolls) body.magicBrollsPercentage = opts.magicBrollsPercentage ?? 40
+    if (opts.hookTitle !== undefined) body.hookTitle = opts.hookTitle
+    if (opts.musicTrackId) body.music = { userMediaId: opts.musicTrackId, volume: 30, fade: true }
+  }
 
   const res = await fetch('https://api.submagic.co/v1/projects', {
     method: 'POST',
@@ -192,20 +276,15 @@ export async function pollSubmagicJob(projectId: string): Promise<{
   }
 }
 
-// ── Pexels — Fetch B-roll clips ───────────────────────────────────────────────
+// ── Google Drive — Verify file is accessible before processing ────────────────
 
-export async function fetchBrollClips(keywords: string, count = 5): Promise<string[]> {
-  const query = encodeURIComponent(keywords)
-  const res = await fetch(
-    `https://api.pexels.com/videos/search?query=${query}&per_page=${count}&orientation=portrait`,
-    { headers: { Authorization: process.env.PEXELS_API_KEY! } }
-  )
-
-  if (!res.ok) return []
-
-  const data = await res.json()
-  return (data.videos ?? []).map((v: { video_files: { link: string; width: number }[] }) => {
-    const hd = v.video_files.find(f => f.width <= 1080) ?? v.video_files[0]
-    return hd?.link ?? ''
-  }).filter(Boolean)
+// Validates the Drive share URL has a file ID. No HTTP fetch — Submagic downloads the file itself.
+export function verifyDriveFile(directUrl: string): { ok: boolean; resolvedUrl: string; error?: string } {
+  const fileId = directUrl.match(/[?&]id=([^&]+)/)?.[1]
+  if (!fileId) {
+    return { ok: false, resolvedUrl: directUrl, error: 'Could not parse a file ID from the Google Drive URL.' }
+  }
+  // Use the confirm=t variant so large files bypass the virus-scan warning page on Submagic's end
+  const resolvedUrl = `https://drive.google.com/uc?export=download&confirm=t&id=${fileId}`
+  return { ok: true, resolvedUrl }
 }
