@@ -27,7 +27,7 @@ export const Callout: React.FC<{ text: string }> = ({ text }) => {
         background: 'rgba(14,14,18,0.60)',
         backdropFilter: 'blur(18px)',
         WebkitBackdropFilter: 'blur(18px)',
-        border: `1px solid rgba(201,168,76,0.45)`,
+        border: `1px solid rgba(79,143,227,0.45)`,
         boxShadow: '0 16px 40px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.08)',
         position: 'relative',
         overflow: 'hidden',
@@ -37,7 +37,7 @@ export const Callout: React.FC<{ text: string }> = ({ text }) => {
           position: 'absolute',
           left: 0, top: 0, bottom: 0,
           width: 4,
-          background: `linear-gradient(180deg, ${brand.goldLight}, ${brand.gold}, #A07828)`,
+          background: `linear-gradient(180deg, ${brand.blueLight}, ${brand.blue}, #2E5FA3)`,
         }} />
 
         {/* Sheen sweep */}

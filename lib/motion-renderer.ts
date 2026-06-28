@@ -13,6 +13,7 @@ import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } fro
 import { generateElevenLabsMusic } from './elevenlabs-music'
 import { getWhooshSfx, getSfx } from './sound-effects'
 import { planScenes, type MediaFile, type ScenePlan } from './scene-planner'
+import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 
 const active = new Set<string>()
 
@@ -866,6 +867,92 @@ async function addNativeCaptions(
   }
 }
 
+// ── Brand motion graphics (Remotion overlay) ──────────────────────────────────
+// Plans front-loaded brand graphics from the transcript via OpenRouter (mirrors
+// OVRHAUL's editing/graphics_plan.py), renders them with Remotion as a
+// transparent overlay, then composites over the edited video with FFmpeg.
+// Remotion's default web codec (VP8) was timing out at 30fps for this
+// resolution -- ProRes 4444 is what fixed it on the OVRHAUL pipeline.
+const REMOTION_DIR = path.join(process.cwd(), 'remotion')
+
+async function renderMotionGraphicsOverlay(
+  outDir: string,
+  variantId: string,
+  graphics: MotionGraphic[],
+  durationSec: number,
+): Promise<string> {
+  const manifestPath = path.join(outDir, `${variantId}_graphics.json`)
+  fs.writeFileSync(manifestPath, JSON.stringify({ graphics, durationSec }))
+
+  const overlayPath = path.join(outDir, `${variantId}_overlay.mov`)
+  try {
+    await run(
+      `cd "${REMOTION_DIR}" && npx remotion render Overlay "${overlayPath}" ` +
+      `--props="${manifestPath}" --codec=prores --prores-profile=4444 ` +
+      `--image-format=png --pixel-format=yuva444p10le`,
+      600_000,
+    )
+  } finally {
+    try { fs.unlinkSync(manifestPath) } catch { /* best-effort */ }
+  }
+  return overlayPath
+}
+
+async function addMotionGraphics(
+  videoPath: string,
+  hook: string,
+  cta: string,
+  moodTag: string | null,
+  scriptFormat: string | undefined,
+  outDir: string,
+  variantId: string,
+): Promise<void> {
+  console.log('[motion-renderer] planning brand motion graphics...')
+
+  let words
+  try {
+    words = await transcribeLocalFile(videoPath)
+  } catch (e) {
+    console.warn('[motion-renderer] transcription for motion graphics failed, skipping:', (e as Error).message)
+    return
+  }
+  if (!words.length) {
+    console.warn('[motion-renderer] no words transcribed, skipping motion graphics')
+    return
+  }
+
+  const graphics = await planMotionGraphics(words, hook, cta, moodTag, scriptFormat)
+  if (!graphics.length) {
+    console.log('[motion-renderer] graphics plan returned nothing, skipping')
+    return
+  }
+
+  const transcriptEnd = words[words.length - 1]?.end
+  const duration = transcriptEnd && transcriptEnd > 0 ? transcriptEnd : await getVideoDuration(videoPath)
+
+  let overlayPath: string | null = null
+  try {
+    overlayPath = await renderMotionGraphicsOverlay(outDir, variantId, graphics, duration)
+    const tmp = videoPath + '_mg.mp4'
+    await run(
+      `ffmpeg -y -i "${videoPath}" -i "${overlayPath}" ` +
+      `-filter_complex "[0:v][1:v]overlay=0:0[outv]" ` +
+      `-map "[outv]" -map 0:a? -c:v libx264 -preset fast -crf 20 -c:a copy -movflags +faststart "${tmp}"`,
+      300_000,
+    )
+    if (fs.existsSync(tmp)) {
+      fs.renameSync(tmp, videoPath)
+      console.log('[motion-renderer] motion graphics composited')
+    } else {
+      console.warn('[motion-renderer] motion graphics composite produced no output, keeping original')
+    }
+  } catch (e) {
+    console.warn('[motion-renderer] motion graphics overlay failed, keeping video without it:', (e as Error).message)
+  } finally {
+    if (overlayPath) { try { fs.unlinkSync(overlayPath) } catch { /* best-effort */ } }
+  }
+}
+
 // Caption-only test path: downloads the raw source footage and burns in
 // captions directly — no Descript, no smart-cut. For iterating on caption
 // styles without spending Descript AI credits on every test run.
@@ -919,12 +1006,13 @@ async function renderSmartCinematic(
     disfluencyRemoval?: boolean
   },
   zapcapSmartProfile?: ZapcapSmartProfile,
+  motionGraphics?: boolean,
 ): Promise<void> {
-  // Steps: Descript + optional custom B-roll + optional ZapCap + optional native captions + optional music
+  // Steps: Descript + optional custom B-roll + optional ZapCap + optional native captions + optional motion graphics + optional music
   const shouldUseZapcapOnly = zapcapOnly || (!!zapcapTemplateIndex && !descriptBroll && !descriptCaptions)
   const STEPS = shouldUseZapcapOnly
-    ? 1 + (zapcapTemplateIndex ? 1 : 0) + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
-    : 1 + (brollDriveUrl ? 1 : 0) + (zapcapTemplateIndex ? 1 : 0) + (nativeCaptions ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+    ? 1 + (zapcapTemplateIndex ? 1 : 0) + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+    : 1 + (brollDriveUrl ? 1 : 0) + (zapcapTemplateIndex ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
@@ -978,6 +1066,11 @@ async function renderSmartCinematic(
       if (nativeCaptions) {
         await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating karaoke captions')
         await addNativeCaptions(outputPath, moodTag ?? null, scriptFormat)
+      }
+
+      if (motionGraphics) {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding brand motion graphics')
+        await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId)
       }
 
       if (MUSIC_ENABLED) {
@@ -1056,6 +1149,11 @@ async function renderSmartCinematic(
       await addNativeCaptions(outputPath, moodTag ?? null, scriptFormat)
     }
 
+    if (motionGraphics) {
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding brand motion graphics')
+      await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId)
+    }
+
     if (MUSIC_ENABLED) {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
       await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
@@ -1088,6 +1186,7 @@ export function startSingleVariant(
     disfluencyRemoval?: boolean
   },
   zapcapSmartProfile?: ZapcapSmartProfile,
+  motionGraphics?: boolean,
 ) {
   const key = jobId + ':' + variantId
   if (active.has(key)) return
@@ -1118,7 +1217,7 @@ export function startSingleVariant(
       zapcapTemplateIndex, effectiveZapcapBrollPercent,
       effectiveDescriptBroll, descriptCaptions,
       brollDriveUrl, nativeCaptions, moodTag, scriptFormat,
-      zapcapOnly, zapcapAutoCut, zapcapSmartProfile,
+      zapcapOnly, zapcapAutoCut, zapcapSmartProfile, motionGraphics,
     )
   }
 

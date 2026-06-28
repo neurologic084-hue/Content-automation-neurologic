@@ -133,6 +133,7 @@ export async function POST(req: NextRequest) {
       variant.zapcapOnly as boolean | undefined,
       variant.zapcapAutoCut as { silenceRemoval?: number; disfluencyRemoval?: boolean } | undefined,
       variant.zapcapSmartProfile as ZapcapSmartProfile | undefined,
+      variant.motionGraphics as boolean | undefined,
     )
 
     return NextResponse.json({ ok: true })

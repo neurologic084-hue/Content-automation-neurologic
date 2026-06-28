@@ -4,7 +4,7 @@ import { brand } from '../brand'
 
 export const IntroCard: React.FC<{ name?: string; tagline?: string }> = ({
   name = 'Jessica Wendling',
-  tagline = 'Glow Med Spa · Seattle',
+  tagline = 'Neuro Logic · Seattle',
 }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
@@ -22,7 +22,7 @@ export const IntroCard: React.FC<{ name?: string; tagline?: string }> = ({
         width: 600,
         height: 600,
         borderRadius: '50%',
-        background: `radial-gradient(circle, rgba(201,168,76,0.12) 0%, transparent 70%)`,
+        background: `radial-gradient(circle, rgba(79,143,227,0.12) 0%, transparent 70%)`,
         top: '50%',
         left: '50%',
         transform: 'translate(-50%, -50%)',
@@ -45,7 +45,7 @@ export const IntroCard: React.FC<{ name?: string; tagline?: string }> = ({
           margin: '20px auto',
           height: 1,
           width: lineW,
-          background: `linear-gradient(90deg, transparent, ${brand.gold}, transparent)`,
+          background: `linear-gradient(90deg, transparent, ${brand.blue}, transparent)`,
         }} />
 
         <div style={{

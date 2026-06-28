@@ -20,7 +20,7 @@ export const OutroCard: React.FC<{ cta?: string }> = ({
         width: 500,
         height: 500,
         borderRadius: '50%',
-        background: `radial-gradient(circle, rgba(201,168,76,0.10) 0%, transparent 70%)`,
+        background: `radial-gradient(circle, rgba(79,143,227,0.10) 0%, transparent 70%)`,
         top: '50%',
         left: '50%',
         transform: 'translate(-50%, -50%)',
@@ -42,7 +42,7 @@ export const OutroCard: React.FC<{ cta?: string }> = ({
           margin: '18px auto',
           height: 1,
           width: lineW,
-          background: `linear-gradient(90deg, transparent, ${brand.gold}, transparent)`,
+          background: `linear-gradient(90deg, transparent, ${brand.blue}, transparent)`,
         }} />
 
         <div style={{
@@ -53,8 +53,8 @@ export const OutroCard: React.FC<{ cta?: string }> = ({
           fontSize: 20,
           letterSpacing: '0.18em',
           textTransform: 'uppercase' as const,
-          color: brand.gold,
-          border: `1px solid ${brand.gold}`,
+          color: brand.blue,
+          border: `1px solid ${brand.blue}`,
           padding: '14px 36px',
           borderRadius: 6,
         }}>

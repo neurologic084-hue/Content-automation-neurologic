@@ -36,6 +36,7 @@ export interface VideoVariantDef {
   descriptCaptions?: boolean   // ask Underlord to add captions
   nativeCaptions?: boolean     // burn ASS karaoke captions via ElevenLabs Scribe + FFmpeg
   captionTestOnly?: boolean    // skip Descript + smart-cut entirely, caption the raw footage directly
+  motionGraphics?: boolean     // plan + render front-loaded brand graphics (Remotion) and composite them in
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -70,6 +71,17 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     autoStart: false,
     descriptBroll: true,
     descriptCaptions: true,
+  },
+  {
+    id: 'our-v6',
+    name: 'Descript Edit + Brand Motion Graphics',
+    description: 'Same Descript edit pass (captions, clean cuts, B-roll) plus front-loaded Neuro Logic motion graphics — intro card, callouts, stats — planned from the transcript and rendered on top.',
+    tool: 'edit',
+    order: 6,
+    autoStart: false,
+    descriptBroll: true,
+    descriptCaptions: true,
+    motionGraphics: true,
   },
   {
     id: 'our-v2',
