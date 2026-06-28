@@ -1,9 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant } from '@/lib/motion-renderer'
-import { submitSubmagicJob, pollSubmagicJob } from '@/lib/video-pipeline'
+import { startSingleVariant, prepareSubmagicCustomBrollSource, retrieveAndStoreSubmagicResult } from '@/lib/motion-renderer'
+import {
+  deriveSmartSubmagicSettings,
+  fetchSubmagicAudioTrack,
+  submitSubmagicJob,
+  pollSubmagicJob,
+  transcribeVideo,
+  VARIANT_DEFINITIONS,
+  SUBMAGIC_ALWAYS_ON,
+} from '@/lib/video-pipeline'
 import type { VideoVariant } from '@/lib/video-pipeline'
+import type { ZapcapSmartProfile, ZapcapTemplateIndex } from '@/lib/zapcap-client'
 
 function supabaseAdmin() {
   return createAdminClient(
@@ -11,6 +20,8 @@ function supabaseAdmin() {
     process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   )
 }
+
+const activeSubmagicStarts = new Set<string>()
 
 async function pollSubmagicUntilDone(jobId: string, variantId: string, projectId: string) {
   const db = supabaseAdmin()
@@ -26,10 +37,22 @@ async function pollSubmagicUntilDone(jobId: string, variantId: string, projectId
     const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     if (!job?.variants) return
 
+    let finalUrl: string | null = result.downloadUrl
+    if (result.status === 'ready' && result.downloadUrl) {
+      try {
+        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, result.downloadUrl)
+        console.log(`[start-variant] Submagic result retrieved into Olympus storage for ${jobId}:${variantId}`)
+      } catch (e) {
+        console.warn(`[start-variant] could not retrieve Submagic result, keeping their hosted URL:`, (e as Error).message)
+        // Fall back to Submagic's own URL rather than failing the variant —
+        // still playable, just not pulled into our own storage this time.
+      }
+    }
+
     const variants = (job.variants as VideoVariant[]).map(v => {
       if (v.id !== variantId) return v
       if (result.status === 'ready') {
-        return { ...v, status: 'ready', download_url: result.downloadUrl, preview_url: result.previewUrl, error: null, progress: null }
+        return { ...v, status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null }
       }
       return { ...v, status: 'failed', error: result.error ?? 'Submagic failed', progress: null }
     })
@@ -67,24 +90,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Job not found.' }, { status: 404 })
   }
 
-  const variant = (job.variants ?? []).find((v: VideoVariant) => v.id === variantId)
+  const storedVariant = (job.variants ?? []).find((v: VideoVariant) => v.id === variantId)
+  const currentDefinition = VARIANT_DEFINITIONS.find(v => v.id === variantId)
+  const variant = storedVariant && currentDefinition
+    ? { ...storedVariant, ...currentDefinition }
+    : storedVariant
   if (!variant) {
     return NextResponse.json({ error: 'Variant not found.' }, { status: 400 })
   }
 
-  const variants: VideoVariant[] = (job.variants ?? []).map((v: VideoVariant) =>
-    v.id === variantId
-      ? { ...v, status: 'processing', external_id: null, preview_url: null, download_url: null, error: null }
-      : v
-  )
-  await supabase.from('video_jobs').update({ variants, status: 'processing' }).eq('id', jobId)
+  if (variant.tool === 'edit') {
+    const variants: VideoVariant[] = (job.variants ?? []).map((v: VideoVariant) =>
+      v.id === variantId
+        ? { ...v, status: 'processing', external_id: null, preview_url: null, download_url: null, error: null }
+        : v
+    )
+    await supabase.from('video_jobs').update({ variants, status: 'processing' }).eq('id', jobId)
 
-  if (variant.tool === 'hyperframe') {
     const { data: scriptRow } = await supabase
       .from('scripts')
-      .select('hook, cta, mood_tag')
+      .select('hook, cta, mood_tag, filming_plan')
       .eq('id', job.script_id)
       .single()
+
+    const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
 
     startSingleVariant(
       jobId,
@@ -92,11 +121,18 @@ export async function POST(req: NextRequest) {
       job.source_drive_url,
       scriptRow?.hook ?? '',
       scriptRow?.cta ?? '',
-      variant.zapcapTemplateIndex as 1 | 2 | undefined,
+      variant.zapcapTemplateIndex as ZapcapTemplateIndex | undefined,
       variant.zapcapBrollPercent as number | undefined,
       variant.descriptBroll as boolean | undefined,
       variant.descriptCaptions as boolean | undefined,
       variant.brollDriveUrl as string | undefined,
+      variant.nativeCaptions as boolean | undefined,
+      scriptRow?.mood_tag ?? null,
+      scriptFormat,
+      variant.captionTestOnly as boolean | undefined,
+      variant.zapcapOnly as boolean | undefined,
+      variant.zapcapAutoCut as { silenceRemoval?: number; disfluencyRemoval?: boolean } | undefined,
+      variant.zapcapSmartProfile as ZapcapSmartProfile | undefined,
     )
 
     return NextResponse.json({ ok: true })
@@ -104,15 +140,112 @@ export async function POST(req: NextRequest) {
 
   if (variant.tool === 'submagic') {
     const preset = variant.submagicPreset ?? {}
+    const lockKey = `${jobId}:${variantId}`
+
+    if (variant.external_id && (variant.status === 'processing' || variant.status === 'ready')) {
+      console.log(`[start-variant] Reusing existing Submagic project for ${lockKey}: ${variant.external_id}`)
+      return NextResponse.json({ ok: true, reused: true, projectId: variant.external_id })
+    }
+
+    if (activeSubmagicStarts.has(lockKey)) {
+      console.log(`[start-variant] Suppressed duplicate Submagic start for ${lockKey}`)
+      return NextResponse.json({ ok: true, reused: true })
+    }
+
+    activeSubmagicStarts.add(lockKey)
     try {
-      const projectId = await submitSubmagicJob(job.source_drive_url, {
-        title: `${variantId}-${jobId.slice(0, 8)}`,
-        aiEditTemplate: preset.aiEditTemplate,
-      })
+      const processing = (job.variants as VideoVariant[]).map((v: VideoVariant) =>
+        v.id === variantId
+          ? { ...v, status: 'processing', preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } }
+          : v
+      )
+      await supabase.from('video_jobs').update({ variants: processing, status: 'processing' }).eq('id', jobId)
+
+      const { data: scriptRow } = await supabase
+        .from('scripts')
+        .select('hook, cta, mood_tag, filming_plan')
+        .eq('id', job.script_id)
+        .single()
+
+      const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
+
+      let videoUrlForSubmagic = job.source_drive_url as string
+      let projectId: string
+
+      if (preset.aiEditTemplate) {
+        // Fully autonomous mode — Submagic controls everything itself, no
+        // profile/settings/transcript analysis applies here.
+        projectId = await submitSubmagicJob(videoUrlForSubmagic, {
+          title: `${variantId}-${jobId.slice(0, 8)}`,
+          aiEditTemplate: preset.aiEditTemplate,
+        })
+      } else {
+        // Profile-driven path (our-v3/v4/v5): get the ACTUAL spoken transcript
+        // from the footage, not just the written script — creators sometimes
+        // improvise on camera. Cached on the job row so starting a 2nd or 3rd
+        // Submagic variant on the same job doesn't re-transcribe.
+        let actualTranscript = job.transcript as string | null
+        if (!actualTranscript) {
+          try {
+            const transcribed = await transcribeVideo(videoUrlForSubmagic)
+            actualTranscript = transcribed.transcript || null
+            if (actualTranscript) {
+              await supabase.from('video_jobs').update({ transcript: actualTranscript }).eq('id', jobId)
+            }
+          } catch (e) {
+            console.warn('[start-variant] transcription failed, falling back to script text only:', (e as Error).message)
+          }
+        }
+
+        const profile = variant.submagicProfile
+        const smart = await deriveSmartSubmagicSettings(
+          {
+            hook: scriptRow?.hook ?? '',
+            cta: scriptRow?.cta ?? '',
+            mood_tag: scriptRow?.mood_tag ?? null,
+            script_format: scriptFormat,
+          },
+          { profileDirective: profile?.directive, actualTranscript: actualTranscript ?? undefined },
+        )
+
+        // Custom B-roll (job-level Drive footage) takes priority over Submagic's
+        // own auto-B-roll — insert it ourselves via FFmpeg and disable magicBrolls
+        // to avoid stacking two B-roll passes.
+        const brollDriveUrl = (variant as { brollDriveUrl?: string }).brollDriveUrl
+        let useMagicBrolls = smart.magicBrolls
+        if (brollDriveUrl) {
+          await supabase.from('video_jobs').update({
+            variants: (job.variants as VideoVariant[]).map((v) =>
+              v.id === variantId ? { ...v, progress: { step: 1, total: 2, label: 'Inserting custom B-roll' } } : v
+            ),
+          }).eq('id', jobId)
+          videoUrlForSubmagic = await prepareSubmagicCustomBrollSource(
+            jobId, videoUrlForSubmagic, brollDriveUrl, scriptRow?.hook ?? '', scriptRow?.cta ?? '',
+          )
+          useMagicBrolls = false
+        }
+
+        // Music presence is deterministic per-variant (set by the profile),
+        // not AI-guessed — always attempt to attach a Submagic track when wanted.
+        const musicTrackId = profile?.useMusic ?? true
+          ? await fetchSubmagicAudioTrack()
+          : null
+
+        projectId = await submitSubmagicJob(videoUrlForSubmagic, {
+          title: `${variantId}-${jobId.slice(0, 8)}`,
+          templateName: smart.templateName,
+          magicBrolls: useMagicBrolls,
+          magicBrollsPercentage: smart.magicBrollsPercentage,
+          hookTitle: smart.hookTitle,
+          removeSilencePace: smart.removeSilencePace,
+          ...SUBMAGIC_ALWAYS_ON,
+          ...(musicTrackId ? { musicTrackId } : {}),
+        })
+      }
 
       // Save external_id immediately
       const withExternal = (job.variants as VideoVariant[]).map((v: VideoVariant) =>
-        v.id === variantId ? { ...v, status: 'processing', external_id: projectId } : v
+        v.id === variantId ? { ...v, status: 'processing', external_id: projectId, progress: { step: 2, total: 2, label: 'Processing in Submagic' } } : v
       )
       await supabase.from('video_jobs').update({ variants: withExternal }).eq('id', jobId)
 
@@ -124,10 +257,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     } catch (e) {
       const failed = (job.variants as VideoVariant[]).map((v: VideoVariant) =>
-        v.id === variantId ? { ...v, status: 'failed', error: (e as Error).message } : v
+        v.id === variantId ? { ...v, status: 'failed', error: (e as Error).message, progress: null } : v
       )
       await supabase.from('video_jobs').update({ variants: failed }).eq('id', jobId)
       return NextResponse.json({ error: (e as Error).message }, { status: 500 })
+    } finally {
+      activeSubmagicStarts.delete(lockKey)
     }
   }
 

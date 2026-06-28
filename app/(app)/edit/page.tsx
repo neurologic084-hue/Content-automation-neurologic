@@ -56,7 +56,7 @@ export default async function EditPage() {
           </span>
         </div>
         <p className="text-sm text-[#71717A]">
-          Add footage to your approved scripts and generate 3 edited variants per video.
+          Add footage to your approved scripts and generate edited variants per video.
         </p>
       </div>
 
@@ -88,7 +88,7 @@ export default async function EditPage() {
             if (job?.selected_variant) {
               statusBadge = { label: 'Variant selected', bg: '#DCFCE7', color: '#16A34A' }
             } else if (job?.status === 'complete') {
-              statusBadge = { label: '3 variants ready', bg: '#FFF3EF', color: '#FF4F17' }
+              statusBadge = { label: 'Variants ready', bg: '#FFF3EF', color: '#FF4F17' }
             } else if (job?.status === 'processing') {
               statusBadge = { label: 'Processing...', bg: '#FEF3C7', color: '#D97706' }
             }

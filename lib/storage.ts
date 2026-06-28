@@ -14,6 +14,7 @@ export async function uploadToStorage(localPath: string, fileName: string, jobId
   const supabase = serviceClient()
   const fileBuffer = fs.readFileSync(localPath)
   const storagePath = `${jobId}/${fileName}`
+  console.log(`[storage] uploading ${storagePath} (${(fileBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
 
   // Large files on a slow connection occasionally hit a transient "fetch failed"
   // mid-upload. Retry a few times with backoff before giving up.
@@ -26,10 +27,12 @@ export async function uploadToStorage(localPath: string, fileName: string, jobId
 
     if (!error) {
       const { data } = supabase.storage.from(BUCKET).getPublicUrl(storagePath)
+      console.log(`[storage] uploaded ${storagePath}: ${data.publicUrl}`)
       return data.publicUrl
     }
 
     lastError = error.message
+    console.warn(`[storage] upload ${storagePath} attempt ${attempt}/${maxAttempts} failed: ${lastError}`)
     if (attempt < maxAttempts) {
       await new Promise((r) => setTimeout(r, attempt * 1500))
     }
@@ -41,7 +44,8 @@ export async function uploadToStorage(localPath: string, fileName: string, jobId
 export async function tryUploadToStorage(localPath: string, fileName: string, jobId: string): Promise<string | null> {
   try {
     return await uploadToStorage(localPath, fileName, jobId)
-  } catch {
+  } catch (e) {
+    console.warn(`[storage] upload skipped/failed for ${jobId}/${fileName}: ${(e as Error).message}`)
     return null
   }
 }

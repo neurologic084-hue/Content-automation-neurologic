@@ -46,6 +46,7 @@ export interface FilmingPlan {
   wardrobe: string
   setup?: string
   body_labels?: string[]
+  re_hook?: string
   // legacy fields (older scripts)
   location?: string
   props?: string[]

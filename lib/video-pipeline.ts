@@ -1,32 +1,41 @@
 import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
+import type { ZapcapSmartProfile, ZapcapTemplateIndex } from './zapcap-client'
 
 export interface SubmagicPreset {
   // Fully autonomous mode   Submagic handles everything (music, B-roll, cuts, style)
   aiEditTemplate?: 'kelly' | 'karl' | 'ella'
-  // Manual mode fields   only used when aiEditTemplate is not set
-  template?: string
-  broll?: boolean
-  brollPct?: number   // 0-100, how much of the video to fill with B-roll
-  zoom?: boolean
-  hookTitle?: boolean
-  silencePace?: 'natural' | 'fast' | 'extra-fast'
-  badTakes?: boolean
-  music?: boolean     // true = use audio track from Submagic library if available
+}
+
+// Steers the AI's per-render settings choice instead of hardcoding numbers.
+// useMusic is deterministic (not AI-guessed) so variants have real, predictable
+// variety — some calm/voiceonly, some energetic/with music.
+export interface SubmagicProfile {
+  directive: string
+  useMusic: boolean
 }
 
 export interface VideoVariantDef {
   id: string
   name: string
   description: string
-  tool: 'submagic' | 'hyperframe'
+  tool: 'submagic' | 'edit'
   order: number
   autoStart: boolean   // true = runs immediately on job creation; false = user starts manually
   submagicPreset?: SubmagicPreset
-  zapcapTemplateIndex?: 1 | 2  // 1 = ZAPCAP_TEMPLATE_ID, 2 = ZAPCAP_TEMPLATE_ID_2
+  submagicProfile?: SubmagicProfile
+  zapcapTemplateIndex?: ZapcapTemplateIndex  // 1/2/3 = ZAPCAP_TEMPLATE_ID(_2/_3)
   zapcapBrollPercent?: number  // 0-100, enables ZapCap auto B-roll
+  zapcapOnly?: boolean         // skip Descript and let ZapCap handle captions + auto-cutting
+  zapcapAutoCut?: {
+    silenceRemoval?: number
+    disfluencyRemoval?: boolean
+  }
+  zapcapSmartProfile?: ZapcapSmartProfile
   descriptBroll?: boolean      // ask Underlord to insert stock B-roll
   descriptCaptions?: boolean   // ask Underlord to add captions
+  nativeCaptions?: boolean     // burn ASS karaoke captions via ElevenLabs Scribe + FFmpeg
+  captionTestOnly?: boolean    // skip Descript + smart-cut entirely, caption the raw footage directly
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -54,9 +63,9 @@ export interface VideoJob {
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   {
     id: 'our-v1',
-    name: 'Descript Full',
-    description: 'Descript handles everything   cuts, Studio Sound, B-roll, and captions.',
-    tool: 'hyperframe',
+    name: 'Descript Full Edit',
+    description: 'Descript handles the classic edit pass with captions, clean cuts, and B-roll.',
+    tool: 'edit',
     order: 1,
     autoStart: false,
     descriptBroll: true,
@@ -64,13 +73,51 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v2',
-    name: 'ZapCap Captions + B-roll',
-    description: 'Descript cuts only, then ZapCap adds captions and auto B-roll.',
-    tool: 'hyperframe',
+    name: 'ZapCap Smart Edit',
+    description: 'ZapCap handles auto-cutting, captions, and modest B-roll as a comparison option.',
+    tool: 'edit',
     order: 2,
     autoStart: false,
-    zapcapTemplateIndex: 1,
-    zapcapBrollPercent: 10,
+    zapcapTemplateIndex: 2,
+    zapcapBrollPercent: 12,
+    zapcapOnly: true,
+    zapcapSmartProfile: 'balanced',
+  },
+  {
+    id: 'our-v3',
+    name: 'Submagic Calm & Clean',
+    description: 'Gentle pacing, light B-roll, no music — voice carries the video alone. Best for sensitive, personal, or educational content.',
+    tool: 'submagic',
+    order: 3,
+    autoStart: false,
+    submagicProfile: {
+      directive: 'Calm, gentle energy suited to sensitive, personal, medical, or educational content. Keep B-roll light and unobtrusive, pacing natural (never extra-fast), zooms subtle. The voice should feel like it is carrying the video alone.',
+      useMusic: false,
+    },
+  },
+  {
+    id: 'our-v4',
+    name: 'Submagic Balanced Energy',
+    description: 'Natural-to-brisk pacing, moderate B-roll, subtle background music. A balanced general-purpose edit.',
+    tool: 'submagic',
+    order: 4,
+    autoStart: false,
+    submagicProfile: {
+      directive: 'Balanced, natural energy suited to general short-form content. Moderate B-roll coverage, natural-to-brisk pacing, noticeable but not aggressive zooms. Subtle background music sits quietly under the voice.',
+      useMusic: true,
+    },
+  },
+  {
+    id: 'our-v5',
+    name: 'Submagic Bold & Punchy',
+    description: 'Fast cuts, heavier B-roll, strong zooms, energetic music. For punchy, attention-grabbing content.',
+    tool: 'submagic',
+    order: 5,
+    autoStart: false,
+    submagicProfile: {
+      directive: 'High energy, fast-paced, attention-grabbing edit. Heavier B-roll coverage, tight cuts, strong confident zooms, a bold hook title. Energetic background music under the voice.',
+      useMusic: true,
+    },
   },
 ]
 
@@ -181,17 +228,181 @@ export interface SubmagicJobOptions {
   musicTrackId?: string
 }
 
+interface SubmagicTemplateOption {
+  id?: string
+  name: string
+  description?: string
+}
+
+interface SmartSubmagicSettings {
+  templateName?: string
+  magicBrolls: boolean
+  magicBrollsPercentage: number
+  hookTitle: boolean | { text?: string; template?: string; top?: number; size?: number }
+  removeSilencePace: 'natural' | 'fast' | 'extra-fast'
+}
+
+// Non-negotiable baseline for every Submagic render — never left to the AI or
+// a per-variant profile, always forced true at the call site. Zoom, bad-take
+// removal, and audio cleanup are core quality bars, not stylistic choices.
+export const SUBMAGIC_ALWAYS_ON = {
+  removeBadTakes: true,
+  cleanAudio: true,
+  magicZooms: true,
+} as const
+
+let submagicTemplateCache: { expiresAt: number; templates: SubmagicTemplateOption[] } | null = null
+
+function clampNumber(n: unknown, min: number, max: number, fallback: number): number {
+  const value = typeof n === 'number' && Number.isFinite(n) ? n : fallback
+  return Math.min(max, Math.max(min, value))
+}
+
+async function fetchSubmagicTemplates(): Promise<SubmagicTemplateOption[]> {
+  if (submagicTemplateCache && submagicTemplateCache.expiresAt > Date.now()) {
+    return submagicTemplateCache.templates
+  }
+
+  try {
+    const res = await fetch('https://api.submagic.co/v1/templates', {
+      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      console.warn(`[submagic] template discovery failed (${res.status}): ${text.slice(0, 250)}`)
+      submagicTemplateCache = { expiresAt: Date.now() + 5 * 60 * 1000, templates: [] }
+      return []
+    }
+
+    const data = JSON.parse(text)
+    const rawTemplates = Array.isArray(data) ? data : (data.templates ?? data.items ?? data.results ?? [])
+    const templates = (Array.isArray(rawTemplates) ? rawTemplates : [])
+      .map((t: string | { id?: string; name?: string; title?: string; description?: string }) => (
+        typeof t === 'string'
+          ? { name: t }
+          : {
+              id: t.id,
+              name: t.name ?? t.title ?? '',
+              description: t.description,
+            }
+      ))
+      .filter((t: SubmagicTemplateOption) => t.name)
+      .slice(0, 50)
+
+    console.log(`[submagic] discovered ${templates.length} templates`)
+    submagicTemplateCache = { expiresAt: Date.now() + 60 * 60 * 1000, templates }
+    return templates
+  } catch (e) {
+    console.warn('[submagic] template discovery error:', (e as Error).message)
+    return []
+  }
+}
+
+function normalizeSubmagicSettings(
+  raw: Partial<SmartSubmagicSettings>,
+  templates: SubmagicTemplateOption[],
+): SmartSubmagicSettings {
+  const allowedNames = new Set(templates.map(t => t.name))
+  const templateName = raw.templateName && allowedNames.has(raw.templateName)
+    ? raw.templateName
+    : undefined
+
+  const silence = raw.removeSilencePace === 'extra-fast' || raw.removeSilencePace === 'fast' || raw.removeSilencePace === 'natural'
+    ? raw.removeSilencePace
+    : 'natural'
+
+  return {
+    templateName,
+    magicBrolls: raw.magicBrolls ?? true,
+    magicBrollsPercentage: Math.round(clampNumber(raw.magicBrollsPercentage, 8, 26, 16)),
+    hookTitle: raw.hookTitle ?? true,
+    removeSilencePace: silence,
+  }
+}
+
+export async function deriveSmartSubmagicSettings(
+  script: { hook: string; cta: string; mood_tag: string | null; script_format?: string },
+  opts: { profileDirective?: string; actualTranscript?: string } = {},
+): Promise<SmartSubmagicSettings> {
+  const templates = await fetchSubmagicTemplates()
+  const fallback = normalizeSubmagicSettings({}, templates)
+
+  try {
+    const templateList = templates.length
+      ? templates.map((t, i) => `${i + 1}. ${t.name}${t.description ? ` — ${t.description}` : ''}`).join('\n')
+      : 'No templates available from API right now. Use null templateName.'
+
+    // The actual transcript is what viewers hear — if the creator improvised
+    // or deviated from the written script while filming, weight decisions
+    // toward what's really in the footage, not just the intended hook/CTA.
+    const transcriptBlock = opts.actualTranscript
+      ? `\nActual spoken transcript from the recorded footage (this is what viewers will hear — if it differs from the hook/CTA above in tone, topic, or specificity, prioritize THIS over the written script):\n"${opts.actualTranscript.slice(0, 1500)}"\n`
+      : ''
+
+    const directiveBlock = opts.profileDirective
+      ? `\nEditing direction for this specific variant (follow this style, but pick the actual numbers yourself based on the content above): ${opts.profileDirective}\n`
+      : ''
+
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      temperature: 0.2,
+      max_tokens: 600,
+      json: true,
+      messages: [{
+        role: 'user',
+        content: [
+          'Choose Submagic API settings for a short-form talking-head edit.',
+          `Hook (written script): ${script.hook}`,
+          `CTA (written script): ${script.cta}`,
+          `Mood: ${script.mood_tag ?? 'unspecified'}`,
+          `Format: ${script.script_format ?? 'unspecified'}`,
+          transcriptBlock,
+          directiveBlock,
+          'Available caption/templates:',
+          templateList,
+          '',
+          'Rules:',
+          '- Choose templateName only from the exact available names, otherwise null.',
+          '- Keep B-roll percentage and pacing consistent with the editing direction above, grounded in the actual content (transcript if given, else hook/CTA).',
+          '- Use extra-fast pace only for very punchy sales/list-style content, never for calm/personal/medical content.',
+          '- Return JSON only:',
+          '{"templateName": string|null, "magicBrolls": boolean, "magicBrollsPercentage": number, "hookTitle": boolean, "removeSilencePace": "natural|fast|extra-fast"}',
+        ].join('\n'),
+      }],
+    })
+
+    const parsed = JSON.parse(raw) as Partial<SmartSubmagicSettings>
+    const settings = normalizeSubmagicSettings(parsed, templates)
+    console.log('[submagic] smart settings:', JSON.stringify(settings))
+    return settings
+  } catch (e) {
+    console.warn('[submagic] smart settings failed, using fallback:', (e as Error).message)
+    return fallback
+  }
+}
+
 
 // ── Submagic   Fetch first available audio track for music param ──────────────
 
 export async function fetchSubmagicAudioTrack(): Promise<string | null> {
   try {
-    const res = await fetch('https://api.submagic.co/v1/user-media?type=AUDIO&limit=1', {
+    const res = await fetch('https://api.submagic.co/v1/user-media?type=AUDIO&limit=20', {
       headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
     })
-    if (!res.ok) return null
-    const data = await res.json()
-    return data.items?.[0]?.id ?? null
+    const text = await res.text()
+    if (!res.ok) {
+      console.warn(`[submagic] audio media lookup failed (${res.status}): ${text.slice(0, 250)}`)
+      return null
+    }
+    const data = JSON.parse(text)
+    const items = Array.isArray(data.items) ? data.items : []
+    const calm = items.find((item: { id?: string; name?: string; title?: string }) =>
+      /calm|soft|lofi|ambient|chill|minimal|subtle|warm/i.test(`${item.name ?? ''} ${item.title ?? ''}`)
+    )
+    const picked = calm ?? items[0]
+    if (picked?.id) console.log(`[submagic] selected audio media: ${picked.name ?? picked.title ?? picked.id}`)
+    return picked?.id ?? null
   } catch {
     return null
   }
@@ -226,6 +437,11 @@ export async function submitSubmagicJob(
     if (opts.hookTitle !== undefined) body.hookTitle = opts.hookTitle
     if (opts.musicTrackId) body.music = { userMediaId: opts.musicTrackId, volume: 30, fade: true }
   }
+
+  console.log('[submagic] create project body:', JSON.stringify({
+    ...body,
+    videoUrl: typeof body.videoUrl === 'string' ? `${body.videoUrl.slice(0, 120)}...` : body.videoUrl,
+  }))
 
   const res = await fetch('https://api.submagic.co/v1/projects', {
     method: 'POST',

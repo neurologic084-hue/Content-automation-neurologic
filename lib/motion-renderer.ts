@@ -6,17 +6,24 @@ import { createClient } from '@supabase/supabase-js'
 import { tryUploadToStorage, storageFileName } from './storage'
 import { chatCompletion, MODELS } from './openrouter'
 import type { VideoVariant } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob } from './video-pipeline'
 import { processWithDescript } from './descript-client'
 import { processWithZapcap } from './zapcap-client'
+import type { ZapcapSmartProfile, ZapcapTemplateIndex } from './zapcap-client'
+import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
+import { generateElevenLabsMusic } from './elevenlabs-music'
+import { getWhooshSfx, getSfx } from './sound-effects'
+import { planScenes, type MediaFile, type ScenePlan } from './scene-planner'
 
 const active = new Set<string>()
+
+const MUSIC_ENABLED = true
 
 // Cache Descript-edited URLs per job so multiple variants don't re-encode the same footage.
 // Stores either a pending Promise (first variant is running Descript) or a resolved URL.
 // Second variant arriving while the first is mid-run waits on the same Promise instead of
 // starting a duplicate Descript job.
 const descriptUrlCache = new Map<string, Promise<string> | { url: string; expiresAt: number }>()
+const sourceFileCache = new Map<string, Promise<string>>()
 
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -52,18 +59,31 @@ async function getVideoDuration(filePath: string): Promise<number> {
   })
 }
 
-async function streamBodyToFile(body: ReadableStream<Uint8Array>, dest: string): Promise<void> {
+type ProgressCallback = (percent: number, label: string) => void | Promise<void>
+
+async function streamBodyToFile(
+  body: ReadableStream<Uint8Array>,
+  dest: string,
+  contentLength?: number,
+  onProgress?: ProgressCallback,
+): Promise<void> {
   const file = fs.createWriteStream(dest)
   const reader = body.getReader()
   await new Promise<void>((resolve, reject) => {
     file.on('error', reject)
     file.on('finish', resolve)
+    let downloaded = 0
     const pump = async () => {
       try {
         while (true) {
           const { done, value } = await reader.read()
           if (done) { file.end(); break }
-          if (!file.write(Buffer.from(value))) await new Promise<void>(r => file.once('drain', r))
+          const chunk = Buffer.from(value)
+          downloaded += chunk.byteLength
+          if (contentLength && onProgress) {
+            await onProgress(Math.min(75, 10 + Math.round((downloaded / contentLength) * 65)), 'Downloading footage')
+          }
+          if (!file.write(chunk)) await new Promise<void>(r => file.once('drain', r))
         }
       } catch (e) { file.destroy(e as Error) }
     }
@@ -71,10 +91,26 @@ async function streamBodyToFile(body: ReadableStream<Uint8Array>, dest: string):
   })
 }
 
-async function downloadFile(url: string, dest: string): Promise<void> {
-  const isGdrive = url.includes('drive.google.com') || url.includes('drive.usercontent.google.com')
+async function fetchWithRetry(url: string, init: RequestInit, label: string, attempts = 3): Promise<Response> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fetch(url, init)
+    } catch (e) {
+      lastError = e
+      if (attempt < attempts) await new Promise(r => setTimeout(r, attempt * 1500))
+    }
+  }
 
-  let res = await fetch(url, { redirect: 'follow' })
+  const message = lastError instanceof Error ? lastError.message : String(lastError)
+  throw new Error(`${label} failed after ${attempts} attempts: ${message}`)
+}
+
+async function downloadFile(url: string, dest: string, onProgress?: ProgressCallback): Promise<void> {
+  const isGdrive = url.includes('drive.google.com') || url.includes('drive.usercontent.google.com')
+  await onProgress?.(10, `Connecting to ${isGdrive ? 'Google Drive' : 'download URL'}`)
+
+  let res = await fetchWithRetry(url, { redirect: 'follow' }, `Download ${isGdrive ? 'from Google Drive' : 'from remote URL'}`)
   if (!res.ok || !res.body) throw new Error(`Download failed: HTTP ${res.status}`)
 
   const contentType = res.headers.get('content-type') ?? ''
@@ -116,11 +152,13 @@ async function downloadFile(url: string, dest: string): Promise<void> {
       )
     }
 
-    res = await fetch(realUrl, { redirect: 'follow' })
+    res = await fetchWithRetry(realUrl, { redirect: 'follow' }, 'Google Drive confirmed download')
     if (!res.ok || !res.body) throw new Error(`Google Drive confirmed download failed: HTTP ${res.status}`)
   }
 
-  await streamBodyToFile(res.body!, dest)
+  const contentLength = parseInt(res.headers.get('content-length') ?? '', 10)
+  await streamBodyToFile(res.body!, dest, Number.isFinite(contentLength) && contentLength > 0 ? contentLength : undefined, onProgress)
+  await onProgress?.(78, 'Validating footage')
 
   const buf = Buffer.alloc(12)
   const fd = fs.openSync(dest, 'r')
@@ -135,6 +173,123 @@ async function downloadFile(url: string, dest: string): Promise<void> {
       'Set the file sharing to "Anyone with the link can view".'
     )
   }
+}
+
+async function getSharedSourceFile(
+  jobId: string,
+  sourceUrl: string,
+  outDir: string,
+  onProgress?: ProgressCallback,
+): Promise<string> {
+  const finalPath = path.join(outDir, 'source.mp4')
+  if (fs.existsSync(finalPath)) return finalPath
+
+  const existing = sourceFileCache.get(jobId)
+  if (existing) return existing
+
+  const promise = (async () => {
+    const partialPath = path.join(outDir, 'source.download')
+    try { if (fs.existsSync(partialPath)) fs.unlinkSync(partialPath) } catch { /* best-effort */ }
+    await downloadFile(sourceUrl, partialPath, onProgress)
+    fs.renameSync(partialPath, finalPath)
+    return finalPath
+  })()
+
+  sourceFileCache.set(jobId, promise)
+  try {
+    return await promise
+  } catch (e) {
+    sourceFileCache.delete(jobId)
+    throw e
+  }
+}
+
+interface VideoFormatInfo {
+  width: number
+  height: number
+  videoCodec: string
+  audioCodec: string | null
+}
+
+async function probeVideoFormat(filePath: string): Promise<VideoFormatInfo | null> {
+  return new Promise((resolve) => {
+    exec(
+      `ffprobe -v error -show_entries stream=width,height,codec_name,codec_type -of json "${filePath}"`,
+      { timeout: 30_000 },
+      (err, stdout) => {
+        if (err) return resolve(null)
+        try {
+          const data = JSON.parse(stdout) as { streams?: { width?: number; height?: number; codec_name?: string; codec_type?: string }[] }
+          const v = data.streams?.find(s => s.codec_type === 'video')
+          const a = data.streams?.find(s => s.codec_type === 'audio')
+          if (!v?.width || !v?.height || !v?.codec_name) return resolve(null)
+          resolve({ width: v.width, height: v.height, videoCodec: v.codec_name, audioCodec: a?.codec_name ?? null })
+        } catch {
+          resolve(null)
+        }
+      }
+    )
+  })
+}
+
+// Skips the re-encode entirely when the source is already 1080x1920 h264/aac —
+// re-encoding an already-correct file only adds a lossy compression pass for
+// no benefit, and every downstream step (Descript, ZapCap/Submagic, caption
+// burn-in, music mix) does its own re-encode anyway.
+async function prepareVerticalSourceFile(
+  inputPath: string,
+  outDir: string,
+  onProgress?: ProgressCallback,
+): Promise<string> {
+  const outputPath = path.join(outDir, 'source-vertical.mp4')
+  if (fs.existsSync(outputPath)) return outputPath
+
+  await onProgress?.(80, 'Checking footage format')
+  const format = await probeVideoFormat(inputPath)
+  const alreadyCorrect = format
+    && format.width === 1080
+    && format.height === 1920
+    && format.videoCodec === 'h264'
+    && format.audioCodec === 'aac'
+
+  if (alreadyCorrect) {
+    console.log('[motion-renderer] source already 1080x1920 h264/aac — skipping re-encode')
+    fs.copyFileSync(inputPath, outputPath)
+    await onProgress?.(92, 'Footage already vertical, no re-encode needed')
+    return outputPath
+  }
+
+  console.log(`[motion-renderer] re-encoding source (format: ${format ? `${format.width}x${format.height} ${format.videoCodec}/${format.audioCodec}` : 'probe failed'})`)
+  await onProgress?.(80, 'Compressing and cropping to 9:16')
+  const tmpPath = path.join(outDir, 'source-vertical.tmp.mp4')
+  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch { /* best-effort */ }
+
+  await run(
+    `ffmpeg -y -i "${inputPath}" ` +
+    `-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" ` +
+    `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
+    `-c:a aac -b:a 128k -ar 48000 -movflags +faststart "${tmpPath}"`,
+    600_000,
+  )
+
+  fs.renameSync(tmpPath, outputPath)
+  await onProgress?.(92, 'Compressed vertical source ready')
+  return outputPath
+}
+
+export async function prepareJobSource(
+  jobId: string,
+  sourceUrl: string,
+  onProgress?: ProgressCallback,
+): Promise<{ localPath: string; publicUrl: string | null }> {
+  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  fs.mkdirSync(outDir, { recursive: true })
+  const rawLocalPath = await getSharedSourceFile(jobId, sourceUrl, outDir, onProgress)
+  const localPath = await prepareVerticalSourceFile(rawLocalPath, outDir, onProgress)
+  await onProgress?.(94, 'Uploading prepared source')
+  const publicUrl = await tryUploadToStorage(localPath, 'source.mp4', jobId)
+  await onProgress?.(100, 'Footage ready')
+  return { localPath, publicUrl }
 }
 
 async function markVariant(
@@ -189,15 +344,29 @@ async function finishVariant(
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
+// Pulls a finished Submagic render back into our own storage instead of just
+// linking to Submagic's hosted URL — matches how Descript/ZapCap variants are
+// handled (finishVariant), and means the video survives even if Submagic
+// later expires or removes the file from their end.
+export async function retrieveAndStoreSubmagicResult(
+  jobId: string,
+  variantId: string,
+  downloadUrl: string,
+): Promise<string> {
+  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  fs.mkdirSync(outDir, { recursive: true })
+  const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
+  await downloadFile(downloadUrl, localPath)
+
+  const storageUrl = await tryUploadToStorage(localPath, storageFileName(variantId), jobId)
+  const url = storageUrl ?? `/renders/${jobId}/${path.basename(localPath)}`
+  try { if (!storageUrl) { /* keep local file as the served copy */ } else fs.unlinkSync(localPath) } catch { /* best-effort */ }
+  return url
+}
+
 function cleanTempFiles(outDir: string, variantId: string): void {
-  try {
-    const tmpDir = os.tmpdir()
-    for (const f of fs.readdirSync(tmpDir)) {
-      if (f.startsWith('descript-src-') && f.endsWith('.mp4')) {
-        try { fs.unlinkSync(path.join(tmpDir, f)) } catch { /* best-effort */ }
-      }
-    }
-  } catch { /* best-effort */ }
+  // descript-src-*.mp4 files are owned by processWithDescript and cleaned in its own finally block.
+  // Deleting them globally here races with other variants that may still be uploading the same file.
   for (const suffix of ['_edited.mp4', '.mp4', '_captions.ass', '_edited_tmp.mp4', '_mx.mp4', '_dt.mp4', '_broll.mp4']) {
     const p = path.join(outDir, `${variantId}${suffix}`)
     try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch { /* best-effort */ }
@@ -218,61 +387,22 @@ async function getVideoStreamDuration(filePath: string): Promise<number> {
 
 // ── Background music via ElevenLabs Sound Generation ─────────────────────────
 
-// Derive a music prompt from the video's hook using a fast AI call.
-// This makes music match the actual content   calm for a reflective video, upbeat for energetic, etc.
-async function deriveMusicPrompt(hook: string): Promise<string> {
-  const fallback = 'subtle ambient background music with soft piano, slow tempo, no vocals, designed for spoken word video'
-  if (!hook) return fallback
-  try {
-    const raw = await chatCompletion({
-      model: MODELS.fast,
-      messages: [{
-        role: 'user',
-        content: `A short-form video has this opening hook: "${hook.slice(0, 200)}"\n\nIn one sentence under 20 words, describe the ideal background music for this video. Focus only on: tempo, mood, and instruments. Do not mention the video topic. Always end with "no vocals". Example: "slow ambient piano with warm pads, calm and grounding, no vocals"`,
-      }],
-      max_tokens: 60,
-    })
-    const prompt = raw.trim().replace(/^["']|["']$/g, '')
-    console.log(`[motion-renderer] derived music prompt: "${prompt}"`)
-    return prompt
-  } catch {
-    return fallback
-  }
-}
-
-async function generateBackgroundMusic(hook: string): Promise<string | null> {
-  const key = process.env.ELEVENLABS_API_KEY
-  if (!key) { console.warn('[motion-renderer] ELEVENLABS_API_KEY not set   skipping music'); return null }
-  const prompt = process.env.BACKGROUND_MUSIC_PROMPT || await deriveMusicPrompt(hook)
-  console.log(`[motion-renderer] generating background music: "${prompt.slice(0, 80)}..."`)
-  try {
-    const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
-      method: 'POST',
-      headers: { 'xi-api-key': key, 'Content-Type': 'application/json' },
-      // Always generate 22s (max quality); FFmpeg loops it to fill any video length.
-      body: JSON.stringify({ text: prompt, duration_seconds: 22, prompt_influence: 0.4 }),
-      signal: AbortSignal.timeout(90_000),
-    })
-    if (!res.ok) {
-      console.warn(`[motion-renderer] ElevenLabs music gen ${res.status}:`, await res.text().catch(() => ''))
-      return null
-    }
-    const buf = Buffer.from(await res.arrayBuffer())
-    const out = path.join(os.tmpdir(), `bgmusic_${Date.now()}.mp3`)
-    fs.writeFileSync(out, buf)
-    console.log(`[motion-renderer] music ready: ${(buf.byteLength / 1024).toFixed(0)} KB`)
-    return out
-  } catch (e) {
-    console.warn('[motion-renderer] music generation error:', (e as Error).message)
-    return null
-  }
-}
-
-// Mix generated music under the video. Fades in/out, ducks under the voice via sidechain compression.
-async function mixBackgroundMusic(videoPath: string, hook: string): Promise<void> {
+// Generate a calm, short, loopable music bed with ElevenLabs and mix it very
+// quietly under speech. It is intentionally constrained away from rock/electric/
+// EDM so most talking-head clips stay calm and voice-first.
+async function mixBackgroundMusic(
+  videoPath: string,
+  hook: string,
+  moodTag: string | null,
+  scriptFormat?: string,
+): Promise<void> {
   const duration = await getVideoDuration(videoPath)
-  const musicPath = await generateBackgroundMusic(hook)
-  if (!musicPath) return
+
+  const musicPath = await generateElevenLabsMusic(hook, moodTag, scriptFormat, duration)
+  if (!musicPath) {
+    console.warn('[motion-renderer] no suitable music found — skipping music for this render')
+    return
+  }
 
   // Fade in over 1.5s at start, fade out in the last 1.5s
   const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
@@ -284,8 +414,8 @@ async function mixBackgroundMusic(videoPath: string, hook: string): Promise<void
     await run(
       `ffmpeg -y -i "${videoPath}" -stream_loop -1 -i "${musicPath}" ` +
       `-filter_complex ` +
-      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,volume=0.28[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.02:ratio=6:attack=5:release=300[ducked];` +
+      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,volume=0.09[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=0.018:ratio=10:attack=5:release=450[ducked];` +
       `[0:a][ducked]amix=inputs=2:duration=first:normalize=0[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
@@ -331,7 +461,7 @@ function parseDriveUrl(url: string): { type: 'file' | 'folder'; id: string } | n
   return null
 }
 
-async function listBRollFiles(driveUrl: string): Promise<{ url: string; name: string }[]> {
+async function listBRollFiles(driveUrl: string): Promise<MediaFile[]> {
   const parsed = parseDriveUrl(driveUrl)
   if (!parsed) {
     console.warn('[motion-renderer] could not parse Drive URL for B-roll:', driveUrl)
@@ -342,7 +472,9 @@ async function listBRollFiles(driveUrl: string): Promise<{ url: string; name: st
     `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`
 
   if (parsed.type === 'file') {
-    return [{ url: toUrl(parsed.id), name: parsed.id }]
+    // Single file links don't carry a mimeType from the URL alone — assume
+    // video, the overwhelmingly common case for a single B-roll link.
+    return [{ url: toUrl(parsed.id), name: parsed.id, type: 'video' }]
   }
 
   const apiKey = process.env.GOOGLE_DRIVE_API_KEY
@@ -353,59 +485,44 @@ async function listBRollFiles(driveUrl: string): Promise<{ url: string; name: st
 
   try {
     const params = new URLSearchParams({
-      q: `'${parsed.id}' in parents and mimeType contains 'video/' and trashed=false`,
-      fields: 'files(id,name)',
+      q: `'${parsed.id}' in parents and (mimeType contains 'video/' or mimeType contains 'image/') and trashed=false`,
+      fields: 'files(id,name,mimeType)',
       key: apiKey,
     })
     const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, {
       signal: AbortSignal.timeout(30_000),
     })
     if (!res.ok) throw new Error(`Drive API ${res.status}`)
-    const data = await res.json() as { files?: { id: string; name: string }[] }
+    const data = await res.json() as { files?: { id: string; name: string; mimeType?: string }[] }
     const files = data.files ?? []
-    console.log(`[motion-renderer] found ${files.length} B-roll files in Drive folder`)
-    return files.map(f => ({ url: toUrl(f.id), name: f.name }))
+    const videoCount = files.filter(f => f.mimeType?.startsWith('video/')).length
+    console.log(`[motion-renderer] found ${files.length} B-roll files in Drive folder (${videoCount} video, ${files.length - videoCount} image)`)
+    return files.map(f => ({
+      url: toUrl(f.id),
+      name: f.name,
+      type: f.mimeType?.startsWith('image/') ? 'image' as const : 'video' as const,
+    }))
   } catch (e) {
     console.warn('[motion-renderer] Drive folder listing failed:', (e as Error).message)
     return []
   }
 }
 
-// AI picks the most relevant clip from a folder based on filenames vs video content.
-async function pickBestBRollClip(
-  files: { url: string; name: string }[],
-  hook: string,
-  cta: string,
-): Promise<{ url: string; name: string }> {
-  if (files.length === 1) return files[0]
-  try {
-    const list = files.map((f, i) => `${i + 1}. ${f.name}`).join('\n')
-    const raw = await chatCompletion({
-      model: MODELS.fast,
-      messages: [{
-        role: 'user',
-        content: `A short-form video opens with: "${hook.slice(0, 200)}"\nCTA: "${cta.slice(0, 100)}"\n\nWhich B-roll clip would visually reinforce this message best? Reply with only the number.\n\n${list}`,
-      }],
-      max_tokens: 10,
-    })
-    const idx = parseInt(raw.trim()) - 1
-    if (idx >= 0 && idx < files.length) {
-      console.log(`[motion-renderer] AI selected B-roll clip: "${files[idx].name}"`)
-      return files[idx]
-    }
-  } catch (e) {
-    console.warn('[motion-renderer] B-roll AI selection failed, using first clip:', (e as Error).message)
-  }
-  return files[0]
-}
-
+// Scales insertion count with video length so a 90s video doesn't get
+// stretched to fit one giant clip, and a 20s video doesn't get carved into
+// three tiny ones. Total B-roll budget stays 20-30% regardless of how many
+// points it's split across.
 async function findBRollInsertionPoints(
   videoPath: string,
 ): Promise<{ insertAt: number; duration: number }[]> {
   const totalDuration = await getVideoDuration(videoPath)
-  // One clip only, placed at the single best pause   short and purposeful
-  const CLIP_MAX = 2.5
-  const maxInsertions = 1
+  const TARGET_BROLL_PERCENT = 0.25
+  const CLIP_MIN = 0.8
+  const CLIP_MAX_ABS = 4
+
+  const maxInsertions = totalDuration < 30 ? 1 : totalDuration < 60 ? 2 : 3
+  const totalTargetDuration = totalDuration * TARGET_BROLL_PERCENT
+  const perClipTarget = Math.min(Math.max(totalTargetDuration / maxInsertions, CLIP_MIN), CLIP_MAX_ABS)
 
   return new Promise((resolve) => {
     let stderr = ''
@@ -426,13 +543,22 @@ async function findBRollInsertionPoints(
           }
         }
 
-        const points = gaps
-          .sort((a, b) => b.gap - a.gap)
-          .slice(0, maxInsertions)
-          .sort((a, b) => a.insertAt - b.insertAt)
-          .map(p => ({ insertAt: p.insertAt, duration: Math.min(p.gap * 0.6, CLIP_MAX) }))
+        // Spread picks across the timeline (not just the N longest gaps,
+        // which could all cluster in one section) by taking the best gap
+        // from each of maxInsertions roughly-equal time buckets.
+        const bucketSize = totalDuration / maxInsertions
+        const points: { insertAt: number; duration: number }[] = []
+        for (let b = 0; b < maxInsertions; b++) {
+          const bucketStart = b * bucketSize
+          const bucketEnd = bucketStart + bucketSize
+          const inBucket = gaps.filter(g => g.insertAt >= bucketStart && g.insertAt < bucketEnd)
+          if (!inBucket.length) continue
+          const best = inBucket.sort((a, b2) => b2.gap - a.gap)[0]
+          points.push({ insertAt: best.insertAt, duration: Math.min(best.gap * 0.6, perClipTarget) })
+        }
+        points.sort((a, b) => a.insertAt - b.insertAt)
 
-        console.log(`[motion-renderer] found ${points.length} B-roll insertion points (target ~10% of ${totalDuration.toFixed(1)}s)`)
+        console.log(`[motion-renderer] found ${points.length}/${maxInsertions} B-roll insertion points (target ~25% of ${totalDuration.toFixed(1)}s, ~${perClipTarget.toFixed(1)}s each)`)
         resolve(points)
       }
     )
@@ -440,43 +566,140 @@ async function findBRollInsertionPoints(
   })
 }
 
+interface BRollPlacement {
+  mediaPath: string
+  mediaType: 'video' | 'image'
+  insertAt: number
+  duration: number
+  sfxCategory: ScenePlan['sfxCategory']
+}
+
 async function insertBRoll(
   inputPath: string,
-  brollPaths: string[],
-  insertionPoints: { insertAt: number; duration: number }[],
+  placements: BRollPlacement[],
   outputPath: string,
 ): Promise<void> {
-  const pairs = Math.min(brollPaths.length, insertionPoints.length)
-  if (pairs === 0) return
+  if (!placements.length) return
 
-  const allInputs = [inputPath, ...brollPaths.slice(0, pairs)]
-  const inputFlags = allInputs.map(p => `-i "${p}"`).join(' ')
+  // Resolve each unique SFX category once (cached after first render),
+  // skip 'none' entirely. Multiple placements sharing a category re-use
+  // the same input stream — ffmpeg duplicates it per consumer automatically.
+  const neededCategories = Array.from(new Set(
+    placements.map(p => p.sfxCategory).filter((c): c is Exclude<ScenePlan['sfxCategory'], 'none'> => c !== 'none')
+  ))
+  const sfxPathByCategory = new Map<string, string>()
+  for (const cat of neededCategories) {
+    const p = await getSfx(cat).catch(() => null)
+    if (p) sfxPathByCategory.set(cat, p)
+  }
+  const sfxInputPaths = Array.from(new Set(sfxPathByCategory.values()))
+  const sfxInputIndex = new Map<string, number>()
+
+  const inputFlags = [`-i "${inputPath}"`]
+  placements.forEach(p => {
+    inputFlags.push(
+      p.mediaType === 'image'
+        ? `-loop 1 -t ${p.duration.toFixed(3)} -i "${p.mediaPath}"`
+        : `-i "${p.mediaPath}"`
+    )
+  })
+  sfxInputPaths.forEach((p, i) => {
+    inputFlags.push(`-i "${p}"`)
+    sfxInputIndex.set(p, 1 + placements.length + i)
+  })
+
   const filterParts: string[] = []
   let currentLayer = '[0:v]'
+  const FADE_DUR = 0.25
 
-  for (let i = 0; i < pairs; i++) {
-    const { insertAt, duration: windowDuration } = insertionPoints[i]
+  placements.forEach((p, i) => {
     const bIdx = i + 1
     const brLabel = `[br${i}]`
-    const outLabel = i < pairs - 1 ? `[ov${i}]` : '[outv]'
+    const outLabel = i < placements.length - 1 ? `[ov${i}]` : '[outv]'
+    const fadeDur = Math.min(FADE_DUR, p.duration / 4)
+    const fadeOutStart = p.insertAt + p.duration - fadeDur
 
+    // Video: trim the window then shift to insertAt. Image: already exactly
+    // `duration` long via -loop/-t above, just needs the same time shift.
+    const timing = p.mediaType === 'image'
+      ? `setpts=PTS-STARTPTS+${p.insertAt.toFixed(3)}/TB`
+      : `trim=duration=${p.duration.toFixed(3)},setpts=PTS-STARTPTS+${p.insertAt.toFixed(3)}/TB`
+
+    // Cross-dissolve: alpha fade in/out on the B-roll layer itself so it
+    // blends with the main footage instead of popping in/out as a hard cut.
+    // format=yuva420p gives the layer an alpha channel for the fade to use.
     filterParts.push(
-      `[${bIdx}:v]trim=duration=${windowDuration.toFixed(3)},setpts=PTS-STARTPTS+${insertAt.toFixed(3)}/TB,` +
-      `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black${brLabel}`
+      `[${bIdx}:v]${timing},` +
+      `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,` +
+      `format=yuva420p,` +
+      `fade=t=in:st=${p.insertAt.toFixed(3)}:d=${fadeDur.toFixed(3)}:alpha=1,` +
+      `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeDur.toFixed(3)}:alpha=1${brLabel}`
     )
     filterParts.push(
-      `${currentLayer}${brLabel}overlay=0:0:enable='between(t,${insertAt.toFixed(3)},${(insertAt + windowDuration).toFixed(3)})'${outLabel}`
+      `${currentLayer}${brLabel}overlay=0:0:enable='between(t,${p.insertAt.toFixed(3)},${(p.insertAt + p.duration).toFixed(3)})'${outLabel}`
     )
     currentLayer = outLabel
+  })
+
+  // Per-scene content-matched SFX, delayed to land exactly as each clip appears.
+  const delayedLabels: string[] = []
+  placements.forEach((p, i) => {
+    if (p.sfxCategory === 'none') return
+    const sfxPath = sfxPathByCategory.get(p.sfxCategory)
+    const idx = sfxPath ? sfxInputIndex.get(sfxPath) : undefined
+    if (idx === undefined) return
+    const delayMs = Math.max(0, Math.round((p.insertAt - 0.1) * 1000))
+    const label = `[sfx${i}]`
+    filterParts.push(`[${idx}:a]adelay=${delayMs}:all=1,volume=0.3${label}`)
+    delayedLabels.push(label)
+  })
+
+  let audioMap = '0:a'
+  if (delayedLabels.length) {
+    const mixInputs = ['[0:a]', ...delayedLabels].join('')
+    filterParts.push(`${mixInputs}amix=inputs=${1 + delayedLabels.length}:duration=first:normalize=0[outa]`)
+    audioMap = '[outa]'
   }
 
   await run(
-    `ffmpeg -y ${inputFlags} ` +
+    `ffmpeg -y ${inputFlags.join(' ')} ` +
     `-filter_complex "${filterParts.join(';')}" ` +
-    `-map "[outv]" -map "0:a" ` +
-    `-c:v libx264 -preset fast -crf 22 -c:a copy -pix_fmt yuv420p -movflags +faststart "${outputPath}"`,
+    `-map "[outv]" -map "${audioMap}" ` +
+    `-c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -pix_fmt yuv420p -movflags +faststart "${outputPath}"`,
     300_000
   )
+}
+
+// AI picks the best matching file for one specific scene's sentence content
+// (not a single global pick for the whole video) — falls back to any file
+// of a different type if none of the planned type are available.
+async function pickMediaForScene(
+  files: MediaFile[],
+  mediaType: 'video' | 'image',
+  sentenceContext: string,
+): Promise<MediaFile> {
+  const matching = files.filter(f => f.type === mediaType)
+  const pool = matching.length ? matching : files
+  if (pool.length === 1) return pool[0]
+  try {
+    const list = pool.map((f, i) => `${i + 1}. ${f.name}`).join('\n')
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      messages: [{
+        role: 'user',
+        content: `A video moment follows this sentence: "${sentenceContext.slice(0, 200) || '(no clear sentence)'}"\n\nWhich file would visually reinforce this moment best? Reply with only the number.\n\n${list}`,
+      }],
+      max_tokens: 10,
+    })
+    const idx = parseInt(raw.trim()) - 1
+    if (idx >= 0 && idx < pool.length) {
+      console.log(`[motion-renderer] scene media pick: "${pool[idx].name}" for "${sentenceContext.slice(0, 60)}"`)
+      return pool[idx]
+    }
+  } catch (e) {
+    console.warn('[motion-renderer] scene media selection failed, using first match:', (e as Error).message)
+  }
+  return pool[0]
 }
 
 async function insertCustomBRoll(
@@ -491,8 +714,7 @@ async function insertCustomBRoll(
     console.warn('[motion-renderer] no B-roll files found, skipping')
     return
   }
-
-  const chosen = await pickBestBRollClip(files, hook, cta)
+  const hasImages = files.some(f => f.type === 'image')
 
   const insertionPoints = await findBRollInsertionPoints(videoPath)
   if (!insertionPoints.length) {
@@ -500,23 +722,176 @@ async function insertCustomBRoll(
     return
   }
 
-  const tmpPath = path.join(os.tmpdir(), `broll_${Date.now()}.mp4`)
+  // Real transcript of THIS footage (post-cut) gives the scene planner actual
+  // sentence content to judge, not just the script's hook/CTA.
+  let words: { text: string; start: number; end: number }[] = []
   try {
-    await downloadFile(chosen.url, tmpPath)
+    words = await transcribeLocalFile(videoPath)
   } catch (e) {
-    console.warn('[motion-renderer] failed to download B-roll clip:', (e as Error).message)
+    console.warn('[motion-renderer] transcription for scene planning failed, using generic placement:', (e as Error).message)
+  }
+
+  const scenes = words.length
+    ? await planScenes(words, insertionPoints, hook, cta, hasImages)
+    : insertionPoints.map(p => ({ insertAt: p.insertAt, duration: p.duration, sentenceContext: '', mediaType: 'video' as const, sfxCategory: 'whoosh' as const }))
+
+  const activeScenes = scenes.filter(s => s.mediaType !== 'skip')
+  if (!activeScenes.length) {
+    console.log('[motion-renderer] scene plan chose to skip B-roll entirely for this video')
     return
   }
 
-  const outPath = videoPath + '_broll.mp4'
+  const tmpPaths: string[] = []
+  const placements: BRollPlacement[] = []
+
   try {
-    await insertBRoll(videoPath, [tmpPath], insertionPoints, outPath)
-    if (fs.existsSync(outPath)) fs.renameSync(outPath, videoPath)
-  } catch (e) {
-    console.warn('[motion-renderer] B-roll insertion failed, keeping original:', (e as Error).message)
-    try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
+    for (const scene of activeScenes) {
+      const mediaType = scene.mediaType as 'video' | 'image'
+      const chosen = await pickMediaForScene(files, mediaType, scene.sentenceContext)
+      const ext = chosen.type === 'image' ? 'jpg' : 'mp4'
+      const tmpPath = path.join(os.tmpdir(), `broll_${Date.now()}_${placements.length}.${ext}`)
+      try {
+        await downloadFile(chosen.url, tmpPath)
+      } catch (e) {
+        console.warn(`[motion-renderer] failed to download "${chosen.name}", skipping this scene:`, (e as Error).message)
+        continue
+      }
+      tmpPaths.push(tmpPath)
+      placements.push({
+        mediaPath: tmpPath,
+        mediaType: chosen.type,
+        insertAt: scene.insertAt,
+        duration: scene.duration,
+        sfxCategory: scene.sfxCategory,
+      })
+    }
+
+    if (!placements.length) {
+      console.warn('[motion-renderer] no B-roll media could be downloaded, skipping')
+      return
+    }
+
+    const outPath = videoPath + '_broll.mp4'
+    try {
+      await insertBRoll(videoPath, placements, outPath)
+      if (fs.existsSync(outPath)) fs.renameSync(outPath, videoPath)
+    } catch (e) {
+      console.warn('[motion-renderer] B-roll insertion failed, keeping original:', (e as Error).message)
+      try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
+    }
   } finally {
-    try { fs.unlinkSync(tmpPath) } catch { /* best-effort */ }
+    for (const p of tmpPaths) {
+      try { fs.unlinkSync(p) } catch { /* best-effort */ }
+    }
+  }
+}
+
+// Submagic needs a fetchable URL, not a local file, so this downloads the
+// shared source, runs our own FFmpeg custom-B-roll insertion on a dedicated
+// copy (the shared source.mp4 stays untouched for other variants), and
+// re-uploads the result to Storage. Caller should disable Submagic's own
+// magicBrolls when using this, to avoid stacking two B-roll passes.
+export async function prepareSubmagicCustomBrollSource(
+  jobId: string,
+  sourceUrl: string,
+  brollDriveUrl: string,
+  hook: string,
+  cta: string,
+): Promise<string> {
+  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  fs.mkdirSync(outDir, { recursive: true })
+  const localPath = await getSharedSourceFile(jobId, sourceUrl, outDir)
+
+  const brollPath = path.join(outDir, 'submagic-broll-source.mp4')
+  fs.copyFileSync(localPath, brollPath)
+  await insertCustomBRoll(brollPath, brollDriveUrl, hook, cta)
+
+  const publicUrl = await tryUploadToStorage(brollPath, 'submagic-broll-source.mp4', jobId)
+  try { fs.unlinkSync(brollPath) } catch { /* best-effort */ }
+  if (!publicUrl) throw new Error('Could not upload custom B-roll source for Submagic (Storage upload failed)')
+  return publicUrl
+}
+
+// ── Native karaoke captions ───────────────────────────────────────────────────
+// Transcribes the (already-cut) video with ElevenLabs Scribe, generates a tone-
+// aware ASS subtitle file, and burns it into the video with FFmpeg. This is an
+// alternative to ZapCap for variants that want on-device caption control.
+
+async function addNativeCaptions(
+  videoPath: string,
+  moodTag: string | null,
+  scriptFormat?: string,
+): Promise<void> {
+  console.log('[motion-renderer] generating native karaoke captions...')
+
+  let words
+  try {
+    words = await transcribeLocalFile(videoPath)
+  } catch (e) {
+    console.warn('[motion-renderer] transcription failed, skipping native captions:', (e as Error).message)
+    return
+  }
+
+  if (!words.length) {
+    console.warn('[motion-renderer] no words transcribed, skipping native captions')
+    return
+  }
+
+  const assContent = generateASSCaptions(words, moodTag, scriptFormat)
+  const assPath = writeASSFile(assContent)
+  const tmp = videoPath + '_captioned.mp4'
+
+  try {
+    // FFmpeg ass filter path: escape colons (Windows drive letters) and backslashes.
+    // On macOS/Linux this is a no-op, but guards against edge cases.
+    const escapedAss = assPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+    const escapedFontsDir = FONTS_DIR.replace(/\\/g, '/').replace(/:/g, '\\:')
+    // fontsdir points libass at the bundled /fonts folder so caption rendering
+    // never depends on what's installed on whatever machine runs FFmpeg.
+    await run(
+      `ffmpeg -y -i "${videoPath}" -vf "ass='${escapedAss}':fontsdir='${escapedFontsDir}'" -c:a copy -c:v libx264 -preset fast -crf 20 -movflags +faststart "${tmp}"`,
+      300_000
+    )
+    if (fs.existsSync(tmp)) {
+      fs.renameSync(tmp, videoPath)
+      console.log('[motion-renderer] native captions burned in')
+    } else {
+      console.warn('[motion-renderer] caption burn produced no output, keeping original')
+    }
+  } catch (e) {
+    console.warn('[motion-renderer] caption burn-in failed, keeping original:', (e as Error).message)
+    try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+  } finally {
+    try { fs.unlinkSync(assPath) } catch { /* best-effort */ }
+  }
+}
+
+// Caption-only test path: downloads the raw source footage and burns in
+// captions directly — no Descript, no smart-cut. For iterating on caption
+// styles without spending Descript AI credits on every test run.
+async function renderCaptionTestOnly(
+  jobId: string,
+  variantId: string,
+  sourceUrl: string,
+  outDir: string,
+  moodTag?: string | null,
+  scriptFormat?: string,
+): Promise<void> {
+  const STEPS = 2
+  try {
+    cleanTempFiles(outDir, variantId)
+    const outputPath = path.join(outDir, `${variantId}.mp4`)
+
+    await setVariantProgress(jobId, variantId, 1, STEPS, 'Downloading footage')
+    await downloadFile(sourceUrl, outputPath)
+
+    await setVariantProgress(jobId, variantId, 2, STEPS, 'Generating karaoke captions')
+    await addNativeCaptions(outputPath, moodTag ?? null, scriptFormat)
+
+    console.log('[motion-renderer] caption test output ready')
+    await finishVariant(jobId, variantId, outputPath)
+  } catch (e) {
+    await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
   }
 }
 
@@ -530,17 +905,90 @@ async function renderSmartCinematic(
   outDir: string,
   hook: string,
   cta: string,
-  zapcapTemplateIndex?: 1 | 2,
+  zapcapTemplateIndex?: ZapcapTemplateIndex,
   zapcapBrollPercent?: number,
   descriptBroll?: boolean,
   descriptCaptions?: boolean,
   brollDriveUrl?: string,
+  nativeCaptions?: boolean,
+  moodTag?: string | null,
+  scriptFormat?: string,
+  zapcapOnly?: boolean,
+  zapcapAutoCut?: {
+    silenceRemoval?: number
+    disfluencyRemoval?: boolean
+  },
+  zapcapSmartProfile?: ZapcapSmartProfile,
 ): Promise<void> {
-  // Steps: Descript + optional custom B-roll + optional ZapCap + music
-  const STEPS = 1 + (brollDriveUrl ? 1 : 0) + (zapcapTemplateIndex ? 1 : 0) + 1
+  // Steps: Descript + optional custom B-roll + optional ZapCap + optional native captions + optional music
+  const shouldUseZapcapOnly = zapcapOnly || (!!zapcapTemplateIndex && !descriptBroll && !descriptCaptions)
+  const STEPS = shouldUseZapcapOnly
+    ? 1 + (zapcapTemplateIndex ? 1 : 0) + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+    : 1 + (brollDriveUrl ? 1 : 0) + (zapcapTemplateIndex ? 1 : 0) + (nativeCaptions ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
+    const outputPath = path.join(outDir, `${variantId}.mp4`)
+
+    if (shouldUseZapcapOnly) {
+      if (!zapcapTemplateIndex) throw new Error('ZapCap-only variant requires a ZapCap template')
+
+      const tmpInput = path.join(outDir, `${variantId}_edited_tmp.mp4`)
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Preparing footage')
+      let zapcapInput = sourceUrl
+
+      if (brollDriveUrl) {
+        const sharedSourcePath = await getSharedSourceFile(jobId, sourceUrl, outDir)
+        fs.copyFileSync(sharedSourcePath, tmpInput)
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
+        await insertCustomBRoll(tmpInput, brollDriveUrl, hook, cta)
+        zapcapInput = tmpInput
+      }
+
+      const actualBrollPct = brollDriveUrl
+        ? undefined
+        : zapcapBrollPercent !== undefined
+          ? Math.max(7, zapcapBrollPercent + (Math.floor(Math.random() * 3) - 1) * 3)
+          : undefined
+
+      const label = actualBrollPct
+        ? 'Editing with ZapCap auto-cut + B-roll'
+        : 'Editing with ZapCap auto-cut'
+      await setVariantProgress(jobId, variantId, step++, STEPS, label)
+      const captionedUrl = await processWithZapcap(zapcapInput, {
+        templateIndex: zapcapTemplateIndex,
+        brollPercent: actualBrollPct,
+        autoCut: zapcapAutoCut ?? { silenceRemoval: 0.35, disfluencyRemoval: true },
+        ...(zapcapSmartProfile ? {
+          smart: {
+            profile: zapcapSmartProfile,
+            hook,
+            cta,
+            moodTag: moodTag ?? null,
+            scriptFormat,
+          },
+        } : {}),
+      })
+      console.log('[motion-renderer] ZapCap-only edit done')
+      if (zapcapInput === tmpInput) {
+        try { fs.unlinkSync(tmpInput) } catch { /* best-effort */ }
+      }
+      await downloadFile(captionedUrl, outputPath)
+
+      if (nativeCaptions) {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating karaoke captions')
+        await addNativeCaptions(outputPath, moodTag ?? null, scriptFormat)
+      }
+
+      if (MUSIC_ENABLED) {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
+        await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
+      }
+
+      console.log('[motion-renderer] ZapCap-only output ready')
+      await finishVariant(jobId, variantId, outputPath)
+      return
+    }
 
     // Cache key includes Descript options   V1 (broll+captions) and V2 (clean) are different outputs.
     // Promise stored while running so concurrent variants wait instead of launching duplicates.
@@ -569,8 +1017,6 @@ async function renderSmartCinematic(
         throw e
       }
     }
-
-    const outputPath = path.join(outDir, `${variantId}.mp4`)
 
     if (zapcapTemplateIndex) {
       // Download Descript output to temp, trim the black tail, optionally insert custom B-roll,
@@ -605,9 +1051,16 @@ async function renderSmartCinematic(
       }
     }
 
-    console.log('[motion-renderer] output ready, adding music')
-    await setVariantProgress(jobId, variantId, STEPS, STEPS, 'Adding background music')
-    await mixBackgroundMusic(outputPath, hook)
+    if (nativeCaptions) {
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating karaoke captions')
+      await addNativeCaptions(outputPath, moodTag ?? null, scriptFormat)
+    }
+
+    if (MUSIC_ENABLED) {
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
+    }
+    console.log('[motion-renderer] output ready')
     await finishVariant(jobId, variantId, outputPath)
   } catch (e) {
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
@@ -620,11 +1073,21 @@ export function startSingleVariant(
   sourceUrl: string,
   hook: string,
   cta: string,
-  zapcapTemplateIndex?: 1 | 2,
+  zapcapTemplateIndex?: ZapcapTemplateIndex,
   zapcapBrollPercent?: number,
   descriptBroll?: boolean,
   descriptCaptions?: boolean,
   brollDriveUrl?: string,
+  nativeCaptions?: boolean,
+  moodTag?: string | null,
+  scriptFormat?: string,
+  captionTestOnly?: boolean,
+  zapcapOnly?: boolean,
+  zapcapAutoCut?: {
+    silenceRemoval?: number
+    disfluencyRemoval?: boolean
+  },
+  zapcapSmartProfile?: ZapcapSmartProfile,
 ) {
   const key = jobId + ':' + variantId
   if (active.has(key)) return
@@ -637,16 +1100,32 @@ export function startSingleVariant(
   const effectiveDescriptBroll = brollDriveUrl ? false : descriptBroll
   const effectiveZapcapBrollPercent = brollDriveUrl ? undefined : zapcapBrollPercent
 
+  // Caption test runs in seconds (no Descript round-trip), but keep the same
+  // safety timeout in case transcription or FFmpeg ever hangs.
+  const TIMEOUT_MS = captionTestOnly ? 5 * 60 * 1000 : 30 * 60 * 1000
+  const timeoutId = setTimeout(() => {
+    console.error(`[motion-renderer] variant ${variantId} timed out`)
+    markVariant(jobId, variantId, 'failed', null, 'Render timed out').catch(() => {})
+  }, TIMEOUT_MS)
+
   const launch = async () => {
+    if (captionTestOnly) {
+      await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, moodTag, scriptFormat)
+      return
+    }
     await renderSmartCinematic(
       jobId, variantId, sourceUrl, outDir, hook, cta,
       zapcapTemplateIndex, effectiveZapcapBrollPercent,
       effectiveDescriptBroll, descriptCaptions,
-      brollDriveUrl,
+      brollDriveUrl, nativeCaptions, moodTag, scriptFormat,
+      zapcapOnly, zapcapAutoCut, zapcapSmartProfile,
     )
   }
 
   launch()
     .catch(e => console.error('[motion-renderer] startSingleVariant fatal:', e))
-    .finally(() => active.delete(key))
+    .finally(() => {
+      clearTimeout(timeoutId)
+      active.delete(key)
+    })
 }

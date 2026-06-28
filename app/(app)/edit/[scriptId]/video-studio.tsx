@@ -21,15 +21,16 @@ interface Props {
 
 const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = {
   submagic:    { bg: '#EEF2FF', text: '#6366F1', label: 'Submagic' },
-  hyperframe:  { bg: '#FFF3EF', text: '#FF4F17', label: 'Hyperframe' },
+  edit:        { bg: '#FFF3EF', text: '#FF4F17', label: 'Edit' },
 }
 
 export function VideoStudio({ script, existingJobId }: Props) {
   const [driveUrl, setDriveUrl] = useState('')
   const [brollUrl, setBrollUrl] = useState('')
   const [jobId, setJobId] = useState<string | null>(existingJobId)
-  const [status, setStatus] = useState<'idle' | 'submitting' | 'processing' | 'complete' | 'error'>(
-    existingJobId ? 'processing' : 'idle'
+  // 'loading': have an existing job but haven't fetched its real status yet
+  const [status, setStatus] = useState<'idle' | 'loading' | 'submitting' | 'processing' | 'complete' | 'error'>(
+    existingJobId ? 'loading' : 'idle'
   )
   const [variants, setVariants] = useState<VideoVariant[]>([])
   const [readyCount, setReadyCount] = useState(0)
@@ -38,10 +39,11 @@ export function VideoStudio({ script, existingJobId }: Props) {
   const [saving, setSaving] = useState(false)
   const [startingVariants, setStartingVariants] = useState<Set<string>>(new Set())
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollFailCount = useRef(0)
   const router = useRouter()
 
   useEffect(() => {
-    if (jobId && (status === 'processing' || status === 'complete')) {
+    if (jobId && (status === 'loading' || status === 'processing' || status === 'complete')) {
       startPolling(jobId)
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
@@ -57,8 +59,16 @@ export function VideoStudio({ script, existingJobId }: Props) {
     try {
       const res = await fetch(`/api/video/status/${id}`)
       const data = await res.json()
-      if (!res.ok) return
+      if (!res.ok) {
+        pollFailCount.current++
+        if (pollFailCount.current >= 4) {
+          setError(`Status check failed: ${data.error ?? 'Unknown error'}. Try refreshing.`)
+          if (pollRef.current) clearInterval(pollRef.current)
+        }
+        return
+      }
 
+      pollFailCount.current = 0
       setVariants(data.variants ?? [])
       const ready = (data.variants ?? []).filter((v: VideoVariant) => v.status === 'ready').length
       setReadyCount(ready)
@@ -67,9 +77,15 @@ export function VideoStudio({ script, existingJobId }: Props) {
       if (data.status === 'complete') {
         setStatus('complete')
         if (pollRef.current) clearInterval(pollRef.current)
+      } else {
+        setStatus('processing')
       }
     } catch {
-      // silent   will retry
+      pollFailCount.current++
+      if (pollFailCount.current >= 6) {
+        setError('Lost connection to server. Try refreshing the page.')
+        if (pollRef.current) clearInterval(pollRef.current)
+      }
     }
   }
 
@@ -108,6 +124,8 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
   async function handleStartVariant(variantId: string) {
     if (!jobId) return
+    const preparingSource = variants.length > 0 && variants.every(v => v.status === 'pending') && variants.some(v => v.progress)
+    if (preparingSource) return
     setStartingVariants(prev => new Set(prev).add(variantId))
     try {
       await fetch('/api/video/start-variant', {
@@ -137,6 +155,50 @@ export function VideoStudio({ script, existingJobId }: Props) {
     setDriveUrl('')
     setBrollUrl('')
     setError(null)
+  }
+
+  const prepProgress = variants.find(v => v.status === 'pending' && v.progress)?.progress ?? null
+  const isPreparingSource = !!prepProgress && variants.length > 0 && variants.every(v => v.status === 'pending')
+  const overallReadyTotal = variants.filter(v => v.status !== 'pending').length || variants.length || 5
+  const overallPercent = isPreparingSource
+    ? Math.round((prepProgress.step / prepProgress.total) * 100)
+    : Math.round((readyCount / Math.max(overallReadyTotal, 1)) * 100)
+  const showCenteredLoading = status === 'submitting' || status === 'loading' || (status === 'processing' && (variants.length === 0 || isPreparingSource))
+  const centeredLoadingLabel = status === 'submitting'
+    ? 'Creating edit job'
+    : isPreparingSource
+      ? (prepProgress.label ?? 'Preparing footage')
+      : 'Loading edit'
+
+  if (showCenteredLoading) {
+    return (
+      <div className="min-h-[62vh] flex items-center justify-center">
+        <div className="w-full max-w-md bg-white border border-[#E4E4E0] rounded-2xl p-7 text-center shadow-sm">
+          <div className="w-11 h-11 rounded-full border-2 border-[#FF4F17] border-t-transparent animate-spin mx-auto mb-5" />
+          <p className="font-semibold text-[#18181B] text-sm">{centeredLoadingLabel}</p>
+          <p className="text-xs text-[#A1A1AA] mt-2">
+            {status === 'submitting'
+              ? 'Saving the job and opening the edit workspace.'
+              : 'Downloading once, compressing to vertical, and uploading the prepared file.'}
+          </p>
+          {isPreparingSource && (
+            <>
+              <div className="h-2 bg-[#F0EFED] rounded-full overflow-hidden mt-5">
+                <div
+                  className="h-full rounded-full transition-all duration-700"
+                  style={{ width: `${overallPercent}%`, background: '#FF4F17' }}
+                />
+              </div>
+              <div className="flex items-center justify-between mt-2 text-[11px] text-[#A1A1AA]">
+                <span>{prepProgress?.label ?? 'Preparing footage'}</span>
+                <span>{overallPercent}%</span>
+              </div>
+            </>
+          )}
+          {error && <p className="text-xs text-[#EF4444] mt-4">{error}</p>}
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -237,16 +299,9 @@ export function VideoStudio({ script, existingJobId }: Props) {
             className="w-full h-11 rounded-xl text-sm font-semibold text-white cursor-pointer disabled:opacity-40 transition-opacity"
             style={{ background: '#FF4F17', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
           >
-            Start HyperFrame edit
+            Start edit
           </button>
         </form>
-      )}
-
-      {status === 'submitting' && (
-        <div className="bg-white border border-[#E4E4E0] rounded-2xl p-8 flex flex-col items-center text-center">
-          <div className="w-10 h-10 rounded-full border-2 border-[#FF4F17] border-t-transparent animate-spin mb-4" />
-          <p className="font-semibold text-[#18181B] text-sm">Starting job...</p>
-        </div>
       )}
 
       {(status === 'processing' || status === 'complete') && (
@@ -256,17 +311,23 @@ export function VideoStudio({ script, existingJobId }: Props) {
           {status === 'processing' && (
             <div className="bg-white border border-[#E4E4E0] rounded-2xl p-5">
               <div className="flex items-center justify-between mb-3">
-                <p className="text-sm font-semibold text-[#18181B]">Generating variants</p>
-                <span className="text-xs text-[#A1A1AA]">{readyCount} / {variants.filter(v => v.status !== 'pending').length || 3} ready</span>
+                <p className="text-sm font-semibold text-[#18181B]">
+                  {isPreparingSource ? (prepProgress.label ?? 'Preparing footage') : 'Generating variants'}
+                </p>
+                <span className="text-xs text-[#A1A1AA]">
+                  {isPreparingSource ? `${overallPercent}%` : `${readyCount} / ${overallReadyTotal} ready`}
+                </span>
               </div>
               <div className="h-2 bg-[#F0EFED] rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full transition-all duration-700"
-                  style={{ width: `${(readyCount / Math.max(variants.filter(v => v.status !== 'pending').length, 3)) * 100}%`, background: '#FF4F17' }}
+                  style={{ width: `${overallPercent}%`, background: '#FF4F17' }}
                 />
               </div>
               <p className="text-xs text-[#A1A1AA] mt-2">
-                Each variant is being processed in parallel by Submagic
+                {isPreparingSource
+                  ? 'Downloading the Drive file once, compressing it, and preparing it for editing.'
+                  : 'Start one or more edit variants and track each render in real time.'}
               </p>
             </div>
           )}
@@ -288,6 +349,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
               const isReady = v?.status === 'ready'
               const isSelected = selectedVariant === v?.id
               const isStarting = v?.id ? startingVariants.has(v.id) : false
+              const canRetryReady = v?.tool !== 'submagic'
               const toolMeta = v ? TOOL_COLOR[v.tool] : null
 
               return (
@@ -310,7 +372,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                         playsInline
                         controls
                         preload="auto"
-                        className="w-full h-full object-contain"
+                        className="w-full h-full object-cover"
                       />
                     </div>
                   ) : (
@@ -379,11 +441,11 @@ export function VideoStudio({ script, existingJobId }: Props) {
                   {isPending || v?.status === 'failed' ? (
                     <button
                       onClick={() => v?.id && handleStartVariant(v.id)}
-                      disabled={isStarting || !v?.id}
+                      disabled={isStarting || isPreparingSource || !v?.id}
                       className="w-full h-9 rounded-xl text-xs font-semibold cursor-pointer transition-all disabled:opacity-40"
                       style={{ background: v?.status === 'failed' ? '#FEF2F2' : '#F4F3F0', color: v?.status === 'failed' ? '#EF4444' : '#18181B' }}
                     >
-                      {isStarting ? 'Starting...' : isPending ? 'Start now' : 'Retry'}
+                      {isPreparingSource ? 'Preparing footage...' : isStarting ? 'Starting...' : isPending ? 'Start now' : 'Retry'}
                     </button>
                   ) : isReady ? (
                     <div className="space-y-2">
@@ -396,18 +458,20 @@ export function VideoStudio({ script, existingJobId }: Props) {
                         >
                           {isSelected ? 'Selected' : 'Select'}
                         </button>
-                        <button
-                          onClick={() => v?.id && handleStartVariant(v.id)}
-                          disabled={isStarting}
-                          className="h-9 w-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all disabled:opacity-40"
-                          style={{ background: '#F4F3F0', color: '#71717A' }}
-                          title="Retry"
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                            <path d="M3 3v5h5" />
-                          </svg>
-                        </button>
+                        {canRetryReady && (
+                          <button
+                            onClick={() => v?.id && handleStartVariant(v.id)}
+                            disabled={isStarting}
+                            className="h-9 w-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all disabled:opacity-40"
+                            style={{ background: '#F4F3F0', color: '#71717A' }}
+                            title="Retry"
+                          >
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                              <path d="M3 3v5h5" />
+                            </svg>
+                          </button>
+                        )}
                         {v?.download_url && !v.download_url.startsWith('placeholder') && (
                           <a
                             href={v.download_url}
