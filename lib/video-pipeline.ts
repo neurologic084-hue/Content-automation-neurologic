@@ -23,15 +23,13 @@ export interface VideoVariantDef {
   autoStart: boolean   // true = runs immediately on job creation; false = user starts manually
   submagicPreset?: SubmagicPreset
   submagicProfile?: SubmagicProfile
-  descriptBroll?: boolean      // ask Underlord to insert stock B-roll
-  descriptCaptions?: boolean   // ask Underlord to add captions
   nativeCaptions?: boolean     // burn ASS karaoke captions via ElevenLabs Scribe + FFmpeg
-  captionTestOnly?: boolean    // skip Descript + smart-cut entirely, caption the raw footage directly
+  captionTestOnly?: boolean    // skip Submagic entirely, caption the raw footage directly
+  motionGraphicsTestOnly?: boolean  // skip Submagic entirely; raw footage + Remotion graphics only
   motionGraphics?: boolean     // plan + render front-loaded brand graphics (Remotion) and composite them in
   motionGraphicsStyle?: 'minimal' | 'bold'  // which Remotion visual treatment to render
-  submagicCutOnly?: boolean        // skip Descript; Submagic handles cut/clean/captions/B-roll instead
-  submagicMagicBrolls?: boolean    // Submagic's own stock B-roll, used by the submagicCutOnly path
-  submagicMagicZooms?: boolean     // Submagic's own zoom-ins, used by the submagicCutOnly path
+  submagicMagicBrolls?: boolean    // Submagic's own stock B-roll (our-v4/v5's edit-tool path)
+  submagicMagicZooms?: boolean     // Submagic's own zoom-ins (our-v4/v5's edit-tool path)
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -42,18 +40,6 @@ export interface VideoVariant extends VideoVariantDef {
   duration_seconds: number | null
   error: string | null
   progress?: { step: number; total: number; label: string } | null
-}
-
-export interface VideoJob {
-  id: string
-  script_id: string
-  source_drive_url: string
-  broll_drive_url: string | null
-  status: 'processing' | 'complete' | 'failed'
-  variants: VideoVariant[] | null
-  selected_variant: string | null
-  transcript: string | null
-  created_at: string
 }
 
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
@@ -100,7 +86,6 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     tool: 'edit',
     order: 4,
     autoStart: false,
-    submagicCutOnly: true,
     submagicMagicBrolls: true,
     submagicMagicZooms: false,
     motionGraphics: true,
@@ -113,62 +98,22 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     tool: 'edit',
     order: 5,
     autoStart: false,
-    submagicCutOnly: true,
     submagicMagicBrolls: true,
     submagicMagicZooms: true,
     motionGraphics: true,
     motionGraphicsStyle: 'bold',
   },
+  {
+    id: 'our-v6',
+    name: 'Motion Graphics Only (Test)',
+    description: 'Testing only — skips Submagic entirely. Raw footage with Neuro Logic motion graphics on top, no cuts, no captions, no B-roll. For checking graphics/styles without spending a Submagic job.',
+    tool: 'edit',
+    order: 6,
+    autoStart: false,
+    motionGraphicsTestOnly: true,
+    motionGraphicsStyle: 'minimal',
+  },
 ]
-
-// Generates 2 Submagic variants with AI-named styles tailored to the script mood
-// Names describe the feel/energy, not the underlying template
-export async function generateSubmagicVariants(
-  script: { hook: string; body: string; cta: string; mood_tag: string | null }
-): Promise<VideoVariantDef[]> {
-  const prompt = [
-    'You are naming two short-form video editing styles for this script.',
-    '',
-    'Hook: ' + (script.hook || ''),
-    'Mood: ' + (script.mood_tag || 'unspecified'),
-    '',
-    'Generate exactly 2 distinct editing style names that suit this script.',
-    'Rules:',
-    '- Each name is 2-4 words, style/energy focused (e.g. "Bold & Direct", "Warm & Cinematic", "Clean & Fast", "Sharp & Minimal")',
-    '- Each description is one short sentence about how it will feel to watch',
-    '- Make them genuinely different from each other in energy and tone',
-    '- Do NOT use template names (kelly, ella, etc.)',
-    '',
-    'Return JSON only: {"styles":[{"name":"...","description":"..."},{"name":"...","description":"..."}]}',
-  ].join('\n')
-
-  const FALLBACKS = [
-    { name: 'Bold & Direct', description: 'Fast cuts, strong captions, high energy.' },
-    { name: 'Clean & Cinematic', description: 'Smooth pace, polished captions, premium feel.' },
-  ]
-
-  try {
-    const raw = await chatCompletion({
-      model: MODELS.fast,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 300,
-    })
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim()
-    const data = JSON.parse(cleaned) as { styles: { name: string; description: string }[] }
-    const styles = data.styles?.slice(0, 2) ?? []
-    if (styles.length < 2) throw new Error('not enough styles')
-
-    return [
-      { id: 'submagic-a', name: styles[0].name, description: styles[0].description, tool: 'submagic', order: 4, autoStart: false, submagicPreset: { aiEditTemplate: 'kelly' } },
-      { id: 'submagic-b', name: styles[1].name, description: styles[1].description, tool: 'submagic', order: 5, autoStart: false, submagicPreset: { aiEditTemplate: 'ella' } },
-    ]
-  } catch {
-    return [
-      { id: 'submagic-a', name: FALLBACKS[0].name, description: FALLBACKS[0].description, tool: 'submagic', order: 4, autoStart: false, submagicPreset: { aiEditTemplate: 'kelly' } },
-      { id: 'submagic-b', name: FALLBACKS[1].name, description: FALLBACKS[1].description, tool: 'submagic', order: 5, autoStart: false, submagicPreset: { aiEditTemplate: 'ella' } },
-    ]
-  }
-}
 
 export function extractDriveFileId(url: string): string | null {
   const match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant, prepareSubmagicCustomBrollSource, retrieveAndStoreSubmagicResult } from '@/lib/motion-renderer'
+import { startSingleVariant, prepareSubmagicCustomBrollSource, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl } from '@/lib/motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   fetchSubmagicAudioTrack,
@@ -117,8 +117,9 @@ export async function POST(req: NextRequest) {
 
     // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
     // so they read as a real side-by-side comparison rather than two random picks.
+    // our-v6 skips Submagic entirely (testing-only), so it never needs a template.
     let submagicTemplateName: string | undefined
-    if (variant.submagicCutOnly) {
+    if (!variant.motionGraphicsTestOnly) {
       const [tplA, tplB] = await pickPremiumTemplates()
       submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
     }
@@ -126,16 +127,14 @@ export async function POST(req: NextRequest) {
     startSingleVariant(jobId, variantId, job.source_drive_url, {
       hook: scriptRow?.hook ?? '',
       cta: scriptRow?.cta ?? '',
-      descriptBroll: variant.descriptBroll as boolean | undefined,
-      descriptCaptions: variant.descriptCaptions as boolean | undefined,
       brollDriveUrl: variant.brollDriveUrl as string | undefined,
       nativeCaptions: variant.nativeCaptions as boolean | undefined,
       moodTag: scriptRow?.mood_tag ?? null,
       scriptFormat,
+      motionGraphicsTestOnly: variant.motionGraphicsTestOnly as boolean | undefined,
       captionTestOnly: variant.captionTestOnly as boolean | undefined,
       motionGraphics: variant.motionGraphics as boolean | undefined,
       motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
-      submagicCutOnly: variant.submagicCutOnly as boolean | undefined,
       submagicTemplateName,
       submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
       submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
@@ -175,7 +174,10 @@ export async function POST(req: NextRequest) {
 
       const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
 
-      let videoUrlForSubmagic = job.source_drive_url as string
+      // Submagic always gets the compressed, normalized copy -- never the raw
+      // Drive file. Cached per job, so every Submagic variant on this job
+      // shares one compression + upload pass.
+      let videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
       let projectId: string
 
       if (preset.aiEditTemplate) {

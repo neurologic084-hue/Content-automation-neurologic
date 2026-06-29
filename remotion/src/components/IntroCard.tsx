@@ -1,6 +1,8 @@
 import React from 'react'
-import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion'
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate } from 'remotion'
 import { brand } from '../brand'
+import { MeshBackground } from '../MeshBackground'
+import { ShimmerText } from '../ShimmerText'
 
 // Big and centered just long enough to read, then snaps up into a small
 // pinned header within well under a second -- the footage and its audio are
@@ -16,15 +18,17 @@ export const IntroCard: React.FC<{ name?: string; tagline?: string }> = ({
   tagline = 'Neuro Logic · Seattle',
 }) => {
   const frame = useCurrentFrame()
+  const { height } = useVideoConfig()
 
   const shrink = interpolate(frame, [BIG_HOLD_END, SHRINK_END], [0, 1], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   })
   const scale = interpolate(shrink, [0, 1], [1, 0.4])
-  const y = interpolate(shrink, [0, 1], [0, -760])
-  const bgOpacity = interpolate(shrink, [0, 1], [1, 0])
-  const vignetteOpacity = interpolate(shrink, [0, 1], [0, 0.55])
+  // Proportional to the actual frame height, not a fixed pixel offset --
+  // the base footage is never force-cropped to a fixed aspect ratio anymore.
+  const y = interpolate(shrink, [0, 1], [0, -height * 0.4])
+  const bgOpacity = interpolate(shrink, [0, 1], [1, 0.22])
   const fadeOut = interpolate(frame, [FADE_START, FADE_END], [1, 0], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
@@ -32,26 +36,18 @@ export const IntroCard: React.FC<{ name?: string; tagline?: string }> = ({
 
   return (
     <AbsoluteFill>
-      <AbsoluteFill style={{ background: brand.bg, opacity: bgOpacity }} />
-      <AbsoluteFill style={{
-        background: `linear-gradient(180deg, rgba(0,0,0,${vignetteOpacity}) 0%, transparent 70%)`,
-      }} />
+      <AbsoluteFill style={{ opacity: bgOpacity * fadeOut }}>
+        <MeshBackground />
+      </AbsoluteFill>
       <AbsoluteFill style={{ justifyContent: 'center', alignItems: 'center' }}>
         <div style={{
           opacity: fadeOut,
           transform: `translateY(${y}px) scale(${scale})`,
           textAlign: 'center',
         }}>
-          <div style={{
-            fontFamily: brand.fontDisplay,
-            fontWeight: 400,
-            fontSize: 80,
-            letterSpacing: '0.06em',
-            color: brand.text,
-            lineHeight: 1.1,
-          }}>
+          <ShimmerText fontSize={80} letterSpacing="0.06em">
             {name}
-          </div>
+          </ShimmerText>
 
           <div style={{
             margin: '20px auto',

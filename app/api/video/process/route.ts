@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
   console.log(`[video-process] preparing source for job=${job.id}`)
   prepareJobSource(job.id, confirmedVideoUrl, writePrepProgress)
     .then(async (prepared) => {
-      console.log(`[video-process] source prepared job=${job.id} local=${prepared.localPath} public=${prepared.publicUrl ?? 'none'}`)
+      console.log(`[video-process] source prepared job=${job.id} local=${prepared.localPath}`)
       const { data: currentJob } = await supabase
         .from('video_jobs')
         .select('variants')
@@ -95,14 +95,12 @@ export async function POST(req: NextRequest) {
         v.status === 'pending' ? { ...v, progress: null } : v
       ))
 
+      // source_drive_url stays the original Drive link -- Submagic fetches
+      // directly from it, no Storage round-trip.
       await supabase
         .from('video_jobs')
-        .update({
-          variants: readyVariants,
-          ...(prepared.publicUrl ? { source_drive_url: prepared.publicUrl } : {}),
-        })
+        .update({ variants: readyVariants })
         .eq('id', job.id)
-      console.log(`[video-process] job=${job.id} source_url=${prepared.publicUrl ? 'storage' : 'drive-fallback'}`)
     })
     .catch(async (e) => {
       console.error(`[video-process] source prep failed job=${job.id}:`, (e as Error).message)
