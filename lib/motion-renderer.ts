@@ -1,3 +1,4 @@
+import { ensureFfmpegOnPath } from './ffmpeg-env'
 import { exec } from 'child_process'
 import path from 'path'
 import fs from 'fs'
@@ -5,14 +6,18 @@ import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { tryUploadToStorage, storageFileName } from './storage'
 import { chatCompletion, MODELS } from './openrouter'
-import type { VideoVariant } from './video-pipeline'
+import type { VideoVariant, MusicMode } from './video-pipeline'
 import { processWithDescript } from './descript-client'
-import { submitSubmagicJob, pollSubmagicJob } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
-import { generateElevenLabsMusic } from './elevenlabs-music'
+import { getLibraryMusic } from './music-library'
 import { getWhooshSfx, getSfx } from './sound-effects'
 import { planScenes, type MediaFile, type ScenePlan } from './scene-planner'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
+
+// Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
+// explicitly (not a bare side-effect import) so the bundler can't drop it.
+ensureFfmpegOnPath()
 
 const active = new Set<string>()
 
@@ -297,7 +302,8 @@ async function markVariant(
   variantId: string,
   status: 'ready' | 'failed',
   downloadUrl: string | null,
-  error: string | null
+  error: string | null,
+  musicAttribution: string | null = null
 ) {
   const db = supabaseAdmin()
   const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
@@ -305,7 +311,7 @@ async function markVariant(
 
   const variants = (job.variants as VideoVariant[]).map((v) =>
     v.id === variantId
-      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null }
+      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null, music_attribution: musicAttribution }
       : v
   )
 
@@ -337,11 +343,12 @@ async function setVariantProgress(
 async function finishVariant(
   jobId: string,
   variantId: string,
-  localPath: string
+  localPath: string,
+  musicAttribution: string | null = null
 ) {
   const storageUrl = await tryUploadToStorage(localPath, storageFileName(variantId), jobId)
   const url = storageUrl ?? `/renders/${jobId}/${path.basename(localPath)}`
-  await markVariant(jobId, variantId, 'ready', url, null)
+  await markVariant(jobId, variantId, 'ready', url, null, musicAttribution)
 }
 
 // Pulls a finished Submagic render back into our own storage instead of just
@@ -395,28 +402,45 @@ async function mixBackgroundMusic(
   hook: string,
   moodTag: string | null,
   scriptFormat?: string,
-): Promise<void> {
+  mode: MusicMode = DEFAULT_MUSIC_MODE,
+): Promise<string | null> {
+  if (mode === 'off') return null
   const duration = await getVideoDuration(videoPath)
 
-  const musicPath = await generateElevenLabsMusic(hook, moodTag, scriptFormat, duration)
-  if (!musicPath) {
-    console.warn('[motion-renderer] no suitable music found — skipping music for this render')
-    return
+  // Smart mode: pick a mood-matched track from the creator's library. The tracks
+  // are the creator's own, so no attribution is attached (always returns null).
+  const lib = await getLibraryMusic({ hook, moodTag, scriptFormat })
+  if (!lib) {
+    console.warn('[motion-renderer] no library track available — skipping music for this render')
+    return null
   }
+  const musicPath = lib.filePath
+  // Start the music at its detected best part (chorus/drop) so the strong
+  // section lands in the clip instead of the intro. 0 = from the top.
+  const startOffset = Math.max(0, lib.track.startOffset ?? 0)
+  const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
+  console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
   // Fade in over 1.5s at start, fade out in the last 1.5s
   const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
   const tmp = videoPath + '_mx.mp4'
 
   try {
-    // Music chain: loop → fade in/out → set level → sidechain-compress under voice
-    // sidechaincompress ducks music when voice is present (ratio=6), releases slowly (300ms) so it breathes naturally
+    // Music chain: loop → fade in/out → EQ-carve the vocal presence band so the
+    // music never masks speech (a -5dB dip ~2.5kHz, the consonant/intelligibility
+    // range) → set level ~18dB under voice (0.12 ≈ -18dBFS, the 15-20dB-under-
+    // voice sweet spot for short-form) → sidechain-compress under voice (ratio=10,
+    // 450ms release so it breathes in pauses). Then a final loudnorm pass masters
+    // the whole mix to -13 LUFS / -1.5 dBTP — a touch hotter than the -14 universal
+    // target (nudged up so it doesn't feel soft) but still safe across TikTok,
+    // Reels, and Shorts without triggering their limiters.
     await run(
-      `ffmpeg -y -i "${videoPath}" -stream_loop -1 -i "${musicPath}" ` +
+      `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
       `-filter_complex ` +
-      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,volume=0.09[bgfade];` +
+      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
+      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.12[bgfade];` +
       `[bgfade][0:a]sidechaincompress=threshold=0.018:ratio=10:attack=5:release=450[ducked];` +
-      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0[out]" ` +
+      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-13:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
     )
@@ -425,9 +449,10 @@ async function mixBackgroundMusic(
   } catch (e) {
     console.warn('[motion-renderer] music mix failed, keeping original:', (e as Error).message)
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
-  } finally {
-    try { fs.unlinkSync(musicPath) } catch { /* best-effort */ }
   }
+  // Library files are the creator's own permanent tracks — never deleted.
+  // No attribution to carry (not CC-BY), so always null.
+  return null
 }
 
 // Trim trailing audio tail from Descript exports (video stream ends before container duration).
@@ -1018,6 +1043,7 @@ export interface RenderVariantOptions {
   submagicTemplateName?: string    // premium caption template for the submagicCutOnly path
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
+  musicMode?: MusicMode            // per-render music choice (source / off); defaults to 'auto'
 }
 
 // Main pipeline:
@@ -1031,11 +1057,12 @@ async function renderSmartCinematic(
   outDir: string,
   opts: RenderVariantOptions,
 ): Promise<void> {
-  const { hook, cta, descriptBroll, descriptCaptions, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicCutOnly, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms } = opts
+  const { hook, cta, descriptBroll, descriptCaptions, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicCutOnly, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms, musicMode = DEFAULT_MUSIC_MODE } = opts
 
+  const musicStep = MUSIC_ENABLED && musicMode !== 'off' ? 1 : 0
   const STEPS = submagicCutOnly
-    ? 1 + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
-    : 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+    ? 1 + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
+    : 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
@@ -1049,11 +1076,9 @@ async function renderSmartCinematic(
         magicBrolls: submagicMagicBrolls ?? false,
         magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
         magicZooms: submagicMagicZooms ?? false,
-        // cleanAudio requires a Submagic plan tier this account doesn't have yet
-        // ("Clean audio requires a higher plan") -- confirmed by a live test
-        // failing on this exact validation error. Re-enable once upgraded:
-        // cleanAudio: true,
-        cleanAudio: false,
+        // Conventional default. NOTE: requires a Submagic plan tier that includes
+        // Clean Audio ("Clean audio requires a higher plan") — renders fail otherwise.
+        cleanAudio: true,
         removeBadTakes: true,
         removeSilencePace: 'natural',
       })
@@ -1071,13 +1096,14 @@ async function renderSmartCinematic(
         await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
       }
 
-      if (MUSIC_ENABLED) {
+      let musicCredit: string | null = null
+      if (MUSIC_ENABLED && musicMode !== 'off') {
         await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
-        await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
+        musicCredit = await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
       }
 
       console.log('[motion-renderer] Submagic cut-only output ready')
-      await finishVariant(jobId, variantId, outputPath)
+      await finishVariant(jobId, variantId, outputPath, musicCredit)
       return
     }
 
@@ -1128,12 +1154,13 @@ async function renderSmartCinematic(
       await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
     }
 
-    if (MUSIC_ENABLED) {
+    let musicCredit: string | null = null
+    if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
+      musicCredit = await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
     }
     console.log('[motion-renderer] output ready')
-    await finishVariant(jobId, variantId, outputPath)
+    await finishVariant(jobId, variantId, outputPath, musicCredit)
   } catch (e) {
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
   }

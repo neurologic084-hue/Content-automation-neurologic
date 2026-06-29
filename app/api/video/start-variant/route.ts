@@ -12,7 +12,7 @@ import {
   VARIANT_DEFINITIONS,
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
-import type { VideoVariant } from '@/lib/video-pipeline'
+import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 
 function supabaseAdmin() {
   return createAdminClient(
@@ -139,6 +139,7 @@ export async function POST(req: NextRequest) {
       submagicTemplateName,
       submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
       submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
+      musicMode: variant.music_mode as MusicMode | undefined,
     })
 
     return NextResponse.json({ ok: true })
@@ -231,9 +232,12 @@ export async function POST(req: NextRequest) {
           useMagicBrolls = false
         }
 
-        // Music presence is deterministic per-variant (set by the profile),
-        // not AI-guessed — always attempt to attach a Submagic track when wanted.
-        const musicTrackId = profile?.useMusic ?? true
+        // Music presence is deterministic per-variant (set by the profile), but
+        // the per-render music mode can force it off entirely. Submagic uses its
+        // own track library, so the source modes (royalty_free/ai) don't apply
+        // here — only 'off' vs not-off matters for Submagic variants.
+        const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
+        const musicTrackId = !musicOff && (profile?.useMusic ?? true)
           ? await fetchSubmagicAudioTrack()
           : null
 

@@ -1,6 +1,11 @@
+import { ensureFfmpegOnPath } from './ffmpeg-env'
 import { exec } from 'child_process'
 import fs from 'fs'
 import { transcribeLocalFile } from './caption-renderer'
+
+// Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
+// explicitly (not a bare side-effect import) so the bundler can't drop it.
+ensureFfmpegOnPath()
 import type { WordTimestamp } from './caption-renderer'
 
 // ── Smart cut: a deterministic precision pass on top of Descript's AI cut ────
