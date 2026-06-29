@@ -338,7 +338,7 @@ export async function transcribeLocalFile(filePath: string): Promise<WordTimesta
   // Native FormData + Blob, not the npm form-data package — fetch() doesn't
   // reliably serialize form-data's stream-based body for real file uploads
   // (it can silently work for small text-only fields, then break on actual
-  // files). This matches the proven-working pattern in zapcap-client.ts.
+  // files).
   const fileBuffer = fs.readFileSync(filePath)
   const form = new globalThis.FormData()
   form.append('model_id', 'scribe_v1')

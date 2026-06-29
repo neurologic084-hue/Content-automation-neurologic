@@ -7,8 +7,7 @@ import { tryUploadToStorage, storageFileName } from './storage'
 import { chatCompletion, MODELS } from './openrouter'
 import type { VideoVariant } from './video-pipeline'
 import { processWithDescript } from './descript-client'
-import { processWithZapcap } from './zapcap-client'
-import type { ZapcapSmartProfile, ZapcapTemplateIndex } from './zapcap-client'
+import { submitSubmagicJob, pollSubmagicJob } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { generateElevenLabsMusic } from './elevenlabs-music'
 import { getWhooshSfx, getSfx } from './sound-effects'
@@ -235,7 +234,7 @@ async function probeVideoFormat(filePath: string): Promise<VideoFormatInfo | nul
 
 // Skips the re-encode entirely when the source is already 1080x1920 h264/aac —
 // re-encoding an already-correct file only adds a lossy compression pass for
-// no benefit, and every downstream step (Descript, ZapCap/Submagic, caption
+// no benefit, and every downstream step (Descript, Submagic, caption
 // burn-in, music mix) does its own re-encode anyway.
 async function prepareVerticalSourceFile(
   inputPath: string,
@@ -346,7 +345,7 @@ async function finishVariant(
 }
 
 // Pulls a finished Submagic render back into our own storage instead of just
-// linking to Submagic's hosted URL — matches how Descript/ZapCap variants are
+// linking to Submagic's hosted URL — matches how Descript variants are
 // handled (finishVariant), and means the video survives even if Submagic
 // later expires or removes the file from their end.
 export async function retrieveAndStoreSubmagicResult(
@@ -816,7 +815,7 @@ export async function prepareSubmagicCustomBrollSource(
 // ── Native karaoke captions ───────────────────────────────────────────────────
 // Transcribes the (already-cut) video with ElevenLabs Scribe, generates a tone-
 // aware ASS subtitle file, and burns it into the video with FFmpeg. This is an
-// alternative to ZapCap for variants that want on-device caption control.
+// alternative to Submagic/Descript captions for on-device caption control.
 
 async function addNativeCaptions(
   videoPath: string,
@@ -869,10 +868,12 @@ async function addNativeCaptions(
 
 // ── Brand motion graphics (Remotion overlay) ──────────────────────────────────
 // Plans front-loaded brand graphics from the transcript via OpenRouter (mirrors
-// OVRHAUL's editing/graphics_plan.py), renders them with Remotion as a
-// transparent overlay, then composites over the edited video with FFmpeg.
-// Remotion's default web codec (VP8) was timing out at 30fps for this
-// resolution -- ProRes 4444 is what fixed it on the OVRHAUL pipeline.
+// OVRHAUL's editing/graphics_plan.py), renders them as one transparent Remotion
+// overlay, then composites over the edited video with FFmpeg. Footage and its
+// audio play continuously from frame 0 -- intro_card/outro_card handle not
+// blocking the view themselves (quick shrink-to-header / footage-stays-visible
+// designs in IntroCard.tsx and OutroCard.tsx) rather than the video structure
+// pausing for them.
 const REMOTION_DIR = path.join(process.cwd(), 'remotion')
 
 async function renderMotionGraphicsOverlay(
@@ -880,9 +881,10 @@ async function renderMotionGraphicsOverlay(
   variantId: string,
   graphics: MotionGraphic[],
   durationSec: number,
+  style: 'minimal' | 'bold',
 ): Promise<string> {
   const manifestPath = path.join(outDir, `${variantId}_graphics.json`)
-  fs.writeFileSync(manifestPath, JSON.stringify({ graphics, durationSec }))
+  fs.writeFileSync(manifestPath, JSON.stringify({ graphics, durationSec, style }))
 
   const overlayPath = path.join(outDir, `${variantId}_overlay.mov`)
   try {
@@ -906,6 +908,7 @@ async function addMotionGraphics(
   scriptFormat: string | undefined,
   outDir: string,
   variantId: string,
+  style: 'minimal' | 'bold' = 'minimal',
 ): Promise<void> {
   console.log('[motion-renderer] planning brand motion graphics...')
 
@@ -932,7 +935,7 @@ async function addMotionGraphics(
 
   let overlayPath: string | null = null
   try {
-    overlayPath = await renderMotionGraphicsOverlay(outDir, variantId, graphics, duration)
+    overlayPath = await renderMotionGraphicsOverlay(outDir, variantId, graphics, duration, style)
     const tmp = videoPath + '_mg.mp4'
     await run(
       `ffmpeg -y -i "${videoPath}" -i "${overlayPath}" ` +
@@ -982,85 +985,80 @@ async function renderCaptionTestOnly(
   }
 }
 
+// Polls a Submagic project to completion and returns its download URL. Used by
+// the submagicCutOnly path below, which needs to await the result inline
+// (unlike the separate fire-and-forget poll loop the plain Submagic variants
+// use from the API route).
+async function pollSubmagicUntilReady(projectId: string): Promise<string> {
+  const INTERVAL_MS = 8_000
+  const MAX_ATTEMPTS = 75 // ~10 minutes
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    await new Promise(r => setTimeout(r, INTERVAL_MS))
+    const result = await pollSubmagicJob(projectId).catch(() => null)
+    if (!result || result.status === 'processing') continue
+    if (result.status === 'ready' && result.downloadUrl) return result.downloadUrl
+    throw new Error(result.error ?? 'Submagic job failed')
+  }
+  throw new Error('Submagic job timed out after 10 minutes')
+}
+
+export interface RenderVariantOptions {
+  hook: string
+  cta: string
+  descriptBroll?: boolean
+  descriptCaptions?: boolean
+  brollDriveUrl?: string
+  nativeCaptions?: boolean
+  moodTag?: string | null
+  scriptFormat?: string
+  captionTestOnly?: boolean
+  motionGraphics?: boolean
+  motionGraphicsStyle?: 'minimal' | 'bold'
+  submagicCutOnly?: boolean        // skip Descript; Submagic handles cut/clean/captions/B-roll instead
+  submagicTemplateName?: string    // premium caption template for the submagicCutOnly path
+  submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
+  submagicMagicZooms?: boolean     // Submagic's own zoom-ins
+}
+
 // Main pipeline:
-//   V1: Descript single pass   cuts + Studio Sound + B-roll + captions
-//   V2: Descript cuts only → ZapCap captions + B-roll
+//   our-v1/v2/v3: handled entirely by the API route's Submagic branch (tool: 'submagic')
+//   our-v4/v5 (submagicCutOnly): Submagic for cut + clean + captions only, then Remotion graphics on top
+//   Descript path: classic edit pass, optional custom B-roll, optional native captions/motion graphics/music
 async function renderSmartCinematic(
   jobId: string,
   variantId: string,
   sourceUrl: string,
   outDir: string,
-  hook: string,
-  cta: string,
-  zapcapTemplateIndex?: ZapcapTemplateIndex,
-  zapcapBrollPercent?: number,
-  descriptBroll?: boolean,
-  descriptCaptions?: boolean,
-  brollDriveUrl?: string,
-  nativeCaptions?: boolean,
-  moodTag?: string | null,
-  scriptFormat?: string,
-  zapcapOnly?: boolean,
-  zapcapAutoCut?: {
-    silenceRemoval?: number
-    disfluencyRemoval?: boolean
-  },
-  zapcapSmartProfile?: ZapcapSmartProfile,
-  motionGraphics?: boolean,
+  opts: RenderVariantOptions,
 ): Promise<void> {
-  // Steps: Descript + optional custom B-roll + optional ZapCap + optional native captions + optional motion graphics + optional music
-  const shouldUseZapcapOnly = zapcapOnly || (!!zapcapTemplateIndex && !descriptBroll && !descriptCaptions)
-  const STEPS = shouldUseZapcapOnly
-    ? 1 + (zapcapTemplateIndex ? 1 : 0) + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
-    : 1 + (brollDriveUrl ? 1 : 0) + (zapcapTemplateIndex ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+  const { hook, cta, descriptBroll, descriptCaptions, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicCutOnly, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms } = opts
+
+  const STEPS = submagicCutOnly
+    ? 1 + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+    : 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
     const outputPath = path.join(outDir, `${variantId}.mp4`)
 
-    if (shouldUseZapcapOnly) {
-      if (!zapcapTemplateIndex) throw new Error('ZapCap-only variant requires a ZapCap template')
-
-      const tmpInput = path.join(outDir, `${variantId}_edited_tmp.mp4`)
-      await setVariantProgress(jobId, variantId, step++, STEPS, 'Preparing footage')
-      let zapcapInput = sourceUrl
-
-      if (brollDriveUrl) {
-        const sharedSourcePath = await getSharedSourceFile(jobId, sourceUrl, outDir)
-        fs.copyFileSync(sharedSourcePath, tmpInput)
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
-        await insertCustomBRoll(tmpInput, brollDriveUrl, hook, cta)
-        zapcapInput = tmpInput
-      }
-
-      const actualBrollPct = brollDriveUrl
-        ? undefined
-        : zapcapBrollPercent !== undefined
-          ? Math.max(7, zapcapBrollPercent + (Math.floor(Math.random() * 3) - 1) * 3)
-          : undefined
-
-      const label = actualBrollPct
-        ? 'Editing with ZapCap auto-cut + B-roll'
-        : 'Editing with ZapCap auto-cut'
-      await setVariantProgress(jobId, variantId, step++, STEPS, label)
-      const captionedUrl = await processWithZapcap(zapcapInput, {
-        templateIndex: zapcapTemplateIndex,
-        brollPercent: actualBrollPct,
-        autoCut: zapcapAutoCut ?? { silenceRemoval: 0.35, disfluencyRemoval: true },
-        ...(zapcapSmartProfile ? {
-          smart: {
-            profile: zapcapSmartProfile,
-            hook,
-            cta,
-            moodTag: moodTag ?? null,
-            scriptFormat,
-          },
-        } : {}),
+    if (submagicCutOnly) {
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
+      const projectId = await submitSubmagicJob(sourceUrl, {
+        title: `${variantId}-${jobId.slice(0, 8)}`,
+        templateName: submagicTemplateName,
+        magicBrolls: submagicMagicBrolls ?? false,
+        magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
+        magicZooms: submagicMagicZooms ?? false,
+        // cleanAudio requires a Submagic plan tier this account doesn't have yet
+        // ("Clean audio requires a higher plan") -- confirmed by a live test
+        // failing on this exact validation error. Re-enable once upgraded:
+        // cleanAudio: true,
+        cleanAudio: false,
+        removeBadTakes: true,
+        removeSilencePace: 'natural',
       })
-      console.log('[motion-renderer] ZapCap-only edit done')
-      if (zapcapInput === tmpInput) {
-        try { fs.unlinkSync(tmpInput) } catch { /* best-effort */ }
-      }
+      const captionedUrl = await pollSubmagicUntilReady(projectId)
+      console.log('[motion-renderer] Submagic cut-only edit done')
       await downloadFile(captionedUrl, outputPath)
 
       if (nativeCaptions) {
@@ -1070,7 +1068,7 @@ async function renderSmartCinematic(
 
       if (motionGraphics) {
         await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding brand motion graphics')
-        await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId)
+        await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
       }
 
       if (MUSIC_ENABLED) {
@@ -1078,13 +1076,14 @@ async function renderSmartCinematic(
         await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
       }
 
-      console.log('[motion-renderer] ZapCap-only output ready')
+      console.log('[motion-renderer] Submagic cut-only output ready')
       await finishVariant(jobId, variantId, outputPath)
       return
     }
 
-    // Cache key includes Descript options   V1 (broll+captions) and V2 (clean) are different outputs.
-    // Promise stored while running so concurrent variants wait instead of launching duplicates.
+    // Cache key includes Descript options so different B-roll/caption combos
+    // don't collide. Promise stored while running so concurrent variants wait
+    // instead of launching duplicates.
     const cacheKey = `${jobId}:${descriptBroll ? 'b' : ''}${descriptCaptions ? 'c' : ''}`
     const existing = descriptUrlCache.get(cacheKey)
     let editedUrl: string
@@ -1111,37 +1110,12 @@ async function renderSmartCinematic(
       }
     }
 
-    if (zapcapTemplateIndex) {
-      // Download Descript output to temp, trim the black tail, optionally insert custom B-roll,
-      // then let ZapCap add captions (and stock B-roll if not using custom).
-      const tmpEdited = path.join(outDir, `${variantId}_edited_tmp.mp4`)
-      await downloadFile(editedUrl, tmpEdited)
-      await trimDescriptTail(tmpEdited)
+    await downloadFile(editedUrl, outputPath)
+    await trimDescriptTail(outputPath)
 
-      if (brollDriveUrl) {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
-        await insertCustomBRoll(tmpEdited, brollDriveUrl, hook, cta)
-      }
-
-      // Vary stock B-roll coverage slightly each run for natural variety (target ±5%)
-      const actualBrollPct = zapcapBrollPercent !== undefined
-        ? Math.max(7, zapcapBrollPercent + (Math.floor(Math.random() * 3) - 1) * 3)
-        : undefined
-
-      const label = actualBrollPct ? 'Adding captions + B-roll with ZapCap' : 'Adding captions with ZapCap'
-      await setVariantProgress(jobId, variantId, step++, STEPS, label)
-      const captionedUrl = await processWithZapcap(tmpEdited, zapcapTemplateIndex, actualBrollPct)
-      console.log('[motion-renderer] ZapCap done')
-      try { fs.unlinkSync(tmpEdited) } catch { /* best-effort */ }
-      await downloadFile(captionedUrl, outputPath)
-    } else {
-      await downloadFile(editedUrl, outputPath)
-      await trimDescriptTail(outputPath)
-
-      if (brollDriveUrl) {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
-        await insertCustomBRoll(outputPath, brollDriveUrl, hook, cta)
-      }
+    if (brollDriveUrl) {
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
+      await insertCustomBRoll(outputPath, brollDriveUrl, hook, cta)
     }
 
     if (nativeCaptions) {
@@ -1151,7 +1125,7 @@ async function renderSmartCinematic(
 
     if (motionGraphics) {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding brand motion graphics')
-      await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId)
+      await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
     }
 
     if (MUSIC_ENABLED) {
@@ -1169,24 +1143,7 @@ export function startSingleVariant(
   jobId: string,
   variantId: string,
   sourceUrl: string,
-  hook: string,
-  cta: string,
-  zapcapTemplateIndex?: ZapcapTemplateIndex,
-  zapcapBrollPercent?: number,
-  descriptBroll?: boolean,
-  descriptCaptions?: boolean,
-  brollDriveUrl?: string,
-  nativeCaptions?: boolean,
-  moodTag?: string | null,
-  scriptFormat?: string,
-  captionTestOnly?: boolean,
-  zapcapOnly?: boolean,
-  zapcapAutoCut?: {
-    silenceRemoval?: number
-    disfluencyRemoval?: boolean
-  },
-  zapcapSmartProfile?: ZapcapSmartProfile,
-  motionGraphics?: boolean,
+  opts: RenderVariantOptions,
 ) {
   const key = jobId + ':' + variantId
   if (active.has(key)) return
@@ -1195,30 +1152,25 @@ export function startSingleVariant(
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
 
-  // When custom B-roll is provided, disable stock B-roll from Descript/ZapCap to avoid stacking.
-  const effectiveDescriptBroll = brollDriveUrl ? false : descriptBroll
-  const effectiveZapcapBrollPercent = brollDriveUrl ? undefined : zapcapBrollPercent
+  // When custom B-roll is provided, disable stock B-roll from Descript to avoid stacking.
+  const effectiveOpts: RenderVariantOptions = opts.brollDriveUrl
+    ? { ...opts, descriptBroll: false }
+    : opts
 
   // Caption test runs in seconds (no Descript round-trip), but keep the same
   // safety timeout in case transcription or FFmpeg ever hangs.
-  const TIMEOUT_MS = captionTestOnly ? 5 * 60 * 1000 : 30 * 60 * 1000
+  const TIMEOUT_MS = opts.captionTestOnly ? 5 * 60 * 1000 : 30 * 60 * 1000
   const timeoutId = setTimeout(() => {
     console.error(`[motion-renderer] variant ${variantId} timed out`)
     markVariant(jobId, variantId, 'failed', null, 'Render timed out').catch(() => {})
   }, TIMEOUT_MS)
 
   const launch = async () => {
-    if (captionTestOnly) {
-      await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, moodTag, scriptFormat)
+    if (opts.captionTestOnly) {
+      await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, opts.moodTag, opts.scriptFormat)
       return
     }
-    await renderSmartCinematic(
-      jobId, variantId, sourceUrl, outDir, hook, cta,
-      zapcapTemplateIndex, effectiveZapcapBrollPercent,
-      effectiveDescriptBroll, descriptCaptions,
-      brollDriveUrl, nativeCaptions, moodTag, scriptFormat,
-      zapcapOnly, zapcapAutoCut, zapcapSmartProfile, motionGraphics,
-    )
+    await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, effectiveOpts)
   }
 
   launch()

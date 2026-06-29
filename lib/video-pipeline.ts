@@ -1,6 +1,5 @@
 import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
-import type { ZapcapSmartProfile, ZapcapTemplateIndex } from './zapcap-client'
 
 export interface SubmagicPreset {
   // Fully autonomous mode   Submagic handles everything (music, B-roll, cuts, style)
@@ -24,19 +23,15 @@ export interface VideoVariantDef {
   autoStart: boolean   // true = runs immediately on job creation; false = user starts manually
   submagicPreset?: SubmagicPreset
   submagicProfile?: SubmagicProfile
-  zapcapTemplateIndex?: ZapcapTemplateIndex  // 1/2/3 = ZAPCAP_TEMPLATE_ID(_2/_3)
-  zapcapBrollPercent?: number  // 0-100, enables ZapCap auto B-roll
-  zapcapOnly?: boolean         // skip Descript and let ZapCap handle captions + auto-cutting
-  zapcapAutoCut?: {
-    silenceRemoval?: number
-    disfluencyRemoval?: boolean
-  }
-  zapcapSmartProfile?: ZapcapSmartProfile
   descriptBroll?: boolean      // ask Underlord to insert stock B-roll
   descriptCaptions?: boolean   // ask Underlord to add captions
   nativeCaptions?: boolean     // burn ASS karaoke captions via ElevenLabs Scribe + FFmpeg
   captionTestOnly?: boolean    // skip Descript + smart-cut entirely, caption the raw footage directly
   motionGraphics?: boolean     // plan + render front-loaded brand graphics (Remotion) and composite them in
+  motionGraphicsStyle?: 'minimal' | 'bold'  // which Remotion visual treatment to render
+  submagicCutOnly?: boolean        // skip Descript; Submagic handles cut/clean/captions/B-roll instead
+  submagicMagicBrolls?: boolean    // Submagic's own stock B-roll, used by the submagicCutOnly path
+  submagicMagicZooms?: boolean     // Submagic's own zoom-ins, used by the submagicCutOnly path
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -64,43 +59,10 @@ export interface VideoJob {
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   {
     id: 'our-v1',
-    name: 'Descript Full Edit',
-    description: 'Descript handles the classic edit pass with captions, clean cuts, and B-roll.',
-    tool: 'edit',
-    order: 1,
-    autoStart: false,
-    descriptBroll: true,
-    descriptCaptions: true,
-  },
-  {
-    id: 'our-v6',
-    name: 'Descript Edit + Brand Motion Graphics',
-    description: 'Same Descript edit pass (captions, clean cuts, B-roll) plus front-loaded Neuro Logic motion graphics — intro card, callouts, stats — planned from the transcript and rendered on top.',
-    tool: 'edit',
-    order: 6,
-    autoStart: false,
-    descriptBroll: true,
-    descriptCaptions: true,
-    motionGraphics: true,
-  },
-  {
-    id: 'our-v2',
-    name: 'ZapCap Smart Edit',
-    description: 'ZapCap handles auto-cutting, captions, and modest B-roll as a comparison option.',
-    tool: 'edit',
-    order: 2,
-    autoStart: false,
-    zapcapTemplateIndex: 2,
-    zapcapBrollPercent: 12,
-    zapcapOnly: true,
-    zapcapSmartProfile: 'balanced',
-  },
-  {
-    id: 'our-v3',
     name: 'Submagic Calm & Clean',
     description: 'Gentle pacing, light B-roll, no music — voice carries the video alone. Best for sensitive, personal, or educational content.',
     tool: 'submagic',
-    order: 3,
+    order: 1,
     autoStart: false,
     submagicProfile: {
       directive: 'Calm, gentle energy suited to sensitive, personal, medical, or educational content. Keep B-roll light and unobtrusive, pacing natural (never extra-fast), zooms subtle. The voice should feel like it is carrying the video alone.',
@@ -108,11 +70,11 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     },
   },
   {
-    id: 'our-v4',
+    id: 'our-v2',
     name: 'Submagic Balanced Energy',
     description: 'Natural-to-brisk pacing, moderate B-roll, subtle background music. A balanced general-purpose edit.',
     tool: 'submagic',
-    order: 4,
+    order: 2,
     autoStart: false,
     submagicProfile: {
       directive: 'Balanced, natural energy suited to general short-form content. Moderate B-roll coverage, natural-to-brisk pacing, noticeable but not aggressive zooms. Subtle background music sits quietly under the voice.',
@@ -120,16 +82,42 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     },
   },
   {
-    id: 'our-v5',
+    id: 'our-v3',
     name: 'Submagic Bold & Punchy',
     description: 'Fast cuts, heavier B-roll, strong zooms, energetic music. For punchy, attention-grabbing content.',
     tool: 'submagic',
-    order: 5,
+    order: 3,
     autoStart: false,
     submagicProfile: {
       directive: 'High energy, fast-paced, attention-grabbing edit. Heavier B-roll coverage, tight cuts, strong confident zooms, a bold hook title. Energetic background music under the voice.',
       useMusic: true,
     },
+  },
+  {
+    id: 'our-v4',
+    name: 'Premium Captions + Motion Graphics A',
+    description: 'Submagic cuts, cleans, captions, and adds B-roll (a premium template, never Hormozi-style, zooms off for a calmer feel) — then front-loaded Neuro Logic motion graphics (intro, callouts, stats) render on top in the minimal house style.',
+    tool: 'edit',
+    order: 4,
+    autoStart: false,
+    submagicCutOnly: true,
+    submagicMagicBrolls: true,
+    submagicMagicZooms: false,
+    motionGraphics: true,
+    motionGraphicsStyle: 'minimal',
+  },
+  {
+    id: 'our-v5',
+    name: 'Premium Captions + Motion Graphics B',
+    description: 'Same recipe as variant A — Submagic cuts, cleans, captions, and adds B-roll with a second premium template — but zooms on for extra energy, paired with the bolder, punchier motion-graphics style.',
+    tool: 'edit',
+    order: 5,
+    autoStart: false,
+    submagicCutOnly: true,
+    submagicMagicBrolls: true,
+    submagicMagicZooms: true,
+    motionGraphics: true,
+    motionGraphicsStyle: 'bold',
   },
 ]
 
@@ -394,6 +382,46 @@ export async function deriveSmartSubmagicSettings(
   }
 }
 
+let premiumTemplateCache: { expiresAt: number; names: [string | undefined, string | undefined] } | null = null
+
+// our-v4/our-v5 only use Submagic for the cut/clean/caption pass (no B-roll, no
+// zooms -- the Remotion layer carries the visual interest), and want two
+// genuinely distinct premium caption looks, never the punchy Hormozi-style
+// templates. Cached briefly so both variants starting around the same time
+// land on the same pair instead of each independently re-asking the model.
+export async function pickPremiumTemplates(): Promise<[string | undefined, string | undefined]> {
+  if (premiumTemplateCache && premiumTemplateCache.expiresAt > Date.now()) {
+    return premiumTemplateCache.names
+  }
+
+  const templates = await fetchSubmagicTemplates()
+  const candidates = templates.filter(t => !/hormozi/i.test(t.name))
+  if (!candidates.length) return [undefined, undefined]
+
+  let names: [string | undefined, string | undefined] = [candidates[0]?.name, candidates[1]?.name ?? candidates[0]?.name]
+  try {
+    const list = candidates.map((t, i) => `${i + 1}. ${t.name}${t.description ? ` — ${t.description}` : ''}`).join('\n')
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      json: true,
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: `Pick 2 distinct premium, clean caption styles from this list for a med-spa clinic's short-form videos — elegant and minimal, never punchy or meme-style. Return JSON only: {"a": "<exact name>", "b": "<exact name>"}\n\n${list}`,
+      }],
+    })
+    const parsed = JSON.parse(raw) as { a?: string; b?: string }
+    const allowed = new Set(candidates.map(t => t.name))
+    const a = parsed.a && allowed.has(parsed.a) ? parsed.a : names[0]
+    const b = parsed.b && allowed.has(parsed.b) && parsed.b !== a ? parsed.b : (candidates.find(t => t.name !== a)?.name ?? a)
+    names = [a, b]
+  } catch (e) {
+    console.warn('[submagic] premium template pick failed, using fallback order:', (e as Error).message)
+  }
+
+  premiumTemplateCache = { expiresAt: Date.now() + 30 * 60 * 1000, names }
+  return names
+}
 
 // ── Submagic   Fetch first available audio track for music param ──────────────
 

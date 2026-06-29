@@ -1,66 +1,56 @@
 import React from 'react'
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring } from 'remotion'
+import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion'
 import { brand } from '../brand'
 
-export const OutroCard: React.FC<{ cta?: string }> = ({
+// No solid background -- footage and audio keep playing right through the
+// outro, just like the intro's small-header phase. A cursive sign-off near
+// the top plus a bold caption lower-third fade in over the last couple
+// seconds instead of replacing the footage with a static card.
+const SIGNOFF_IN: [number, number] = [6, 16]
+const CAPTION_IN: [number, number] = [14, 26]
+
+export const OutroCard: React.FC<{ cta?: string; signoff?: string }> = ({
   cta = 'Book your first visit',
+  signoff = 'Thanks!',
 }) => {
   const frame = useCurrentFrame()
-  const { fps } = useVideoConfig()
 
-  const rise = spring({ frame, fps, config: { damping: 200, mass: 0.8 } })
-  const y = interpolate(rise, [0, 1], [28, 0])
-  const btnO = interpolate(frame, [20, 40], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
-  const lineW = interpolate(frame, [8, 25], [0, 100], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const signoffO = interpolate(frame, SIGNOFF_IN, [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const signoffY = interpolate(signoffO, [0, 1], [-16, 0])
+  const captionO = interpolate(frame, CAPTION_IN, [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const captionX = interpolate(captionO, [0, 1], [-30, 0])
 
   return (
-    <AbsoluteFill style={{ background: brand.bg, justifyContent: 'center', alignItems: 'center' }}>
-      <div style={{
-        position: 'absolute',
-        width: 500,
-        height: 500,
-        borderRadius: '50%',
-        background: `radial-gradient(circle, rgba(79,143,227,0.10) 0%, transparent 70%)`,
-        top: '50%',
-        left: '50%',
-        transform: 'translate(-50%, -50%)',
-      }} />
-
-      <div style={{ opacity: rise, transform: `translateY(${y}px)`, textAlign: 'center', padding: '0 60px' }}>
+    <AbsoluteFill>
+      <AbsoluteFill style={{ justifyContent: 'flex-start', alignItems: 'center', padding: '90px 36px 0' }}>
         <div style={{
+          opacity: signoffO,
+          transform: `translateY(${signoffY}px)`,
           fontFamily: brand.fontDisplay,
-          fontWeight: 400,
-          fontSize: 54,
-          letterSpacing: '0.02em',
+          fontStyle: 'italic',
+          fontSize: 56,
+          color: brand.blueLight,
+          textShadow: `0 0 24px ${brand.blue}`,
+        }}>
+          {signoff}
+        </div>
+      </AbsoluteFill>
+
+      <AbsoluteFill style={{ justifyContent: 'flex-end', alignItems: 'flex-start', padding: '0 40px 130px' }}>
+        <div style={{
+          opacity: captionO,
+          transform: `translateX(${captionX}px)`,
+          maxWidth: '85%',
+          fontFamily: brand.fontBody,
+          fontWeight: 800,
+          fontSize: 34,
+          lineHeight: 1.25,
           color: brand.text,
-          lineHeight: 1.2,
+          textTransform: 'uppercase' as const,
         }}>
           {cta}
         </div>
-
-        <div style={{
-          margin: '18px auto',
-          height: 1,
-          width: lineW,
-          background: `linear-gradient(90deg, transparent, ${brand.blue}, transparent)`,
-        }} />
-
-        <div style={{
-          opacity: btnO,
-          marginTop: 32,
-          display: 'inline-block',
-          fontFamily: brand.fontBody,
-          fontSize: 20,
-          letterSpacing: '0.18em',
-          textTransform: 'uppercase' as const,
-          color: brand.blue,
-          border: `1px solid ${brand.blue}`,
-          padding: '14px 36px',
-          borderRadius: 6,
-        }}>
-          Link in bio
-        </div>
-      </div>
+      </AbsoluteFill>
     </AbsoluteFill>
   )
 }

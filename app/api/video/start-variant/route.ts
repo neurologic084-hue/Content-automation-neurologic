@@ -5,6 +5,7 @@ import { startSingleVariant, prepareSubmagicCustomBrollSource, retrieveAndStoreS
 import {
   deriveSmartSubmagicSettings,
   fetchSubmagicAudioTrack,
+  pickPremiumTemplates,
   submitSubmagicJob,
   pollSubmagicJob,
   transcribeVideo,
@@ -12,7 +13,6 @@ import {
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
 import type { VideoVariant } from '@/lib/video-pipeline'
-import type { ZapcapSmartProfile, ZapcapTemplateIndex } from '@/lib/zapcap-client'
 
 function supabaseAdmin() {
   return createAdminClient(
@@ -115,26 +115,31 @@ export async function POST(req: NextRequest) {
 
     const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
 
-    startSingleVariant(
-      jobId,
-      variantId,
-      job.source_drive_url,
-      scriptRow?.hook ?? '',
-      scriptRow?.cta ?? '',
-      variant.zapcapTemplateIndex as ZapcapTemplateIndex | undefined,
-      variant.zapcapBrollPercent as number | undefined,
-      variant.descriptBroll as boolean | undefined,
-      variant.descriptCaptions as boolean | undefined,
-      variant.brollDriveUrl as string | undefined,
-      variant.nativeCaptions as boolean | undefined,
-      scriptRow?.mood_tag ?? null,
+    // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
+    // so they read as a real side-by-side comparison rather than two random picks.
+    let submagicTemplateName: string | undefined
+    if (variant.submagicCutOnly) {
+      const [tplA, tplB] = await pickPremiumTemplates()
+      submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
+    }
+
+    startSingleVariant(jobId, variantId, job.source_drive_url, {
+      hook: scriptRow?.hook ?? '',
+      cta: scriptRow?.cta ?? '',
+      descriptBroll: variant.descriptBroll as boolean | undefined,
+      descriptCaptions: variant.descriptCaptions as boolean | undefined,
+      brollDriveUrl: variant.brollDriveUrl as string | undefined,
+      nativeCaptions: variant.nativeCaptions as boolean | undefined,
+      moodTag: scriptRow?.mood_tag ?? null,
       scriptFormat,
-      variant.captionTestOnly as boolean | undefined,
-      variant.zapcapOnly as boolean | undefined,
-      variant.zapcapAutoCut as { silenceRemoval?: number; disfluencyRemoval?: boolean } | undefined,
-      variant.zapcapSmartProfile as ZapcapSmartProfile | undefined,
-      variant.motionGraphics as boolean | undefined,
-    )
+      captionTestOnly: variant.captionTestOnly as boolean | undefined,
+      motionGraphics: variant.motionGraphics as boolean | undefined,
+      motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
+      submagicCutOnly: variant.submagicCutOnly as boolean | undefined,
+      submagicTemplateName,
+      submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
+      submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
+    })
 
     return NextResponse.json({ ok: true })
   }
@@ -181,7 +186,7 @@ export async function POST(req: NextRequest) {
           aiEditTemplate: preset.aiEditTemplate,
         })
       } else {
-        // Profile-driven path (our-v3/v4/v5): get the ACTUAL spoken transcript
+        // Profile-driven path (our-v1/v2/v3): get the ACTUAL spoken transcript
         // from the footage, not just the written script — creators sometimes
         // improvise on camera. Cached on the job row so starting a 2nd or 3rd
         // Submagic variant on the same job doesn't re-transcribe.

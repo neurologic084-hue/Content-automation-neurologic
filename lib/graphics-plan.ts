@@ -36,11 +36,11 @@ Mood: ${moodTag || 'unspecified'}
 Format: ${scriptFormat || 'unspecified'}
 
 Rules:
-- Always start with an intro_card at startSec 0, durationSec 3.
+- Always start with an intro_card at startSec 0, durationSec 3. It overlays the footage (which is already playing) rather than blocking it - the card itself handles staying brief and out of the way, so just plan it like any other graphic.
 - Add 2-4 lower_third, keyword_callout, stat, or list graphics in the first half, anchored to key phrases actually said in the transcript below.
 - A "stat" graphic's text should lead with a short number or percentage, e.g. "3x Faster" or "98% Return Clients" (only use figures implied by the script - never invent a clinical statistic).
 - A "list" graphic's text must be 2-3 short items separated by " | ", e.g. "No downtime | Numbing cream included | Results in days".
-- Always end with an outro_card at startSec ${Math.max(duration - 4, duration * 0.85).toFixed(0)}, durationSec 4, using the CTA.
+- Always end with an outro_card at startSec ${Math.max(duration - 3, duration * 0.88).toFixed(1)}, durationSec 3, using the CTA.
 - Hard cap: ${maxGraphics} graphics total. Do not add graphics in the middle third.
 - Keep text short: 4-8 words per graphic (list items can be shorter).
 - Warm, premium, minimal tone - never em dashes, en dashes, or double-hyphens.
@@ -61,7 +61,14 @@ Return ONLY valid JSON, no markdown:
       max_tokens: 1200,
     })
     const data = JSON.parse(raw) as { graphics?: MotionGraphic[] }
-    return data.graphics ?? []
+    return (data.graphics ?? []).map((g) => {
+      // IntroCard/OutroCard handle staying out of the way internally (quick
+      // shrink-to-header / footage-stays-visible), but still clamp duration
+      // so a misbehaving response can't park one on screen indefinitely.
+      if (g.type === 'intro_card') return { ...g, durationSec: Math.min(Math.max(g.durationSec, 2.5), 3.5) }
+      if (g.type === 'outro_card') return { ...g, durationSec: Math.min(Math.max(g.durationSec, 2), 3.5) }
+      return g
+    })
   } catch (e) {
     console.warn('[graphics-plan] planning failed, skipping motion graphics:', (e as Error).message)
     return []
