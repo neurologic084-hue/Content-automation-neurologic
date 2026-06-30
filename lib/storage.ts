@@ -15,10 +15,10 @@ function r2Client() {
   })
 }
 
-export async function uploadToStorage(localPath: string, fileName: string, jobId: string): Promise<string> {
+export async function uploadToStorage(localPath: string, fileName: string, jobId: string, folder?: string): Promise<string> {
   const client = r2Client()
   const fileBuffer = fs.readFileSync(localPath)
-  const storagePath = `${jobId}/${fileName}`
+  const storagePath = folder ? `${folder}/${jobId}/${fileName}` : `${jobId}/${fileName}`
   console.log(`[storage] uploading ${storagePath} (${(fileBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
 
   // Large files on a slow connection occasionally hit a transient network error
@@ -48,9 +48,9 @@ export async function uploadToStorage(localPath: string, fileName: string, jobId
   throw new Error(`Storage upload failed after ${maxAttempts} attempts: ${lastError}`)
 }
 
-export async function tryUploadToStorage(localPath: string, fileName: string, jobId: string): Promise<string | null> {
+export async function tryUploadToStorage(localPath: string, fileName: string, jobId: string, folder?: string): Promise<string | null> {
   try {
-    return await uploadToStorage(localPath, fileName, jobId)
+    return await uploadToStorage(localPath, fileName, jobId, folder)
   } catch (e) {
     console.warn(`[storage] upload skipped/failed for ${jobId}/${fileName}: ${(e as Error).message}`)
     return null

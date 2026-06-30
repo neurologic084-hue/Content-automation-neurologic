@@ -104,6 +104,15 @@ export async function POST(req: NextRequest) {
   }
 
   if (variant.tool === 'edit') {
+    // Guard against double-starts: if the variant is already actively running
+    // (processing), bail out immediately -- the in-process active Set in
+    // motion-renderer is also checked, but that resets on server restart while
+    // this DB-level check survives restarts.
+    if (variant.status === 'processing') {
+      console.log(`[start-variant] ${variantId} already processing, skipping duplicate start`)
+      return NextResponse.json({ ok: true, reused: true })
+    }
+
     const variants: VideoVariant[] = (job.variants ?? []).map((v: VideoVariant) =>
       v.id === variantId
         ? { ...v, status: 'processing', external_id: null, preview_url: null, download_url: null, error: null }

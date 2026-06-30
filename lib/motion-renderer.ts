@@ -386,7 +386,14 @@ async function finishVariant(
   variantId: string,
   localPath: string
 ) {
-  const url = `/renders/${jobId}/${path.basename(localPath)}`
+  // Push the finished render to R2 finished/ folder so it survives server
+  // restarts and is always available for publishing without needing local disk.
+  const fileName = path.basename(localPath)
+  const r2Url = await uploadToStorage(localPath, fileName, jobId, 'finished').catch((e) => {
+    console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
+    return null
+  })
+  const url = r2Url ?? `/renders/${jobId}/${fileName}`
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
@@ -416,7 +423,14 @@ export async function retrieveAndStoreSubmagicResult(
     }
   }
 
-  return `/renders/${jobId}/${path.basename(localPath)}`
+  // Push finished Submagic result to R2 finished/ folder so it's always
+  // available for publishing even if local disk is wiped.
+  const fileName = path.basename(localPath)
+  const r2Url = await uploadToStorage(localPath, fileName, jobId, 'finished').catch((e) => {
+    console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
+    return null
+  })
+  return r2Url ?? `/renders/${jobId}/${fileName}`
 }
 
 function cleanTempFiles(outDir: string, variantId: string): void {
