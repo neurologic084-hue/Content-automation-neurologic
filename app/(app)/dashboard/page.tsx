@@ -449,7 +449,7 @@ export default async function DashboardPage() {
                   Video Studio
                 </p>
                 <ul className="space-y-0.5">
-                  {['Paste your recording from Google Drive', 'AI cuts, captions & music automatically', 'Optional B-roll from Drive', 'Download or send straight to Publish'].map((f) => (
+                  {['Paste your recording from Google Drive', 'AI cuts, captions & music automatically', 'Download or send straight to Publish'].map((f) => (
                     <li key={f} className="text-xs text-[#71717A] flex items-center gap-1.5">
                       <span className="w-1 h-1 rounded-full bg-[#C4C4C0] flex-shrink-0" />
                       {f}

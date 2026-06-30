@@ -31,7 +31,6 @@ const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = 
 
 export function VideoStudio({ script, existingJobId }: Props) {
   const [driveUrl, setDriveUrl] = useState('')
-  const [brollUrl, setBrollUrl] = useState('')
   const [musicMode, setMusicMode] = useState<MusicMode>('smart')
   const [jobId, setJobId] = useState<string | null>(existingJobId)
   // 'loading': have an existing job but haven't fetched its real status yet
@@ -54,6 +53,26 @@ export function VideoStudio({ script, existingJobId }: Props) {
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [jobId])
+
+  // Preview cards crop (object-cover) to fill a compact thumbnail, but that
+  // same crop looks wrong blown up to native fullscreen -- it zooms into the
+  // footage instead of showing the whole vertical frame. Force the fullscreen
+  // element specifically to letterbox (object-contain, black bars) by setting
+  // its style directly rather than relying on a :fullscreen CSS selector,
+  // since the browser may fullscreen the <video> itself or a wrapper, and
+  // inline styles always win regardless of which one it picks.
+  useEffect(() => {
+    function handleFullscreenChange() {
+      const fsEl = document.fullscreenElement
+      document.querySelectorAll('video').forEach((v) => {
+        const isFsTarget = v === fsEl || fsEl?.contains(v)
+        v.style.objectFit = isFsTarget ? 'contain' : ''
+        v.style.backgroundColor = isFsTarget ? '#000' : ''
+      })
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
 
   function startPolling(id: string) {
     if (pollRef.current) clearInterval(pollRef.current)
@@ -103,7 +122,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     const res = await fetch('/api/video/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scriptId: script.id, driveUrl, musicMode, ...(brollUrl.trim() ? { brollDriveUrl: brollUrl.trim() } : {}) }),
+      body: JSON.stringify({ scriptId: script.id, driveUrl, musicMode }),
     })
     const data = await res.json()
 
@@ -159,7 +178,6 @@ export function VideoStudio({ script, existingJobId }: Props) {
     setReadyCount(0)
     setSelectedVariant(null)
     setDriveUrl('')
-    setBrollUrl('')
     setError(null)
   }
 
@@ -279,23 +297,6 @@ export function VideoStudio({ script, existingJobId }: Props) {
             onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
             onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
           />
-
-          <div className="mb-4">
-            <p className="text-xs font-semibold text-[#71717A] mb-1.5">
-              Custom B-roll <span className="font-normal text-[#A1A1AA]">(optional)   Drive file or folder link</span>
-            </p>
-            <input
-              type="url"
-              placeholder="https://drive.google.com/drive/folders/... or /file/d/..."
-              value={brollUrl}
-              onChange={e => setBrollUrl(e.target.value)}
-              className="w-full h-11 px-4 rounded-xl border border-[#E4E4E0] text-sm outline-none"
-              style={{ background: '#FAFAFA' }}
-              onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
-              onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
-            />
-            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Paste a single video file or a folder. Stock B-roll will be disabled when you provide your own.</p>
-          </div>
 
           {/* Background music */}
           <div className="mb-4">

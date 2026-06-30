@@ -4,14 +4,11 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { createClient } from '@supabase/supabase-js'
-import { tryUploadToStorage, uploadToStorage } from './storage'
-import { chatCompletion, MODELS } from './openrouter'
+import { uploadToStorage } from './storage'
 import type { VideoVariant, MusicMode } from './video-pipeline'
 import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { getLibraryMusic } from './music-library'
-import { getWhooshSfx, getSfx } from './sound-effects'
-import { planScenes, type MediaFile, type ScenePlan } from './scene-planner'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 
 // Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
@@ -253,6 +250,11 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
 // file first), so calling this from multiple places (job creation, each
 // variant) only ever does the real work once per job. Every variant
 // (our-v1 through our-v6) ends up reading the same compressed file.
+//
+// The raw download is dropped once compressed, so a finished job only keeps
+// the smaller file on disk. If the compressed file already exists, skip
+// straight to it instead of re-downloading the (now-deleted) raw file for
+// nothing.
 async function getLocalCompressedSource(
   jobId: string,
   sourceUrl: string,
@@ -260,11 +262,35 @@ async function getLocalCompressedSource(
   onProgress?: ProgressCallback,
 ): Promise<string> {
   fs.mkdirSync(outDir, { recursive: true })
+  const compressedPath = path.join(outDir, 'source-compressed.mp4')
+  if (fs.existsSync(compressedPath)) return compressedPath
+
+  // Local disk for this job may have been wiped (server restart/redeploy, an
+  // old job revisited later) while the compressed copy still lives in R2 from
+  // a previous run -- pull that back down instead of re-fetching from the
+  // original Drive link, which may have gone stale or been revoked by then.
+  if (process.env.R2_PUBLIC_URL) {
+    try {
+      const r2Url = `${process.env.R2_PUBLIC_URL}/${jobId}/source-compressed.mp4`
+      await downloadFile(r2Url, compressedPath, onProgress)
+      return compressedPath
+    } catch {
+      // not in R2 yet (first run for this job) -- fall through to Drive
+      try { if (fs.existsSync(compressedPath)) fs.unlinkSync(compressedPath) } catch { /* best-effort */ }
+    }
+  }
+
   const rawLocalPath = await getSharedSourceFile(jobId, sourceUrl, outDir, onProgress)
   await onProgress?.(80, 'Compressing footage')
-  const compressedPath = await compressSourceFile(rawLocalPath, outDir)
+  const result = await compressSourceFile(rawLocalPath, outDir)
   await onProgress?.(95, 'Compressed footage ready')
-  return compressedPath
+
+  // Nothing else needs the raw file once it's compressed -- clear the
+  // in-memory cache alongside the on-disk delete so a re-run never resolves
+  // to a path that no longer exists.
+  try { if (fs.existsSync(rawLocalPath)) fs.unlinkSync(rawLocalPath) } catch { /* best-effort */ }
+  sourceFileCache.delete(jobId)
+  return result
 }
 
 const submagicSourceCache = new Map<string, Promise<string>>()
@@ -303,6 +329,12 @@ export async function prepareJobSource(
 ): Promise<{ localPath: string }> {
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir, onProgress)
+  // Back the compressed copy up to R2 right away rather than waiting for the
+  // first Submagic variant to start -- so the job survives a server restart
+  // without needing to re-pull from Drive, and every variant just reuses this
+  // cached upload (getSubmagicSourceUrl) instead of re-uploading.
+  await onProgress?.(97, 'Backing up footage to storage')
+  await getSubmagicSourceUrl(jobId, sourceUrl)
   await onProgress?.(100, 'Footage ready')
   return { localPath }
 }
@@ -447,367 +479,6 @@ async function mixBackgroundMusic(
     console.warn('[motion-renderer] music mix failed, keeping original:', (e as Error).message)
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
   }
-}
-
-// ── Custom B-roll from Google Drive ──────────────────────────────────────────
-
-function parseDriveUrl(url: string): { type: 'file' | 'folder'; id: string } | null {
-  const fileMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
-  if (fileMatch) return { type: 'file', id: fileMatch[1] }
-  const folderMatch = url.match(/\/folders\/([a-zA-Z0-9_-]+)/) ?? url.match(/[?&]id=([^&]+)/)
-  if (folderMatch) return { type: 'folder', id: folderMatch[1] }
-  return null
-}
-
-async function listBRollFiles(driveUrl: string): Promise<MediaFile[]> {
-  const parsed = parseDriveUrl(driveUrl)
-  if (!parsed) {
-    console.warn('[motion-renderer] could not parse Drive URL for B-roll:', driveUrl)
-    return []
-  }
-
-  const toUrl = (id: string) =>
-    `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`
-
-  if (parsed.type === 'file') {
-    // Single file links don't carry a mimeType from the URL alone — assume
-    // video, the overwhelmingly common case for a single B-roll link.
-    return [{ url: toUrl(parsed.id), name: parsed.id, type: 'video' }]
-  }
-
-  const apiKey = process.env.GOOGLE_DRIVE_API_KEY
-  if (!apiKey) {
-    console.warn('[motion-renderer] GOOGLE_DRIVE_API_KEY not set   cannot list Drive folder, skipping B-roll')
-    return []
-  }
-
-  try {
-    const params = new URLSearchParams({
-      q: `'${parsed.id}' in parents and (mimeType contains 'video/' or mimeType contains 'image/') and trashed=false`,
-      fields: 'files(id,name,mimeType)',
-      key: apiKey,
-    })
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, {
-      signal: AbortSignal.timeout(30_000),
-    })
-    if (!res.ok) throw new Error(`Drive API ${res.status}`)
-    const data = await res.json() as { files?: { id: string; name: string; mimeType?: string }[] }
-    const files = data.files ?? []
-    const videoCount = files.filter(f => f.mimeType?.startsWith('video/')).length
-    console.log(`[motion-renderer] found ${files.length} B-roll files in Drive folder (${videoCount} video, ${files.length - videoCount} image)`)
-    return files.map(f => ({
-      url: toUrl(f.id),
-      name: f.name,
-      type: f.mimeType?.startsWith('image/') ? 'image' as const : 'video' as const,
-    }))
-  } catch (e) {
-    console.warn('[motion-renderer] Drive folder listing failed:', (e as Error).message)
-    return []
-  }
-}
-
-// Scales insertion count with video length so a 90s video doesn't get
-// stretched to fit one giant clip, and a 20s video doesn't get carved into
-// three tiny ones. Total B-roll budget stays 20-30% regardless of how many
-// points it's split across.
-async function findBRollInsertionPoints(
-  videoPath: string,
-): Promise<{ insertAt: number; duration: number }[]> {
-  const totalDuration = await getVideoDuration(videoPath)
-  const TARGET_BROLL_PERCENT = 0.25
-  const CLIP_MIN = 0.8
-  const CLIP_MAX_ABS = 4
-
-  const maxInsertions = totalDuration < 30 ? 1 : totalDuration < 60 ? 2 : 3
-  const totalTargetDuration = totalDuration * TARGET_BROLL_PERCENT
-  const perClipTarget = Math.min(Math.max(totalTargetDuration / maxInsertions, CLIP_MIN), CLIP_MAX_ABS)
-
-  return new Promise((resolve) => {
-    let stderr = ''
-    const proc = exec(
-      `ffmpeg -i "${videoPath}" -af "silencedetect=noise=-38dB:d=0.4" -f null -`,
-      { timeout: 60_000 },
-      () => {
-        const starts: number[] = []
-        const ends: number[] = []
-        for (const m of stderr.matchAll(/silence_start: ([\d.]+)/g)) starts.push(parseFloat(m[1]))
-        for (const m of stderr.matchAll(/silence_end: ([\d.]+)/g)) ends.push(parseFloat(m[1]))
-
-        const gaps: { insertAt: number; gap: number }[] = []
-        for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
-          const gap = ends[i] - starts[i]
-          if (gap >= 0.4 && starts[i] > 2 && ends[i] < totalDuration - 2) {
-            gaps.push({ insertAt: starts[i], gap })
-          }
-        }
-
-        // Spread picks across the timeline (not just the N longest gaps,
-        // which could all cluster in one section) by taking the best gap
-        // from each of maxInsertions roughly-equal time buckets.
-        const bucketSize = totalDuration / maxInsertions
-        const points: { insertAt: number; duration: number }[] = []
-        for (let b = 0; b < maxInsertions; b++) {
-          const bucketStart = b * bucketSize
-          const bucketEnd = bucketStart + bucketSize
-          const inBucket = gaps.filter(g => g.insertAt >= bucketStart && g.insertAt < bucketEnd)
-          if (!inBucket.length) continue
-          const best = inBucket.sort((a, b2) => b2.gap - a.gap)[0]
-          points.push({ insertAt: best.insertAt, duration: Math.min(best.gap * 0.6, perClipTarget) })
-        }
-        points.sort((a, b) => a.insertAt - b.insertAt)
-
-        console.log(`[motion-renderer] found ${points.length}/${maxInsertions} B-roll insertion points (target ~25% of ${totalDuration.toFixed(1)}s, ~${perClipTarget.toFixed(1)}s each)`)
-        resolve(points)
-      }
-    )
-    proc.stderr?.on('data', d => { stderr += String(d) })
-  })
-}
-
-interface BRollPlacement {
-  mediaPath: string
-  mediaType: 'video' | 'image'
-  insertAt: number
-  duration: number
-  sfxCategory: ScenePlan['sfxCategory']
-}
-
-async function insertBRoll(
-  inputPath: string,
-  placements: BRollPlacement[],
-  outputPath: string,
-): Promise<void> {
-  if (!placements.length) return
-
-  // Resolve each unique SFX category once (cached after first render),
-  // skip 'none' entirely. Multiple placements sharing a category re-use
-  // the same input stream — ffmpeg duplicates it per consumer automatically.
-  const neededCategories = Array.from(new Set(
-    placements.map(p => p.sfxCategory).filter((c): c is Exclude<ScenePlan['sfxCategory'], 'none'> => c !== 'none')
-  ))
-  const sfxPathByCategory = new Map<string, string>()
-  for (const cat of neededCategories) {
-    const p = await getSfx(cat).catch(() => null)
-    if (p) sfxPathByCategory.set(cat, p)
-  }
-  const sfxInputPaths = Array.from(new Set(sfxPathByCategory.values()))
-  const sfxInputIndex = new Map<string, number>()
-
-  const inputFlags = [`-i "${inputPath}"`]
-  placements.forEach(p => {
-    inputFlags.push(
-      p.mediaType === 'image'
-        ? `-loop 1 -t ${p.duration.toFixed(3)} -i "${p.mediaPath}"`
-        : `-i "${p.mediaPath}"`
-    )
-  })
-  sfxInputPaths.forEach((p, i) => {
-    inputFlags.push(`-i "${p}"`)
-    sfxInputIndex.set(p, 1 + placements.length + i)
-  })
-
-  const filterParts: string[] = []
-  let currentLayer = '[0:v]'
-  const FADE_DUR = 0.25
-
-  placements.forEach((p, i) => {
-    const bIdx = i + 1
-    const brLabel = `[br${i}]`
-    const outLabel = i < placements.length - 1 ? `[ov${i}]` : '[outv]'
-    const fadeDur = Math.min(FADE_DUR, p.duration / 4)
-    const fadeOutStart = p.insertAt + p.duration - fadeDur
-
-    // Video: trim the window then shift to insertAt. Image: already exactly
-    // `duration` long via -loop/-t above, just needs the same time shift.
-    const timing = p.mediaType === 'image'
-      ? `setpts=PTS-STARTPTS+${p.insertAt.toFixed(3)}/TB`
-      : `trim=duration=${p.duration.toFixed(3)},setpts=PTS-STARTPTS+${p.insertAt.toFixed(3)}/TB`
-
-    // Cross-dissolve: alpha fade in/out on the B-roll layer itself so it
-    // blends with the main footage instead of popping in/out as a hard cut.
-    // format=yuva420p gives the layer an alpha channel for the fade to use.
-    filterParts.push(
-      `[${bIdx}:v]${timing},` +
-      `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,` +
-      `format=yuva420p,` +
-      `fade=t=in:st=${p.insertAt.toFixed(3)}:d=${fadeDur.toFixed(3)}:alpha=1,` +
-      `fade=t=out:st=${fadeOutStart.toFixed(3)}:d=${fadeDur.toFixed(3)}:alpha=1${brLabel}`
-    )
-    filterParts.push(
-      `${currentLayer}${brLabel}overlay=0:0:enable='between(t,${p.insertAt.toFixed(3)},${(p.insertAt + p.duration).toFixed(3)})'${outLabel}`
-    )
-    currentLayer = outLabel
-  })
-
-  // Per-scene content-matched SFX, delayed to land exactly as each clip appears.
-  const delayedLabels: string[] = []
-  placements.forEach((p, i) => {
-    if (p.sfxCategory === 'none') return
-    const sfxPath = sfxPathByCategory.get(p.sfxCategory)
-    const idx = sfxPath ? sfxInputIndex.get(sfxPath) : undefined
-    if (idx === undefined) return
-    const delayMs = Math.max(0, Math.round((p.insertAt - 0.1) * 1000))
-    const label = `[sfx${i}]`
-    filterParts.push(`[${idx}:a]adelay=${delayMs}:all=1,volume=0.3${label}`)
-    delayedLabels.push(label)
-  })
-
-  let audioMap = '0:a'
-  if (delayedLabels.length) {
-    const mixInputs = ['[0:a]', ...delayedLabels].join('')
-    filterParts.push(`${mixInputs}amix=inputs=${1 + delayedLabels.length}:duration=first:normalize=0[outa]`)
-    audioMap = '[outa]'
-  }
-
-  await run(
-    `ffmpeg -y ${inputFlags.join(' ')} ` +
-    `-filter_complex "${filterParts.join(';')}" ` +
-    `-map "[outv]" -map "${audioMap}" ` +
-    `-c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k -pix_fmt yuv420p -movflags +faststart "${outputPath}"`,
-    300_000
-  )
-}
-
-// AI picks the best matching file for one specific scene's sentence content
-// (not a single global pick for the whole video) — falls back to any file
-// of a different type if none of the planned type are available.
-async function pickMediaForScene(
-  files: MediaFile[],
-  mediaType: 'video' | 'image',
-  sentenceContext: string,
-): Promise<MediaFile> {
-  const matching = files.filter(f => f.type === mediaType)
-  const pool = matching.length ? matching : files
-  if (pool.length === 1) return pool[0]
-  try {
-    const list = pool.map((f, i) => `${i + 1}. ${f.name}`).join('\n')
-    const raw = await chatCompletion({
-      model: MODELS.fast,
-      messages: [{
-        role: 'user',
-        content: `A video moment follows this sentence: "${sentenceContext.slice(0, 200) || '(no clear sentence)'}"\n\nWhich file would visually reinforce this moment best? Reply with only the number.\n\n${list}`,
-      }],
-      max_tokens: 10,
-    })
-    const idx = parseInt(raw.trim()) - 1
-    if (idx >= 0 && idx < pool.length) {
-      console.log(`[motion-renderer] scene media pick: "${pool[idx].name}" for "${sentenceContext.slice(0, 60)}"`)
-      return pool[idx]
-    }
-  } catch (e) {
-    console.warn('[motion-renderer] scene media selection failed, using first match:', (e as Error).message)
-  }
-  return pool[0]
-}
-
-async function insertCustomBRoll(
-  videoPath: string,
-  brollDriveUrl: string,
-  hook: string,
-  cta: string,
-): Promise<void> {
-  console.log('[motion-renderer] inserting custom B-roll from:', brollDriveUrl)
-  const files = await listBRollFiles(brollDriveUrl)
-  if (!files.length) {
-    console.warn('[motion-renderer] no B-roll files found, skipping')
-    return
-  }
-  const hasImages = files.some(f => f.type === 'image')
-
-  const insertionPoints = await findBRollInsertionPoints(videoPath)
-  if (!insertionPoints.length) {
-    console.warn('[motion-renderer] no suitable insertion points found, skipping custom B-roll')
-    return
-  }
-
-  // Real transcript of THIS footage (post-cut) gives the scene planner actual
-  // sentence content to judge, not just the script's hook/CTA.
-  let words: { text: string; start: number; end: number }[] = []
-  try {
-    words = await transcribeLocalFile(videoPath)
-  } catch (e) {
-    console.warn('[motion-renderer] transcription for scene planning failed, using generic placement:', (e as Error).message)
-  }
-
-  const scenes = words.length
-    ? await planScenes(words, insertionPoints, hook, cta, hasImages)
-    : insertionPoints.map(p => ({ insertAt: p.insertAt, duration: p.duration, sentenceContext: '', mediaType: 'video' as const, sfxCategory: 'whoosh' as const }))
-
-  const activeScenes = scenes.filter(s => s.mediaType !== 'skip')
-  if (!activeScenes.length) {
-    console.log('[motion-renderer] scene plan chose to skip B-roll entirely for this video')
-    return
-  }
-
-  const tmpPaths: string[] = []
-  const placements: BRollPlacement[] = []
-
-  try {
-    for (const scene of activeScenes) {
-      const mediaType = scene.mediaType as 'video' | 'image'
-      const chosen = await pickMediaForScene(files, mediaType, scene.sentenceContext)
-      const ext = chosen.type === 'image' ? 'jpg' : 'mp4'
-      const tmpPath = path.join(os.tmpdir(), `broll_${Date.now()}_${placements.length}.${ext}`)
-      try {
-        await downloadFile(chosen.url, tmpPath)
-      } catch (e) {
-        console.warn(`[motion-renderer] failed to download "${chosen.name}", skipping this scene:`, (e as Error).message)
-        continue
-      }
-      tmpPaths.push(tmpPath)
-      placements.push({
-        mediaPath: tmpPath,
-        mediaType: chosen.type,
-        insertAt: scene.insertAt,
-        duration: scene.duration,
-        sfxCategory: scene.sfxCategory,
-      })
-    }
-
-    if (!placements.length) {
-      console.warn('[motion-renderer] no B-roll media could be downloaded, skipping')
-      return
-    }
-
-    const outPath = videoPath + '_broll.mp4'
-    try {
-      await insertBRoll(videoPath, placements, outPath)
-      if (fs.existsSync(outPath)) fs.renameSync(outPath, videoPath)
-    } catch (e) {
-      console.warn('[motion-renderer] B-roll insertion failed, keeping original:', (e as Error).message)
-      try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
-    }
-  } finally {
-    for (const p of tmpPaths) {
-      try { fs.unlinkSync(p) } catch { /* best-effort */ }
-    }
-  }
-}
-
-// Submagic needs a fetchable URL, not a local file, so this downloads the
-// shared source, runs our own FFmpeg custom-B-roll insertion on a dedicated
-// copy (the shared source.mp4 stays untouched for other variants), and
-// re-uploads the result to Storage. Caller should disable Submagic's own
-// magicBrolls when using this, to avoid stacking two B-roll passes.
-export async function prepareSubmagicCustomBrollSource(
-  jobId: string,
-  sourceUrl: string,
-  brollDriveUrl: string,
-  hook: string,
-  cta: string,
-): Promise<string> {
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
-  fs.mkdirSync(outDir, { recursive: true })
-  const localPath = await getSharedSourceFile(jobId, sourceUrl, outDir)
-
-  const brollPath = path.join(outDir, 'submagic-broll-source.mp4')
-  fs.copyFileSync(localPath, brollPath)
-  await insertCustomBRoll(brollPath, brollDriveUrl, hook, cta)
-
-  const publicUrl = await tryUploadToStorage(brollPath, 'submagic-broll-source.mp4', jobId)
-  try { fs.unlinkSync(brollPath) } catch { /* best-effort */ }
-  if (!publicUrl) throw new Error('Could not upload custom B-roll source for Submagic (Storage upload failed)')
-  return publicUrl
 }
 
 // ── Native karaoke captions ───────────────────────────────────────────────────
@@ -1044,7 +715,6 @@ async function pollSubmagicUntilReady(projectId: string): Promise<string> {
 export interface RenderVariantOptions {
   hook: string
   cta: string
-  brollDriveUrl?: string
   nativeCaptions?: boolean
   moodTag?: string | null
   scriptFormat?: string
@@ -1070,10 +740,10 @@ async function renderSmartCinematic(
   outDir: string,
   opts: RenderVariantOptions,
 ): Promise<void> {
-  const { hook, cta, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms, musicMode = DEFAULT_MUSIC_MODE } = opts
+  const { hook, cta, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms, musicMode = DEFAULT_MUSIC_MODE } = opts
 
   const musicStep = MUSIC_ENABLED && musicMode !== 'off' ? 1 : 0
-  const STEPS = 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
+  const STEPS = 1 + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
@@ -1098,11 +768,6 @@ async function renderSmartCinematic(
     const captionedUrl = await pollSubmagicUntilReady(projectId)
     console.log('[motion-renderer] Submagic edit done')
     await downloadFile(captionedUrl, outputPath)
-
-    if (brollDriveUrl) {
-      await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
-      await insertCustomBRoll(outputPath, brollDriveUrl, hook, cta)
-    }
 
     if (nativeCaptions) {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating karaoke captions')
@@ -1139,11 +804,6 @@ export function startSingleVariant(
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
 
-  // When custom B-roll is provided, disable Submagic's own stock B-roll to avoid stacking.
-  const effectiveOpts: RenderVariantOptions = opts.brollDriveUrl
-    ? { ...opts, submagicMagicBrolls: false }
-    : opts
-
   // Caption/motion-graphics test runs skip Submagic (no round-trip), but keep
   // the same safety timeout in case transcription, Remotion, or FFmpeg ever hangs.
   const isTestOnly = opts.captionTestOnly || opts.motionGraphicsTestOnly
@@ -1162,7 +822,7 @@ export function startSingleVariant(
       await renderMotionGraphicsTestOnly(jobId, variantId, sourceUrl, outDir, opts.hook, opts.cta, opts.moodTag, opts.scriptFormat, opts.motionGraphicsStyle, opts.musicMode)
       return
     }
-    await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, effectiveOpts)
+    await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, opts)
   }
 
   launch()

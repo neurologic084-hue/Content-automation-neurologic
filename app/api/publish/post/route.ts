@@ -5,7 +5,7 @@ import { publishPost } from '@/lib/blotato'
 import { PLATFORM_CAPS } from '@/lib/caption-platforms'
 import { uploadToStorage } from '@/lib/storage'
 
-/** If the URL is a local /renders/... path, upload it to Supabase Storage
+/** If the URL is a local /renders/... path, upload it to R2 Storage
  *  and return the public URL. Otherwise return as-is. */
 async function resolveMediaUrl(url: string): Promise<string> {
   if (!url.startsWith('/renders/')) return url

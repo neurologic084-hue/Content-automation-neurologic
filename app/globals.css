@@ -149,3 +149,14 @@ body {
 .hover-lift:hover {
   transform: translateY(-2px);
 }
+
+/* ── Native video fullscreen ── */
+/* Preview cards intentionally crop (object-cover) to fill a compact thumbnail,
+   but that same crop carries into native browser fullscreen and zooms into
+   the footage instead of showing the whole vertical frame. Letterbox with
+   black bars in fullscreen instead. */
+video:fullscreen,
+video:-webkit-full-screen {
+  object-fit: contain;
+  background: #000;
+}

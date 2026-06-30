@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant, prepareSubmagicCustomBrollSource, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl } from '@/lib/motion-renderer'
+import { startSingleVariant, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl } from '@/lib/motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   pickPremiumTemplates,
@@ -131,7 +131,6 @@ export async function POST(req: NextRequest) {
     startSingleVariant(jobId, variantId, job.source_drive_url, {
       hook: scriptRow?.hook ?? '',
       cta: scriptRow?.cta ?? '',
-      brollDriveUrl: variant.brollDriveUrl as string | undefined,
       nativeCaptions: variant.nativeCaptions as boolean | undefined,
       moodTag: scriptRow?.mood_tag ?? null,
       scriptFormat,
@@ -182,7 +181,7 @@ export async function POST(req: NextRequest) {
       // Submagic always gets the compressed, normalized copy -- never the raw
       // Drive file. Cached per job, so every Submagic variant on this job
       // shares one compression + upload pass.
-      let videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
+      const videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
       let projectId: string
       // When set, our own library music is mixed onto the finished Submagic video
       // in post (pollSubmagicUntilDone) — so v2/v3 share the v4/v5 music system.
@@ -224,22 +223,7 @@ export async function POST(req: NextRequest) {
           { profileDirective: profile?.directive, actualTranscript: actualTranscript ?? undefined },
         )
 
-        // Custom B-roll (job-level Drive footage) takes priority over Submagic's
-        // own auto-B-roll — insert it ourselves via FFmpeg and disable magicBrolls
-        // to avoid stacking two B-roll passes.
-        const brollDriveUrl = (variant as { brollDriveUrl?: string }).brollDriveUrl
-        let useMagicBrolls = smart.magicBrolls
-        if (brollDriveUrl) {
-          await supabase.from('video_jobs').update({
-            variants: (job.variants as VideoVariant[]).map((v) =>
-              v.id === variantId ? { ...v, progress: { step: 1, total: 2, label: 'Inserting custom B-roll' } } : v
-            ),
-          }).eq('id', jobId)
-          videoUrlForSubmagic = await prepareSubmagicCustomBrollSource(
-            jobId, videoUrlForSubmagic, brollDriveUrl, scriptRow?.hook ?? '', scriptRow?.cta ?? '',
-          )
-          useMagicBrolls = false
-        }
+        const useMagicBrolls = smart.magicBrolls
 
         // Submagic renders WITHOUT its own music — we add a mood-matched track
         // from our own library in post (pollSubmagicUntilDone), so v2/v3 get the

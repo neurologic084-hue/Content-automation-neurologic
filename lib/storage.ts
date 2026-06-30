@@ -1,40 +1,47 @@
-import { createClient } from '@supabase/supabase-js'
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import fs from 'fs'
 
-const BUCKET = 'renders'
+const BUCKET = process.env.R2_BUCKET!
+const PUBLIC_URL = process.env.R2_PUBLIC_URL!
 
-function serviceClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+function r2Client() {
+  return new S3Client({
+    region: 'auto',
+    endpoint: process.env.R2_ENDPOINT!,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    },
+  })
 }
 
 export async function uploadToStorage(localPath: string, fileName: string, jobId: string): Promise<string> {
-  const supabase = serviceClient()
+  const client = r2Client()
   const fileBuffer = fs.readFileSync(localPath)
   const storagePath = `${jobId}/${fileName}`
   console.log(`[storage] uploading ${storagePath} (${(fileBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
 
-  // Large files on a slow connection occasionally hit a transient "fetch failed"
+  // Large files on a slow connection occasionally hit a transient network error
   // mid-upload. Retry a few times with backoff before giving up.
   const maxAttempts = 3
   let lastError: string | undefined
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { error } = await supabase.storage
-      .from(BUCKET)
-      .upload(storagePath, fileBuffer, { contentType: 'video/mp4', upsert: true })
-
-    if (!error) {
-      const { data } = supabase.storage.from(BUCKET).getPublicUrl(storagePath)
-      console.log(`[storage] uploaded ${storagePath}: ${data.publicUrl}`)
-      return data.publicUrl
-    }
-
-    lastError = error.message
-    console.warn(`[storage] upload ${storagePath} attempt ${attempt}/${maxAttempts} failed: ${lastError}`)
-    if (attempt < maxAttempts) {
-      await new Promise((r) => setTimeout(r, attempt * 1500))
+    try {
+      await client.send(new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: storagePath,
+        Body: fileBuffer,
+        ContentType: 'video/mp4',
+      }))
+      const publicUrl = `${PUBLIC_URL}/${storagePath}`
+      console.log(`[storage] uploaded ${storagePath}: ${publicUrl}`)
+      return publicUrl
+    } catch (e) {
+      lastError = (e as Error).message
+      console.warn(`[storage] upload ${storagePath} attempt ${attempt}/${maxAttempts} failed: ${lastError}`)
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, attempt * 1500))
+      }
     }
   }
 

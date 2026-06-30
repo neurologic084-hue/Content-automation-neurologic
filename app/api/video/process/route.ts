@@ -7,7 +7,7 @@ import { prepareJobSource } from '@/lib/motion-renderer'
 const MUSIC_MODES: MusicMode[] = ['smart', 'off']
 
 export async function POST(req: NextRequest) {
-  const { scriptId, driveUrl, brollDriveUrl, musicMode } = await req.json()
+  const { scriptId, driveUrl, musicMode } = await req.json()
   const resolvedMusicMode: MusicMode = MUSIC_MODES.includes(musicMode) ? musicMode : DEFAULT_MUSIC_MODE
 
   if (!scriptId || !driveUrl) {
@@ -44,7 +44,6 @@ export async function POST(req: NextRequest) {
     error: null,
     progress: { step: 5, total: 100, label: 'Preparing footage' },
     music_mode: resolvedMusicMode,
-    ...(brollDriveUrl ? { brollDriveUrl: brollDriveUrl as string } : {}),
   }))
 
   const { data: job, error } = await supabase
@@ -99,8 +98,9 @@ export async function POST(req: NextRequest) {
         v.status === 'pending' ? { ...v, progress: null } : v
       ))
 
-      // source_drive_url stays the original Drive link -- Submagic fetches
-      // directly from it, no Storage round-trip.
+      // source_drive_url stays the original Drive link -- Submagic-bound
+      // variants resolve the actual fetchable URL via getSubmagicSourceUrl
+      // (the R2-hosted compressed copy), not this field directly.
       await supabase
         .from('video_jobs')
         .update({ variants: readyVariants })

@@ -16,6 +16,7 @@
     "music:test-mix": "node --env-file=.env.local --import tsx lib/music-library/test-mix.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1076.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
     "form-data": "^4.0.6",
