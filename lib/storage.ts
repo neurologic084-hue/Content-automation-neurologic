@@ -49,7 +49,3 @@ export async function tryUploadToStorage(localPath: string, fileName: string, jo
     return null
   }
 }
-
-export function storageFileName(variantId: string): string {
-  return `${variantId}.mp4`
-}

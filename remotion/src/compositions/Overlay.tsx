@@ -23,6 +23,8 @@ export type OverlayProps = {
   graphics: Graphic[]
   durationSec?: number
   style?: 'minimal' | 'bold'
+  width?: number
+  height?: number
 }
 
 function renderGraphic(g: Graphic, style: 'minimal' | 'bold') {

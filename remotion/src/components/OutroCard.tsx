@@ -1,6 +1,7 @@
 import React from 'react'
 import { AbsoluteFill, useCurrentFrame, interpolate } from 'remotion'
 import { brand } from '../brand'
+import { ShimmerText } from '../ShimmerText'
 
 // No solid background -- footage and audio keep playing right through the
 // outro, just like the intro's small-header phase. A cursive sign-off near
@@ -23,16 +24,10 @@ export const OutroCard: React.FC<{ cta?: string; signoff?: string }> = ({
   return (
     <AbsoluteFill>
       <AbsoluteFill style={{ justifyContent: 'flex-start', alignItems: 'center', padding: '90px 36px 0' }}>
-        <div style={{
-          opacity: signoffO,
-          transform: `translateY(${signoffY}px)`,
-          fontFamily: brand.fontDisplay,
-          fontStyle: 'italic',
-          fontSize: 56,
-          color: brand.blueLight,
-          textShadow: `0 0 24px ${brand.blue}`,
-        }}>
-          {signoff}
+        <div style={{ opacity: signoffO, transform: `translateY(${signoffY}px)` }}>
+          <ShimmerText fontSize={56} fontStyle="italic">
+            {signoff}
+          </ShimmerText>
         </div>
       </AbsoluteFill>
 

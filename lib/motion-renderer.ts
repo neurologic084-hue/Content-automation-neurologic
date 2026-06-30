@@ -1,33 +1,22 @@
-import { ensureFfmpegOnPath } from './ffmpeg-env'
 import { exec } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { createClient } from '@supabase/supabase-js'
-import { tryUploadToStorage, storageFileName } from './storage'
+import { tryUploadToStorage, uploadToStorage } from './storage'
 import { chatCompletion, MODELS } from './openrouter'
-import type { VideoVariant, MusicMode } from './video-pipeline'
-import { processWithDescript } from './descript-client'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE } from './video-pipeline'
+import type { VideoVariant } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
-import { getLibraryMusic } from './music-library'
+import { generateElevenLabsMusic } from './elevenlabs-music'
 import { getWhooshSfx, getSfx } from './sound-effects'
 import { planScenes, type MediaFile, type ScenePlan } from './scene-planner'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
-
-// Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
-// explicitly (not a bare side-effect import) so the bundler can't drop it.
-ensureFfmpegOnPath()
 
 const active = new Set<string>()
 
 const MUSIC_ENABLED = true
 
-// Cache Descript-edited URLs per job so multiple variants don't re-encode the same footage.
-// Stores either a pending Promise (first variant is running Descript) or a resolved URL.
-// Second variant arriving while the first is mid-run waits on the same Promise instead of
-// starting a duplicate Descript job.
-const descriptUrlCache = new Map<string, Promise<string> | { url: string; expiresAt: number }>()
 const sourceFileCache = new Map<string, Promise<string>>()
 
 function supabaseAdmin() {
@@ -209,92 +198,108 @@ async function getSharedSourceFile(
   }
 }
 
-interface VideoFormatInfo {
+interface VideoDimensions {
   width: number
   height: number
-  videoCodec: string
-  audioCodec: string | null
 }
 
-async function probeVideoFormat(filePath: string): Promise<VideoFormatInfo | null> {
+async function probeVideoDimensions(filePath: string): Promise<VideoDimensions> {
   return new Promise((resolve) => {
     exec(
-      `ffprobe -v error -show_entries stream=width,height,codec_name,codec_type -of json "${filePath}"`,
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json "${filePath}"`,
       { timeout: 30_000 },
       (err, stdout) => {
-        if (err) return resolve(null)
+        if (err) return resolve({ width: 1080, height: 1920 })
         try {
-          const data = JSON.parse(stdout) as { streams?: { width?: number; height?: number; codec_name?: string; codec_type?: string }[] }
-          const v = data.streams?.find(s => s.codec_type === 'video')
-          const a = data.streams?.find(s => s.codec_type === 'audio')
-          if (!v?.width || !v?.height || !v?.codec_name) return resolve(null)
-          resolve({ width: v.width, height: v.height, videoCodec: v.codec_name, audioCodec: a?.codec_name ?? null })
+          const data = JSON.parse(stdout) as { streams?: { width?: number; height?: number }[] }
+          const v = data.streams?.[0]
+          resolve(v?.width && v?.height ? { width: v.width, height: v.height } : { width: 1080, height: 1920 })
         } catch {
-          resolve(null)
+          resolve({ width: 1080, height: 1920 })
         }
       }
     )
   })
 }
 
-// Skips the re-encode entirely when the source is already 1080x1920 h264/aac —
-// re-encoding an already-correct file only adds a lossy compression pass for
-// no benefit, and every downstream step (Descript, Submagic, caption
-// burn-in, music mix) does its own re-encode anyway.
-async function prepareVerticalSourceFile(
-  inputPath: string,
-  outDir: string,
-  onProgress?: ProgressCallback,
-): Promise<string> {
-  const outputPath = path.join(outDir, 'source-vertical.mp4')
+// Compresses for file size only -- never touches resolution, aspect ratio,
+// or framing. Whatever shape the source was filmed in, it stays that shape.
+async function compressSourceFile(inputPath: string, outDir: string): Promise<string> {
+  const outputPath = path.join(outDir, 'source-compressed.mp4')
   if (fs.existsSync(outputPath)) return outputPath
 
-  await onProgress?.(80, 'Checking footage format')
-  const format = await probeVideoFormat(inputPath)
-  const alreadyCorrect = format
-    && format.width === 1080
-    && format.height === 1920
-    && format.videoCodec === 'h264'
-    && format.audioCodec === 'aac'
-
-  if (alreadyCorrect) {
-    console.log('[motion-renderer] source already 1080x1920 h264/aac — skipping re-encode')
-    fs.copyFileSync(inputPath, outputPath)
-    await onProgress?.(92, 'Footage already vertical, no re-encode needed')
-    return outputPath
-  }
-
-  console.log(`[motion-renderer] re-encoding source (format: ${format ? `${format.width}x${format.height} ${format.videoCodec}/${format.audioCodec}` : 'probe failed'})`)
-  await onProgress?.(80, 'Compressing and cropping to 9:16')
-  const tmpPath = path.join(outDir, 'source-vertical.tmp.mp4')
+  const tmpPath = path.join(outDir, 'source-compressed.tmp.mp4')
   try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch { /* best-effort */ }
 
   await run(
     `ffmpeg -y -i "${inputPath}" ` +
-    `-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" ` +
     `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
     `-c:a aac -b:a 128k -ar 48000 -movflags +faststart "${tmpPath}"`,
     600_000,
   )
 
   fs.renameSync(tmpPath, outputPath)
-  await onProgress?.(92, 'Compressed vertical source ready')
   return outputPath
 }
 
+// Ensures the shared compressed local copy exists for this job -- downloads
+// raw if needed, compresses if needed (file size only, original resolution/
+// aspect ratio untouched). Both steps are idempotent (check for an existing
+// file first), so calling this from multiple places (job creation, each
+// variant) only ever does the real work once per job. Every variant
+// (our-v1 through our-v6) ends up reading the same compressed file.
+async function getLocalCompressedSource(
+  jobId: string,
+  sourceUrl: string,
+  outDir: string,
+  onProgress?: ProgressCallback,
+): Promise<string> {
+  fs.mkdirSync(outDir, { recursive: true })
+  const rawLocalPath = await getSharedSourceFile(jobId, sourceUrl, outDir, onProgress)
+  await onProgress?.(80, 'Compressing footage')
+  const compressedPath = await compressSourceFile(rawLocalPath, outDir)
+  await onProgress?.(95, 'Compressed footage ready')
+  return compressedPath
+}
+
+const submagicSourceCache = new Map<string, Promise<string>>()
+
+// Submagic-using variants (our-v1 through our-v5) always get the compressed,
+// normalized copy uploaded to Storage -- never the raw Drive file. Cached
+// per job so every Submagic variant shares one upload. Throws rather than
+// silently falling back to the raw Drive link, since a silent fallback
+// caused real confusion before.
+export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string): Promise<string> {
+  const cached = submagicSourceCache.get(jobId)
+  if (cached) return cached
+
+  const promise = (async () => {
+    const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+    const compressedPath = await getLocalCompressedSource(jobId, rawSourceUrl, outDir)
+    return uploadToStorage(compressedPath, 'source-compressed.mp4', jobId)
+  })()
+
+  submagicSourceCache.set(jobId, promise)
+  try {
+    return await promise
+  } catch (e) {
+    submagicSourceCache.delete(jobId)
+    throw e
+  }
+}
+
+// Runs at job creation (Phase 0), before any variant is started, so the
+// compressed copy is already sitting on disk by the time you click any
+// "Start Edit" button -- v1-v6 all read this same file.
 export async function prepareJobSource(
   jobId: string,
   sourceUrl: string,
   onProgress?: ProgressCallback,
-): Promise<{ localPath: string; publicUrl: string | null }> {
+): Promise<{ localPath: string }> {
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
-  fs.mkdirSync(outDir, { recursive: true })
-  const rawLocalPath = await getSharedSourceFile(jobId, sourceUrl, outDir, onProgress)
-  const localPath = await prepareVerticalSourceFile(rawLocalPath, outDir, onProgress)
-  await onProgress?.(94, 'Uploading prepared source')
-  const publicUrl = await tryUploadToStorage(localPath, 'source.mp4', jobId)
+  const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir, onProgress)
   await onProgress?.(100, 'Footage ready')
-  return { localPath, publicUrl }
+  return { localPath }
 }
 
 async function markVariant(
@@ -302,8 +307,7 @@ async function markVariant(
   variantId: string,
   status: 'ready' | 'failed',
   downloadUrl: string | null,
-  error: string | null,
-  musicAttribution: string | null = null
+  error: string | null
 ) {
   const db = supabaseAdmin()
   const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
@@ -311,7 +315,7 @@ async function markVariant(
 
   const variants = (job.variants as VideoVariant[]).map((v) =>
     v.id === variantId
-      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null, music_attribution: musicAttribution }
+      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null }
       : v
   )
 
@@ -343,66 +347,32 @@ async function setVariantProgress(
 async function finishVariant(
   jobId: string,
   variantId: string,
-  localPath: string,
-  musicAttribution: string | null = null
+  localPath: string
 ) {
-  const storageUrl = await tryUploadToStorage(localPath, storageFileName(variantId), jobId)
-  const url = storageUrl ?? `/renders/${jobId}/${path.basename(localPath)}`
-  await markVariant(jobId, variantId, 'ready', url, null, musicAttribution)
+  const url = `/renders/${jobId}/${path.basename(localPath)}`
+  await markVariant(jobId, variantId, 'ready', url, null)
 }
 
-// Pulls a finished Submagic render back into our own storage instead of just
-// linking to Submagic's hosted URL — matches how Descript variants are
-// handled (finishVariant), and means the video survives even if Submagic
+// Pulls a finished Submagic render down to a local file instead of just
+// linking to Submagic's hosted URL, so the video survives even if Submagic
 // later expires or removes the file from their end.
 export async function retrieveAndStoreSubmagicResult(
   jobId: string,
   variantId: string,
   downloadUrl: string,
-  music: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null,
 ): Promise<string> {
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
-
-  // Add our own library music on top of the finished Submagic video, so v2/v3
-  // share the exact v4/v5 music system (mood match, best-part offset, ducking,
-  // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
-  if (music) {
-    try {
-      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart')
-      console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
-    } catch (e) {
-      console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
-    }
-  }
-
-  const storageUrl = await tryUploadToStorage(localPath, storageFileName(variantId), jobId)
-  const url = storageUrl ?? `/renders/${jobId}/${path.basename(localPath)}`
-  try { if (!storageUrl) { /* keep local file as the served copy */ } else fs.unlinkSync(localPath) } catch { /* best-effort */ }
-  return url
+  return `/renders/${jobId}/${path.basename(localPath)}`
 }
 
 function cleanTempFiles(outDir: string, variantId: string): void {
-  // descript-src-*.mp4 files are owned by processWithDescript and cleaned in its own finally block.
-  // Deleting them globally here races with other variants that may still be uploading the same file.
-  for (const suffix of ['_edited.mp4', '.mp4', '_captions.ass', '_edited_tmp.mp4', '_mx.mp4', '_dt.mp4', '_broll.mp4']) {
+  for (const suffix of ['.mp4', '_captions.ass', '_mx.mp4', '_broll.mp4', '_mg.mp4']) {
     const p = path.join(outDir, `${variantId}${suffix}`)
     try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch { /* best-effort */ }
   }
-}
-
-async function getVideoStreamDuration(filePath: string): Promise<number> {
-  return new Promise((resolve) => {
-    exec(
-      `ffprobe -v error -select_streams v:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
-      (_err, stdout) => {
-        const d = parseFloat(stdout.trim())
-        resolve(d > 0 ? d : 0)
-      }
-    )
-  })
 }
 
 // ── Background music via ElevenLabs Sound Generation ─────────────────────────
@@ -415,45 +385,28 @@ async function mixBackgroundMusic(
   hook: string,
   moodTag: string | null,
   scriptFormat?: string,
-  mode: MusicMode = DEFAULT_MUSIC_MODE,
-): Promise<string | null> {
-  if (mode === 'off') return null
+): Promise<void> {
   const duration = await getVideoDuration(videoPath)
 
-  // Smart mode: pick a mood-matched track from the creator's library. The tracks
-  // are the creator's own, so no attribution is attached (always returns null).
-  const lib = await getLibraryMusic({ hook, moodTag, scriptFormat })
-  if (!lib) {
-    console.warn('[motion-renderer] no library track available — skipping music for this render')
-    return null
+  const musicPath = await generateElevenLabsMusic(hook, moodTag, scriptFormat, duration)
+  if (!musicPath) {
+    console.warn('[motion-renderer] no suitable music found — skipping music for this render')
+    return
   }
-  const musicPath = lib.filePath
-  // Start the music at its detected best part (chorus/drop) so the strong
-  // section lands in the clip instead of the intro. 0 = from the top.
-  const startOffset = Math.max(0, lib.track.startOffset ?? 0)
-  const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
-  console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
   // Fade in over 1.5s at start, fade out in the last 1.5s
   const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
   const tmp = videoPath + '_mx.mp4'
 
   try {
-    // Music chain: loop → fade in/out → EQ-carve the vocal presence band so the
-    // music never masks speech (a -5dB dip ~2.5kHz, the consonant/intelligibility
-    // range) → set a clearly-present level (0.22) → light sidechain duck under the
-    // voice (ratio=4, threshold=0.04, 300ms release) so the music stays audible
-    // and energetic instead of being crushed under continuous talking-head speech,
-    // while the voice still sits on top. Then a final loudnorm pass masters the
-    // whole mix to -13 LUFS / -1.5 dBTP — the short-form loudness target that plays
-    // well on TikTok, Reels, and Shorts.
+    // Music chain: loop → fade in/out → set level → sidechain-compress under voice
+    // sidechaincompress ducks music when voice is present (ratio=6), releases slowly (300ms) so it breathes naturally
     await run(
-      `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
+      `ffmpeg -y -i "${videoPath}" -stream_loop -1 -i "${musicPath}" ` +
       `-filter_complex ` +
-      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
-      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.22[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.04:ratio=4:attack=5:release=300[ducked];` +
-      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-13:TP=-1.5:LRA=11[out]" ` +
+      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,volume=0.09[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=0.018:ratio=10:attack=5:release=450[ducked];` +
+      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
     )
@@ -462,30 +415,8 @@ async function mixBackgroundMusic(
   } catch (e) {
     console.warn('[motion-renderer] music mix failed, keeping original:', (e as Error).message)
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
-  }
-  // Library files are the creator's own permanent tracks — never deleted.
-  // No attribution to carry (not CC-BY), so always null.
-  return null
-}
-
-// Trim trailing audio tail from Descript exports (video stream ends before container duration).
-// Uses video stream duration via getVideoStreamDuration.
-async function trimDescriptTail(filePath: string): Promise<void> {
-  const videoSec = await getVideoStreamDuration(filePath)
-  if (!videoSec || videoSec <= 0) return
-  const containerSec = await getVideoDuration(filePath)
-  if (containerSec - videoSec < 0.2) return // nothing meaningful to trim
-  console.log(`[motion-renderer] trimming Descript tail: ${containerSec.toFixed(2)}s → ${videoSec.toFixed(2)}s`)
-  const tmp = filePath + '_dt.mp4'
-  try {
-    await run(
-      `ffmpeg -y -i "${filePath}" -t ${videoSec.toFixed(3)} -c:v copy -c:a aac -movflags +faststart "${tmp}"`,
-      120_000
-    )
-    fs.renameSync(tmp, filePath)
-  } catch (e) {
-    try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
-    throw e
+  } finally {
+    try { fs.unlinkSync(musicPath) } catch { /* best-effort */ }
   }
 }
 
@@ -853,7 +784,7 @@ export async function prepareSubmagicCustomBrollSource(
 // ── Native karaoke captions ───────────────────────────────────────────────────
 // Transcribes the (already-cut) video with ElevenLabs Scribe, generates a tone-
 // aware ASS subtitle file, and burns it into the video with FFmpeg. This is an
-// alternative to Submagic/Descript captions for on-device caption control.
+// alternative to Submagic's own captions for on-device caption control.
 
 async function addNativeCaptions(
   videoPath: string,
@@ -920,14 +851,15 @@ async function renderMotionGraphicsOverlay(
   graphics: MotionGraphic[],
   durationSec: number,
   style: 'minimal' | 'bold',
+  dimensions: VideoDimensions,
 ): Promise<string> {
   const manifestPath = path.join(outDir, `${variantId}_graphics.json`)
-  fs.writeFileSync(manifestPath, JSON.stringify({ graphics, durationSec, style }))
+  fs.writeFileSync(manifestPath, JSON.stringify({ graphics, durationSec, style, ...dimensions }))
 
   const overlayPath = path.join(outDir, `${variantId}_overlay.mov`)
   try {
     await run(
-      `cd "${REMOTION_DIR}" && npx remotion render Overlay "${overlayPath}" ` +
+      `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx Overlay "${overlayPath}" ` +
       `--props="${manifestPath}" --codec=prores --prores-profile=4444 ` +
       `--image-format=png --pixel-format=yuva444p10le`,
       600_000,
@@ -970,10 +902,11 @@ async function addMotionGraphics(
 
   const transcriptEnd = words[words.length - 1]?.end
   const duration = transcriptEnd && transcriptEnd > 0 ? transcriptEnd : await getVideoDuration(videoPath)
+  const dimensions = await probeVideoDimensions(videoPath)
 
   let overlayPath: string | null = null
   try {
-    overlayPath = await renderMotionGraphicsOverlay(outDir, variantId, graphics, duration, style)
+    overlayPath = await renderMotionGraphicsOverlay(outDir, variantId, graphics, duration, style, dimensions)
     const tmp = videoPath + '_mg.mp4'
     await run(
       `ffmpeg -y -i "${videoPath}" -i "${overlayPath}" ` +
@@ -995,8 +928,8 @@ async function addMotionGraphics(
 }
 
 // Caption-only test path: downloads the raw source footage and burns in
-// captions directly — no Descript, no smart-cut. For iterating on caption
-// styles without spending Descript AI credits on every test run.
+// captions directly — no Submagic. For iterating on caption styles without
+// spending a Submagic job on every test run.
 async function renderCaptionTestOnly(
   jobId: string,
   variantId: string,
@@ -1023,6 +956,39 @@ async function renderCaptionTestOnly(
   }
 }
 
+// Motion-graphics-only test path: downloads the raw source footage and runs
+// the Remotion overlay directly on it — no Submagic. For iterating on
+// graphics/styles without spending a Submagic job on every test run.
+async function renderMotionGraphicsTestOnly(
+  jobId: string,
+  variantId: string,
+  sourceUrl: string,
+  outDir: string,
+  hook: string,
+  cta: string,
+  moodTag: string | null | undefined,
+  scriptFormat: string | undefined,
+  motionGraphicsStyle: 'minimal' | 'bold' | undefined,
+): Promise<void> {
+  const STEPS = 2
+  try {
+    cleanTempFiles(outDir, variantId)
+    const outputPath = path.join(outDir, `${variantId}.mp4`)
+
+    await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
+    const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
+    fs.copyFileSync(compressedPath, outputPath)
+
+    await setVariantProgress(jobId, variantId, 2, STEPS, 'Adding brand motion graphics')
+    await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
+
+    console.log('[motion-renderer] motion graphics test output ready')
+    await finishVariant(jobId, variantId, outputPath)
+  } catch (e) {
+    await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
+  }
+}
+
 // Polls a Submagic project to completion and returns its download URL. Used by
 // the submagicCutOnly path below, which needs to await the result inline
 // (unlike the separate fire-and-forget poll loop the plain Submagic variants
@@ -1043,26 +1009,24 @@ async function pollSubmagicUntilReady(projectId: string): Promise<string> {
 export interface RenderVariantOptions {
   hook: string
   cta: string
-  descriptBroll?: boolean
-  descriptCaptions?: boolean
   brollDriveUrl?: string
   nativeCaptions?: boolean
   moodTag?: string | null
   scriptFormat?: string
   captionTestOnly?: boolean
+  motionGraphicsTestOnly?: boolean  // skip Submagic entirely; raw footage + Remotion graphics only
   motionGraphics?: boolean
   motionGraphicsStyle?: 'minimal' | 'bold'
-  submagicCutOnly?: boolean        // skip Descript; Submagic handles cut/clean/captions/B-roll instead
-  submagicTemplateName?: string    // premium caption template for the submagicCutOnly path
+  submagicTemplateName?: string    // premium caption template
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
-  musicMode?: MusicMode            // per-render music choice (source / off); defaults to 'auto'
 }
 
-// Main pipeline:
+// Main pipeline (no Descript anywhere in this app):
 //   our-v1/v2/v3: handled entirely by the API route's Submagic branch (tool: 'submagic')
-//   our-v4/v5 (submagicCutOnly): Submagic for cut + clean + captions only, then Remotion graphics on top
-//   Descript path: classic edit pass, optional custom B-roll, optional native captions/motion graphics/music
+//   our-v4/v5 (this function): Submagic for cut + clean + captions + B-roll, then Remotion
+//     graphics on top -- the same transcribe -> plan -> render (ProRes 4444 alpha) -> composite
+//     pattern as OVRHAUL's content engine.
 async function renderSmartCinematic(
   jobId: string,
   variantId: string,
@@ -1070,97 +1034,33 @@ async function renderSmartCinematic(
   outDir: string,
   opts: RenderVariantOptions,
 ): Promise<void> {
-  const { hook, cta, descriptBroll, descriptCaptions, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicCutOnly, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms, musicMode = DEFAULT_MUSIC_MODE } = opts
+  const { hook, cta, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms } = opts
 
-  const musicStep = MUSIC_ENABLED && musicMode !== 'off' ? 1 : 0
-  const STEPS = submagicCutOnly
-    ? 1 + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
-    : 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
+  const STEPS = 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
     const outputPath = path.join(outDir, `${variantId}.mp4`)
 
-    if (submagicCutOnly) {
-      // TEMP TEST ESCAPE HATCH (do not push): OLYMPUS_SKIP_SUBMAGIC=true skips the
-      // Submagic cut/caption pass (e.g. when out of Submagic credits) and renders
-      // the edit variant on the raw prepared footage — motion graphics + music
-      // still apply, no captions. Lets Jun test the Remotion + music layer free.
-      if (process.env.OLYMPUS_SKIP_SUBMAGIC === 'true') {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Preparing footage (Submagic skipped)')
-        console.log('[motion-renderer] OLYMPUS_SKIP_SUBMAGIC=true — skipping Submagic, using raw footage (no captions)')
-        await downloadFile(sourceUrl, outputPath)
-      } else {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
-        const projectId = await submitSubmagicJob(sourceUrl, {
-          title: `${variantId}-${jobId.slice(0, 8)}`,
-          templateName: submagicTemplateName,
-          magicBrolls: submagicMagicBrolls ?? false,
-          magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
-          magicZooms: submagicMagicZooms ?? false,
-          // Conventional default. NOTE: requires a Submagic plan tier that includes
-          // Clean Audio ("Clean audio requires a higher plan") — renders fail otherwise.
-          cleanAudio: true,
-          removeBadTakes: true,
-          removeSilencePace: 'natural',
-        })
-        const captionedUrl = await pollSubmagicUntilReady(projectId)
-        console.log('[motion-renderer] Submagic cut-only edit done')
-        await downloadFile(captionedUrl, outputPath)
-      }
-
-      if (nativeCaptions) {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating karaoke captions')
-        await addNativeCaptions(outputPath, moodTag ?? null, scriptFormat)
-      }
-
-      if (motionGraphics) {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding brand motion graphics')
-        await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
-      }
-
-      let musicCredit: string | null = null
-      if (MUSIC_ENABLED && musicMode !== 'off') {
-        await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
-        musicCredit = await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
-      }
-
-      console.log('[motion-renderer] Submagic cut-only output ready')
-      await finishVariant(jobId, variantId, outputPath, musicCredit)
-      return
-    }
-
-    // Cache key includes Descript options so different B-roll/caption combos
-    // don't collide. Promise stored while running so concurrent variants wait
-    // instead of launching duplicates.
-    const cacheKey = `${jobId}:${descriptBroll ? 'b' : ''}${descriptCaptions ? 'c' : ''}`
-    const existing = descriptUrlCache.get(cacheKey)
-    let editedUrl: string
-
-    await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Descript')
-
-    if (existing instanceof Promise) {
-      console.log(`[motion-renderer] waiting for in-progress Descript edit (${cacheKey})`)
-      editedUrl = await existing
-    } else if (existing && existing.expiresAt > Date.now()) {
-      console.log(`[motion-renderer] reusing cached Descript URL (${cacheKey})`)
-      editedUrl = existing.url
-    } else {
-      const projectName = `cinematic-${jobId.slice(0, 8)}`
-      const promise = processWithDescript(sourceUrl, projectName, { broll: descriptBroll, captions: descriptCaptions })
-      descriptUrlCache.set(cacheKey, promise)
-      try {
-        editedUrl = await promise
-        descriptUrlCache.set(cacheKey, { url: editedUrl, expiresAt: Date.now() + 2 * 60 * 60 * 1000 })
-        console.log(`[motion-renderer] Descript done, URL cached (${cacheKey})`)
-      } catch (e) {
-        descriptUrlCache.delete(cacheKey)
-        throw e
-      }
-    }
-
-    await downloadFile(editedUrl, outputPath)
-    await trimDescriptTail(outputPath)
+    await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
+    const submagicSourceUrl = await getSubmagicSourceUrl(jobId, sourceUrl)
+    const projectId = await submitSubmagicJob(submagicSourceUrl, {
+      title: `${variantId}-${jobId.slice(0, 8)}`,
+      templateName: submagicTemplateName,
+      magicBrolls: submagicMagicBrolls ?? false,
+      magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
+      magicZooms: submagicMagicZooms ?? false,
+      // cleanAudio requires a Submagic plan tier this account doesn't have yet
+      // ("Clean audio requires a higher plan") -- confirmed by a live test
+      // failing on this exact validation error. Re-enable once upgraded:
+      // cleanAudio: true,
+      cleanAudio: false,
+      removeBadTakes: true,
+      removeSilencePace: 'natural',
+    })
+    const captionedUrl = await pollSubmagicUntilReady(projectId)
+    console.log('[motion-renderer] Submagic edit done')
+    await downloadFile(captionedUrl, outputPath)
 
     if (brollDriveUrl) {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Inserting custom B-roll')
@@ -1177,13 +1077,13 @@ async function renderSmartCinematic(
       await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
     }
 
-    let musicCredit: string | null = null
-    if (MUSIC_ENABLED && musicMode !== 'off') {
+    if (MUSIC_ENABLED) {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
-      musicCredit = await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
     }
+
     console.log('[motion-renderer] output ready')
-    await finishVariant(jobId, variantId, outputPath, musicCredit)
+    await finishVariant(jobId, variantId, outputPath)
   } catch (e) {
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
   }
@@ -1202,14 +1102,15 @@ export function startSingleVariant(
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
 
-  // When custom B-roll is provided, disable stock B-roll from Descript to avoid stacking.
+  // When custom B-roll is provided, disable Submagic's own stock B-roll to avoid stacking.
   const effectiveOpts: RenderVariantOptions = opts.brollDriveUrl
-    ? { ...opts, descriptBroll: false }
+    ? { ...opts, submagicMagicBrolls: false }
     : opts
 
-  // Caption test runs in seconds (no Descript round-trip), but keep the same
-  // safety timeout in case transcription or FFmpeg ever hangs.
-  const TIMEOUT_MS = opts.captionTestOnly ? 5 * 60 * 1000 : 30 * 60 * 1000
+  // Caption/motion-graphics test runs skip Submagic (no round-trip), but keep
+  // the same safety timeout in case transcription, Remotion, or FFmpeg ever hangs.
+  const isTestOnly = opts.captionTestOnly || opts.motionGraphicsTestOnly
+  const TIMEOUT_MS = isTestOnly ? 5 * 60 * 1000 : 30 * 60 * 1000
   const timeoutId = setTimeout(() => {
     console.error(`[motion-renderer] variant ${variantId} timed out`)
     markVariant(jobId, variantId, 'failed', null, 'Render timed out').catch(() => {})
@@ -1218,6 +1119,10 @@ export function startSingleVariant(
   const launch = async () => {
     if (opts.captionTestOnly) {
       await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, opts.moodTag, opts.scriptFormat)
+      return
+    }
+    if (opts.motionGraphicsTestOnly) {
+      await renderMotionGraphicsTestOnly(jobId, variantId, sourceUrl, outDir, opts.hook, opts.cta, opts.moodTag, opts.scriptFormat, opts.motionGraphicsStyle)
       return
     }
     await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, effectiveOpts)

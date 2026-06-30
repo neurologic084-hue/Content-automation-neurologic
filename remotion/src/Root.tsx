@@ -21,8 +21,11 @@ const RemotionRoot: React.FC = () => (
         return {
           durationInFrames: Math.max(30, Math.round(secs * 30)),
           fps: 30,
-          width: 1080,
-          height: 1920,
+          // Matches whatever shape the source footage actually is -- the base
+          // video is never cropped to a fixed aspect ratio anymore, so the
+          // overlay has to follow it instead of assuming vertical.
+          width: props.width ?? 1080,
+          height: props.height ?? 1920,
         }
       }}
     />
