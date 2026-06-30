@@ -5,8 +5,8 @@ import ffmpegStatic from 'ffmpeg-static'
 import ffprobeStatic from 'ffprobe-static'
 
 // ── ffmpeg PATH fallback ──────────────────────────────────────────────────────
-// The render pipeline (motion-renderer.ts, smart-cut.ts) invokes bare `ffmpeg`
-// and `ffprobe` via exec, assuming they're on the system PATH. That holds in
+// The render pipeline (motion-renderer.ts) invokes bare `ffmpeg` and `ffprobe`
+// via exec, assuming they're on the system PATH. That holds in
 // production / on machines with a system install, but not on a dev machine that
 // never installed ffmpeg. Since the project bundles ffmpeg-static +
 // ffprobe-static, we APPEND their directories to PATH as a fallback (system
