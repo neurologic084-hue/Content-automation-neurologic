@@ -359,11 +359,24 @@ export async function retrieveAndStoreSubmagicResult(
   jobId: string,
   variantId: string,
   downloadUrl: string,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null,
 ): Promise<string> {
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
+
+  // Add our own library music on top of the finished Submagic video, so v2/v3
+  // share the exact v4/v5 music system (mood match, best-part offset, ducking,
+  // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
+  if (music) {
+    try {
+      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart')
+      console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
+    } catch (e) {
+      console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
+    }
+  }
 
   const storageUrl = await tryUploadToStorage(localPath, storageFileName(variantId), jobId)
   const url = storageUrl ?? `/renders/${jobId}/${path.basename(localPath)}`
@@ -428,18 +441,18 @@ async function mixBackgroundMusic(
   try {
     // Music chain: loop → fade in/out → EQ-carve the vocal presence band so the
     // music never masks speech (a -5dB dip ~2.5kHz, the consonant/intelligibility
-    // range) → set level ~18dB under voice (0.12 ≈ -18dBFS, the 15-20dB-under-
-    // voice sweet spot for short-form) → sidechain-compress under voice (ratio=10,
-    // 450ms release so it breathes in pauses). Then a final loudnorm pass masters
-    // the whole mix to -13 LUFS / -1.5 dBTP — a touch hotter than the -14 universal
-    // target (nudged up so it doesn't feel soft) but still safe across TikTok,
-    // Reels, and Shorts without triggering their limiters.
+    // range) → set a clearly-present level (0.22) → light sidechain duck under the
+    // voice (ratio=4, threshold=0.04, 300ms release) so the music stays audible
+    // and energetic instead of being crushed under continuous talking-head speech,
+    // while the voice still sits on top. Then a final loudnorm pass masters the
+    // whole mix to -13 LUFS / -1.5 dBTP — the short-form loudness target that plays
+    // well on TikTok, Reels, and Shorts.
     await run(
       `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
       `-filter_complex ` +
       `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
-      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.12[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.018:ratio=10:attack=5:release=450[ducked];` +
+      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.22[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=0.04:ratio=4:attack=5:release=300[ducked];` +
       `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-13:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
@@ -1069,22 +1082,32 @@ async function renderSmartCinematic(
     const outputPath = path.join(outDir, `${variantId}.mp4`)
 
     if (submagicCutOnly) {
-      await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
-      const projectId = await submitSubmagicJob(sourceUrl, {
-        title: `${variantId}-${jobId.slice(0, 8)}`,
-        templateName: submagicTemplateName,
-        magicBrolls: submagicMagicBrolls ?? false,
-        magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
-        magicZooms: submagicMagicZooms ?? false,
-        // Conventional default. NOTE: requires a Submagic plan tier that includes
-        // Clean Audio ("Clean audio requires a higher plan") — renders fail otherwise.
-        cleanAudio: true,
-        removeBadTakes: true,
-        removeSilencePace: 'natural',
-      })
-      const captionedUrl = await pollSubmagicUntilReady(projectId)
-      console.log('[motion-renderer] Submagic cut-only edit done')
-      await downloadFile(captionedUrl, outputPath)
+      // TEMP TEST ESCAPE HATCH (do not push): OLYMPUS_SKIP_SUBMAGIC=true skips the
+      // Submagic cut/caption pass (e.g. when out of Submagic credits) and renders
+      // the edit variant on the raw prepared footage — motion graphics + music
+      // still apply, no captions. Lets Jun test the Remotion + music layer free.
+      if (process.env.OLYMPUS_SKIP_SUBMAGIC === 'true') {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Preparing footage (Submagic skipped)')
+        console.log('[motion-renderer] OLYMPUS_SKIP_SUBMAGIC=true — skipping Submagic, using raw footage (no captions)')
+        await downloadFile(sourceUrl, outputPath)
+      } else {
+        await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
+        const projectId = await submitSubmagicJob(sourceUrl, {
+          title: `${variantId}-${jobId.slice(0, 8)}`,
+          templateName: submagicTemplateName,
+          magicBrolls: submagicMagicBrolls ?? false,
+          magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
+          magicZooms: submagicMagicZooms ?? false,
+          // Conventional default. NOTE: requires a Submagic plan tier that includes
+          // Clean Audio ("Clean audio requires a higher plan") — renders fail otherwise.
+          cleanAudio: true,
+          removeBadTakes: true,
+          removeSilencePace: 'natural',
+        })
+        const captionedUrl = await pollSubmagicUntilReady(projectId)
+        console.log('[motion-renderer] Submagic cut-only edit done')
+        await downloadFile(captionedUrl, outputPath)
+      }
 
       if (nativeCaptions) {
         await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating karaoke captions')

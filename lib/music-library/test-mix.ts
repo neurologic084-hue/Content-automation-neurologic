@@ -86,8 +86,8 @@ async function main() {
     `"${FFMPEG}" -y -i "${input}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
     `-filter_complex ` +
     `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
-    `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.12[bgfade];` +
-    `[bgfade][0:a]sidechaincompress=threshold=0.018:ratio=10:attack=5:release=450[ducked];` +
+    `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.22[bgfade];` +
+    `[bgfade][0:a]sidechaincompress=threshold=0.04:ratio=4:attack=5:release=300[ducked];` +
     `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-13:TP=-1.5:LRA=11[out]" ` +
     `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${out}"`
 
