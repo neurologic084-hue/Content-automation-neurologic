@@ -10,6 +10,8 @@
     "probe:submagic": "node scripts/submagic-contract-probe.mjs",
     "music:ingest": "node --import tsx lib/music-library/ingest-local.ts",
     "music:analyze": "node --import tsx lib/music-library/analyze-sections.ts",
+    "music:trim": "node --import tsx lib/music-library/trim-snippets.ts",
+    "music:upload": "node --env-file=.env.local --import tsx lib/music-library/upload-supabase.ts",
     "music:preview": "node --env-file=.env.local --import tsx lib/music-library/preview.ts",
     "music:test-mix": "node --env-file=.env.local --import tsx lib/music-library/test-mix.ts"
   },
