@@ -1,3 +1,4 @@
+import { ensureFfmpegOnPath } from './ffmpeg-env'
 import { exec } from 'child_process'
 import path from 'path'
 import fs from 'fs'
@@ -5,13 +6,17 @@ import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { tryUploadToStorage, uploadToStorage } from './storage'
 import { chatCompletion, MODELS } from './openrouter'
-import type { VideoVariant } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob } from './video-pipeline'
+import type { VideoVariant, MusicMode } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
-import { generateElevenLabsMusic } from './elevenlabs-music'
+import { getLibraryMusic } from './music-library'
 import { getWhooshSfx, getSfx } from './sound-effects'
 import { planScenes, type MediaFile, type ScenePlan } from './scene-planner'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
+
+// Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
+// explicitly (not a bare side-effect import) so the bundler can't drop it.
+ensureFfmpegOnPath()
 
 const active = new Set<string>()
 
@@ -360,11 +365,25 @@ export async function retrieveAndStoreSubmagicResult(
   jobId: string,
   variantId: string,
   downloadUrl: string,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null,
 ): Promise<string> {
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
+
+  // Add our own library music on top of the finished Submagic video, so v2/v3
+  // share the exact v4/v5 music system (mood match, best-part offset, ducking,
+  // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
+  if (music) {
+    try {
+      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart')
+      console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
+    } catch (e) {
+      console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
+    }
+  }
+
   return `/renders/${jobId}/${path.basename(localPath)}`
 }
 
@@ -375,38 +394,50 @@ function cleanTempFiles(outDir: string, variantId: string): void {
   }
 }
 
-// ── Background music via ElevenLabs Sound Generation ─────────────────────────
+// ── Background music from the curated library ────────────────────────────────
 
-// Generate a calm, short, loopable music bed with ElevenLabs and mix it very
-// quietly under speech. It is intentionally constrained away from rock/electric/
-// EDM so most talking-head clips stay calm and voice-first.
+// Picks a mood-matched track from the creator's own library, starts it at the
+// detected best part (chorus/drop), and mixes it under the voice: EQ-carve the
+// vocal band, light sidechain duck so the music stays present, then master the
+// whole thing to -13 LUFS / -1.5 dBTP (short-form loudness). mode 'off' = no
+// music. Library files are the creator's own and are never deleted.
 async function mixBackgroundMusic(
   videoPath: string,
   hook: string,
   moodTag: string | null,
   scriptFormat?: string,
+  mode: MusicMode = DEFAULT_MUSIC_MODE,
 ): Promise<void> {
+  if (mode === 'off') return
   const duration = await getVideoDuration(videoPath)
 
-  const musicPath = await generateElevenLabsMusic(hook, moodTag, scriptFormat, duration)
-  if (!musicPath) {
-    console.warn('[motion-renderer] no suitable music found — skipping music for this render')
+  const lib = await getLibraryMusic({ hook, moodTag, scriptFormat })
+  if (!lib) {
+    console.warn('[motion-renderer] no library track available — skipping music for this render')
     return
   }
+  const musicPath = lib.filePath
+  // Start the music at its detected best part (chorus/drop). 0 = from the top.
+  const startOffset = Math.max(0, lib.track.startOffset ?? 0)
+  const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
+  console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
   // Fade in over 1.5s at start, fade out in the last 1.5s
   const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
   const tmp = videoPath + '_mx.mp4'
 
   try {
-    // Music chain: loop → fade in/out → set level → sidechain-compress under voice
-    // sidechaincompress ducks music when voice is present (ratio=6), releases slowly (300ms) so it breathes naturally
+    // loop → fade in/out → EQ-carve the vocal presence band (-5dB ~2.5kHz so
+    // music never masks speech) → present level (0.22) → light sidechain duck
+    // (ratio 4) so music stays audible under continuous speech → master to
+    // -13 LUFS / -1.5 dBTP.
     await run(
-      `ffmpeg -y -i "${videoPath}" -stream_loop -1 -i "${musicPath}" ` +
+      `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
       `-filter_complex ` +
-      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,volume=0.09[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.018:ratio=10:attack=5:release=450[ducked];` +
-      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0[out]" ` +
+      `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
+      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.22[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=0.04:ratio=4:attack=5:release=300[ducked];` +
+      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-13:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
     )
@@ -415,8 +446,6 @@ async function mixBackgroundMusic(
   } catch (e) {
     console.warn('[motion-renderer] music mix failed, keeping original:', (e as Error).message)
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
-  } finally {
-    try { fs.unlinkSync(musicPath) } catch { /* best-effort */ }
   }
 }
 
@@ -969,8 +998,9 @@ async function renderMotionGraphicsTestOnly(
   moodTag: string | null | undefined,
   scriptFormat: string | undefined,
   motionGraphicsStyle: 'minimal' | 'bold' | undefined,
+  musicMode: MusicMode = DEFAULT_MUSIC_MODE,
 ): Promise<void> {
-  const STEPS = 2
+  const STEPS = 2 + (musicMode !== 'off' ? 1 : 0)
   try {
     cleanTempFiles(outDir, variantId)
     const outputPath = path.join(outDir, `${variantId}.mp4`)
@@ -981,6 +1011,11 @@ async function renderMotionGraphicsTestOnly(
 
     await setVariantProgress(jobId, variantId, 2, STEPS, 'Adding brand motion graphics')
     await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
+
+    if (musicMode !== 'off') {
+      await setVariantProgress(jobId, variantId, 3, STEPS, 'Adding background music')
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
+    }
 
     console.log('[motion-renderer] motion graphics test output ready')
     await finishVariant(jobId, variantId, outputPath)
@@ -1020,6 +1055,7 @@ export interface RenderVariantOptions {
   submagicTemplateName?: string    // premium caption template
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
+  musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
 }
 
 // Main pipeline (no Descript anywhere in this app):
@@ -1034,9 +1070,10 @@ async function renderSmartCinematic(
   outDir: string,
   opts: RenderVariantOptions,
 ): Promise<void> {
-  const { hook, cta, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms } = opts
+  const { hook, cta, brollDriveUrl, nativeCaptions, moodTag, scriptFormat, motionGraphics, motionGraphicsStyle, submagicTemplateName, submagicMagicBrolls, submagicMagicZooms, musicMode = DEFAULT_MUSIC_MODE } = opts
 
-  const STEPS = 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + (MUSIC_ENABLED ? 1 : 0)
+  const musicStep = MUSIC_ENABLED && musicMode !== 'off' ? 1 : 0
+  const STEPS = 1 + (brollDriveUrl ? 1 : 0) + (nativeCaptions ? 1 : 0) + (motionGraphics ? 1 : 0) + musicStep
   let step = 1
   try {
     cleanTempFiles(outDir, variantId)
@@ -1077,9 +1114,9 @@ async function renderSmartCinematic(
       await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
     }
 
-    if (MUSIC_ENABLED) {
-      await setVariantProgress(jobId, variantId, step++, STEPS, 'Generating subtle music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat)
+    if (MUSIC_ENABLED && musicMode !== 'off') {
+      await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding background music')
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
     }
 
     console.log('[motion-renderer] output ready')
@@ -1122,7 +1159,7 @@ export function startSingleVariant(
       return
     }
     if (opts.motionGraphicsTestOnly) {
-      await renderMotionGraphicsTestOnly(jobId, variantId, sourceUrl, outDir, opts.hook, opts.cta, opts.moodTag, opts.scriptFormat, opts.motionGraphicsStyle)
+      await renderMotionGraphicsTestOnly(jobId, variantId, sourceUrl, outDir, opts.hook, opts.cta, opts.moodTag, opts.scriptFormat, opts.motionGraphicsStyle, opts.musicMode)
       return
     }
     await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, effectiveOpts)
