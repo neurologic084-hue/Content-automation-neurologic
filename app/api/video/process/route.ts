@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { VARIANT_DEFINITIONS, extractDriveFileId, verifyDriveFile } from '@/lib/video-pipeline'
-import type { VideoVariant } from '@/lib/video-pipeline'
+import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, verifyDriveFile } from '@/lib/video-pipeline'
+import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 import { prepareJobSource } from '@/lib/motion-renderer'
 
+const MUSIC_MODES: MusicMode[] = ['smart', 'off']
+
 export async function POST(req: NextRequest) {
-  const { scriptId, driveUrl, brollDriveUrl } = await req.json()
+  const { scriptId, driveUrl, brollDriveUrl, musicMode } = await req.json()
+  const resolvedMusicMode: MusicMode = MUSIC_MODES.includes(musicMode) ? musicMode : DEFAULT_MUSIC_MODE
 
   if (!scriptId || !driveUrl) {
     return NextResponse.json({ error: 'Missing scriptId or driveUrl.' }, { status: 400 })
@@ -40,6 +43,7 @@ export async function POST(req: NextRequest) {
     duration_seconds: null,
     error: null,
     progress: { step: 5, total: 100, label: 'Preparing footage' },
+    music_mode: resolvedMusicMode,
     ...(brollDriveUrl ? { brollDriveUrl: brollDriveUrl as string } : {}),
   }))
 

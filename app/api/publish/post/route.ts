@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { publishPost } from '@/lib/blotato'
+import { PLATFORM_CAPS } from '@/lib/caption-platforms'
 import { uploadToStorage } from '@/lib/storage'
 
 /** If the URL is a local /renders/... path, upload it to Supabase Storage
@@ -43,6 +44,32 @@ export async function POST(req: NextRequest) {
   const fallbackCaption = Object.values(captions).find(c => c?.trim()) ?? ''
 
   const supabase = await createClient()
+
+  // CC-BY attribution: if this variant used a library track that legally requires
+  // a credit, append it to every caption so the license is satisfied on the post.
+  // Without this, a CC-BY track on a public post is copyright infringement.
+  let musicCredit: string | null = null
+  if (videoJobId && variantId) {
+    const { data: vj } = await supabase.from('video_jobs').select('variants').eq('id', videoJobId).single()
+    const variant = (vj?.variants as { id: string; music_attribution?: string | null }[] | undefined)
+      ?.find(v => v.id === variantId)
+    musicCredit = variant?.music_attribution ?? null
+  }
+  // Append the credit, but respect each platform's caption cap. The credit is a
+  // legal requirement, so if the combined text would overflow (TikTok's 140 is
+  // the tight one), we trim the CAPTION to make room and keep the credit intact
+  // rather than dropping it.
+  const withCredit = (text: string, platform: string): string => {
+    if (!musicCredit || text.includes(musicCredit)) return text
+    const sep = '\n\n'
+    const cap = (PLATFORM_CAPS as Record<string, { max: number }>)[platform]?.max
+    const full = `${text}${sep}${musicCredit}`
+    if (!cap || full.length <= cap) return full
+    const room = cap - sep.length - musicCredit.length
+    // If the credit alone won't fit the cap, post the credit by itself (legal
+    // requirement wins over caption copy); otherwise trim the caption to fit.
+    return room <= 0 ? musicCredit.slice(0, cap) : `${text.slice(0, room).trimEnd()}${sep}${musicCredit}`
+  }
 
   // Insert the job row first, before the upload, so a failed upload still leaves a
   // traceable record instead of vanishing with just a transient error response.
@@ -91,7 +118,7 @@ export async function POST(req: NextRequest) {
       return publishPost({
         accountId: acc.id,
         platform: acc.platform,
-        text: captionText,
+        text: withCredit(captionText, platform),
         mediaUrls: [absoluteUrl],
         scheduledAt,
         youtubeTitle,

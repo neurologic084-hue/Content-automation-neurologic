@@ -1,6 +1,15 @@
 import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
 
+// Per-render background-music choice, picked in the video studio and stored on
+// each variant. 'smart' = pick a mood-matched track from the curated library
+// (with a safe neutral fallback); 'off' = no music. On the edit path (v4/v5)
+// 'smart' uses our library; Submagic variants use their own music, so for them
+// 'smart' just means "music on" and 'off' means "music off".
+export type MusicMode = 'smart' | 'off'
+
+export const DEFAULT_MUSIC_MODE: MusicMode = 'smart'
+
 export interface SubmagicPreset {
   // Fully autonomous mode   Submagic handles everything (music, B-roll, cuts, style)
   aiEditTemplate?: 'kelly' | 'karl' | 'ella'
@@ -40,6 +49,13 @@ export interface VideoVariant extends VideoVariantDef {
   duration_seconds: number | null
   error: string | null
   progress?: { step: number; total: number; label: string } | null
+  // CC-BY credit line for the background track used, when the chosen library
+  // track requires attribution. The publish flow appends it to the post so the
+  // license is satisfied. null when no credit is needed.
+  music_attribution?: string | null
+  // Per-render music choice for this job (same for every variant). Read by the
+  // render path to decide source / whether to add music at all.
+  music_mode?: MusicMode
 }
 
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
@@ -192,6 +208,8 @@ interface SmartSubmagicSettings {
 // removal, and audio cleanup are core quality bars, not stylistic choices.
 export const SUBMAGIC_ALWAYS_ON = {
   removeBadTakes: true,
+  // Conventional default. NOTE: requires a Submagic plan tier that includes Clean
+  // Audio ("Clean audio requires a higher plan") — renders fail otherwise.
   cleanAudio: true,
   magicZooms: true,
 } as const

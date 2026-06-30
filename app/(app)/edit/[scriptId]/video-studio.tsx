@@ -4,7 +4,12 @@ import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
-import type { VideoVariant } from '@/lib/video-pipeline'
+import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
+
+const MUSIC_OPTIONS: { value: MusicMode; label: string; hint: string }[] = [
+  { value: 'smart', label: 'Smart',    hint: 'Mood-matched track from the library' },
+  { value: 'off',   label: 'No music', hint: 'Voice only' },
+]
 
 interface Script {
   id: string
@@ -27,6 +32,7 @@ const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = 
 export function VideoStudio({ script, existingJobId }: Props) {
   const [driveUrl, setDriveUrl] = useState('')
   const [brollUrl, setBrollUrl] = useState('')
+  const [musicMode, setMusicMode] = useState<MusicMode>('smart')
   const [jobId, setJobId] = useState<string | null>(existingJobId)
   // 'loading': have an existing job but haven't fetched its real status yet
   const [status, setStatus] = useState<'idle' | 'loading' | 'submitting' | 'processing' | 'complete' | 'error'>(
@@ -97,7 +103,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     const res = await fetch('/api/video/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scriptId: script.id, driveUrl, ...(brollUrl.trim() ? { brollDriveUrl: brollUrl.trim() } : {}) }),
+      body: JSON.stringify({ scriptId: script.id, driveUrl, musicMode, ...(brollUrl.trim() ? { brollDriveUrl: brollUrl.trim() } : {}) }),
     })
     const data = await res.json()
 
@@ -289,6 +295,33 @@ export function VideoStudio({ script, existingJobId }: Props) {
               onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
             />
             <p className="text-[11px] text-[#A1A1AA] mt-1.5">Paste a single video file or a folder. Stock B-roll will be disabled when you provide your own.</p>
+          </div>
+
+          {/* Background music */}
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-[#71717A] mb-1.5">Background music</p>
+            <div className="grid grid-cols-2 gap-2">
+              {MUSIC_OPTIONS.map(opt => {
+                const active = musicMode === opt.value
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setMusicMode(opt.value)}
+                    className="text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer"
+                    style={{
+                      borderColor: active ? '#FF4F17' : '#E4E4E0',
+                      background: active ? '#FFF3EF' : '#FAFAFA',
+                      outline: active ? '1.5px solid #FF4F17' : 'none',
+                    }}
+                  >
+                    <span className="block text-xs font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
+                    <span className="block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Source choice applies to the Edit variants. Submagic variants use their own music (this only toggles it on/off for those).</p>
           </div>
 
           {error && <p className="text-xs text-[#EF4444] mb-3">{error}</p>}

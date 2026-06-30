@@ -37,6 +37,15 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+env.txt
+
+# downloaded music previews (local listening only — audio is never committed)
+/music-preview
+
+# the music library audio files (creator's own tracks — never committed)
+/music-library-files
+/music-library-files-full
+/music-library-snippets
 
 # vercel
 .vercel

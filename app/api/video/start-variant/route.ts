@@ -4,7 +4,6 @@ import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { startSingleVariant, prepareSubmagicCustomBrollSource, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl } from '@/lib/motion-renderer'
 import {
   deriveSmartSubmagicSettings,
-  fetchSubmagicAudioTrack,
   pickPremiumTemplates,
   submitSubmagicJob,
   pollSubmagicJob,
@@ -12,7 +11,7 @@ import {
   VARIANT_DEFINITIONS,
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
-import type { VideoVariant } from '@/lib/video-pipeline'
+import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 
 function supabaseAdmin() {
   return createAdminClient(
@@ -23,7 +22,12 @@ function supabaseAdmin() {
 
 const activeSubmagicStarts = new Set<string>()
 
-async function pollSubmagicUntilDone(jobId: string, variantId: string, projectId: string) {
+async function pollSubmagicUntilDone(
+  jobId: string,
+  variantId: string,
+  projectId: string,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null,
+) {
   const db = supabaseAdmin()
   const INTERVAL_MS = 8_000
   const MAX_ATTEMPTS = 75  // ~10 minutes
@@ -40,7 +44,7 @@ async function pollSubmagicUntilDone(jobId: string, variantId: string, projectId
     let finalUrl: string | null = result.downloadUrl
     if (result.status === 'ready' && result.downloadUrl) {
       try {
-        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, result.downloadUrl)
+        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, result.downloadUrl, music)
         console.log(`[start-variant] Submagic result retrieved into Olympus storage for ${jobId}:${variantId}`)
       } catch (e) {
         console.warn(`[start-variant] could not retrieve Submagic result, keeping their hosted URL:`, (e as Error).message)
@@ -138,6 +142,7 @@ export async function POST(req: NextRequest) {
       submagicTemplateName,
       submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
       submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
+      musicMode: variant.music_mode as MusicMode | undefined,
     })
 
     return NextResponse.json({ ok: true })
@@ -179,6 +184,9 @@ export async function POST(req: NextRequest) {
       // shares one compression + upload pass.
       let videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
       let projectId: string
+      // When set, our own library music is mixed onto the finished Submagic video
+      // in post (pollSubmagicUntilDone) — so v2/v3 share the v4/v5 music system.
+      let ourMusicCtx: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null
 
       if (preset.aiEditTemplate) {
         // Fully autonomous mode — Submagic controls everything itself, no
@@ -233,11 +241,14 @@ export async function POST(req: NextRequest) {
           useMagicBrolls = false
         }
 
-        // Music presence is deterministic per-variant (set by the profile),
-        // not AI-guessed — always attempt to attach a Submagic track when wanted.
-        const musicTrackId = profile?.useMusic ?? true
-          ? await fetchSubmagicAudioTrack()
-          : null
+        // Submagic renders WITHOUT its own music — we add a mood-matched track
+        // from our own library in post (pollSubmagicUntilDone), so v2/v3 get the
+        // same music system as v4/v5. v1's profile has useMusic:false, so it stays
+        // voice-only; 'off' mode disables music everywhere.
+        const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
+        if (!musicOff && (profile?.useMusic ?? true)) {
+          ourMusicCtx = { hook: scriptRow?.hook ?? '', moodTag: scriptRow?.mood_tag ?? null, scriptFormat }
+        }
 
         projectId = await submitSubmagicJob(videoUrlForSubmagic, {
           title: `${variantId}-${jobId.slice(0, 8)}`,
@@ -247,7 +258,6 @@ export async function POST(req: NextRequest) {
           hookTitle: smart.hookTitle,
           removeSilencePace: smart.removeSilencePace,
           ...SUBMAGIC_ALWAYS_ON,
-          ...(musicTrackId ? { musicTrackId } : {}),
         })
       }
 
@@ -257,8 +267,8 @@ export async function POST(req: NextRequest) {
       )
       await supabase.from('video_jobs').update({ variants: withExternal }).eq('id', jobId)
 
-      // Fire-and-forget poll loop
-      pollSubmagicUntilDone(jobId, variantId, projectId).catch(e =>
+      // Fire-and-forget poll loop (adds our library music in post when set)
+      pollSubmagicUntilDone(jobId, variantId, projectId, ourMusicCtx).catch(e =>
         console.error('[start-variant] Submagic poll error:', e)
       )
 
