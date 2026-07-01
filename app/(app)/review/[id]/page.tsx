@@ -34,6 +34,7 @@ export default function ScriptDetailPage() {
   const [showRevisionInput, setShowRevisionInput] = useState(false)
   const [revisionError, setRevisionError] = useState('')
   const [copyLabel, setCopyLabel] = useState('Copy script')
+  const [showApprovedModal, setShowApprovedModal] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editHook, setEditHook] = useState('')
   const [editBody, setEditBody] = useState('')
@@ -63,8 +64,13 @@ export default function ScriptDetailPage() {
       .update({ status: 'approved', approved_at: new Date().toISOString(), is_few_shot: true })
       .eq('id', script.id)
     await supabase.from('ideas').update({ status: 'approved' }).eq('id', script.idea_id)
+    setScript({ ...script, status: 'approved' })
     setTraining(true)
-    setTimeout(() => router.push('/ideas/new'), 2000)
+    setTimeout(() => {
+      setTraining(false)
+      setSaving(false)
+      setShowApprovedModal(true)
+    }, 2000)
   }
 
   async function handleRevision() {
@@ -89,7 +95,7 @@ export default function ScriptDetailPage() {
       router.push(`/review/${script_id}`)
     } else {
       setSaving(false)
-      setRevisionError('Revision saved. Generation failed   try again from the review queue.')
+      setRevisionError('Revision saved. Generation failed — try again from the review queue.')
       router.push('/review')
     }
   }
@@ -178,12 +184,63 @@ export default function ScriptDetailPage() {
 
   return (
     <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
-      {/* Relearning overlay   shown briefly after approving */}
+      {/* Training overlay — shown briefly after approving */}
       {training && (
         <PulseOverlay
-          label="Training your engine..."
+          label="Script approved."
           sublabel="This script is now shaping every future generation."
         />
+      )}
+
+      {/* Post-approve modal */}
+      {showApprovedModal && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.4)' }}>
+          <div className="w-full max-w-sm bg-white rounded-3xl p-6 shadow-2xl animate-scaleIn">
+            {/* Icon */}
+            <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4" style={{ background: '#DCFCE7' }}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#16A34A" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            </div>
+
+            {/* Message */}
+            <h2 className="text-[17px] font-bold text-[#18181B] text-center mb-2" style={{ fontFamily: 'var(--font-jakarta)' }}>
+              Script approved and trained
+            </h2>
+            <p className="text-sm text-[#71717A] text-center leading-relaxed mb-6">
+              Your engine has learned from this script and will use it to shape every future generation. There is no rush to film — come back when you are ready.
+            </p>
+
+            {/* Actions */}
+            <div className="space-y-2">
+              <button
+                onClick={() => { setShowApprovedModal(false); startEditing() }}
+                className="w-full py-3 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#18181B] hover:bg-[#F4F3F0] transition-all cursor-pointer text-left px-4 flex items-center justify-between"
+              >
+                <span>Edit this script</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => { setShowApprovedModal(false); router.push('/ideas/new') }}
+                className="w-full py-3 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#18181B] hover:bg-[#F4F3F0] transition-all cursor-pointer text-left px-4 flex items-center justify-between"
+              >
+                <span>Write a new script</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setShowApprovedModal(false)}
+                className="w-full py-3 rounded-xl text-sm font-medium text-[#71717A] hover:text-[#18181B] transition-all cursor-pointer"
+              >
+                Done for now
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Back */}
@@ -198,7 +255,7 @@ export default function ScriptDetailPage() {
         {isApproved ? 'Library' : 'Review queue'}
       </button>
 
-      {/* Start filming banner   top of page for approved scripts */}
+      {/* Approved — ready to film banner */}
       {isApproved && !editing && (
         <div className="animate-fadeInUp mb-5" style={{ animationDelay: '40ms' }}>
           <a
@@ -207,8 +264,8 @@ export default function ScriptDetailPage() {
             style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
           >
             <div>
-              <p className="text-[11px] font-bold uppercase tracking-widest opacity-80 mb-0.5">Next step</p>
-              <p className="text-sm font-semibold">Start filming this script</p>
+              <p className="text-[11px] font-bold uppercase tracking-widest opacity-80 mb-0.5">When you are ready</p>
+              <p className="text-sm font-semibold">Upload footage and start editing</p>
             </div>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 18l6-6-6-6" />

@@ -21,7 +21,7 @@ const FORMAT_LABELS: Record<string, { label: string; color: string; bg: string }
   lead_magnet:    { label: 'Lead Magnet',    color: '#FF4F17', bg: '#FFF8F6' },
 }
 
-type Step = 'input' | 'generating' | 'done' | 'choose-idea'
+type Step = 'input' | 'generating' | 'choose-idea'
 type Tab = 'write' | 'generate' | 'script'
 
 const MOODS = [
@@ -47,7 +47,6 @@ export default function NewIdeaPage() {
   const [step, setStep] = useState<Step>('input')
   const [tab, setTab] = useState<Tab>('write')
   const [idea, setIdea] = useState('')
-  const [scriptId, setScriptId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -125,16 +124,17 @@ export default function NewIdeaPage() {
     try {
       const supabase = createClient()
 
-      // Delete all previous non-approved ideas and their scripts before creating a new one.
-      // Approved ideas are kept because they serve as few-shot examples for future generation.
-      const { data: oldIdeas } = await supabase
+      // Only clean up ideas stuck in 'generating' — these are failed/crashed
+      // sessions that never produced a script. Everything else (pending_review,
+      // needs_revision, rejected) stays so the review queue accumulates properly.
+      const { data: stuckIdeas } = await supabase
         .from('ideas')
         .select('id')
-        .neq('status', 'approved')
-      if (oldIdeas?.length) {
-        const oldIds = oldIdeas.map((i: { id: string }) => i.id)
-        await supabase.from('scripts').delete().in('idea_id', oldIds)
-        await supabase.from('ideas').delete().in('id', oldIds)
+        .eq('status', 'generating')
+      if (stuckIdeas?.length) {
+        const stuckIds = stuckIdeas.map((i: { id: string }) => i.id)
+        await supabase.from('scripts').delete().in('idea_id', stuckIds)
+        await supabase.from('ideas').delete().in('id', stuckIds)
       }
 
       const { data: newIdea, error: ideaErr } = await supabase
@@ -159,8 +159,7 @@ export default function NewIdeaPage() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
 
-      setScriptId(data.script_id)
-      setStep('done')
+      router.push(`/review/${data.script_id}`)
     } catch (err) {
       setError(String(err))
       setStep('input')
@@ -812,53 +811,6 @@ export default function NewIdeaPage() {
         </div>
       )}
 
-      {/* Step: Done */}
-      {step === 'done' && scriptId && (
-        <div className="bg-white border border-[#E4E4E0] rounded-2xl p-8 flex flex-col items-center text-center">
-          <div className="w-14 h-14 rounded-2xl bg-[#DCFCE7] flex items-center justify-center mb-5">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M20 6L9 17l-5-5" />
-            </svg>
-          </div>
-          <h2 className="text-lg font-semibold text-[#18181B] mb-2" style={{ fontFamily: 'var(--font-jakarta)' }}>
-            Script ready
-          </h2>
-          <p className="text-sm text-[#71717A] mb-6">
-            Your script has been generated and is waiting for your review.
-          </p>
-
-          {/* Re-looping info */}
-          <div className="w-full max-w-xs mb-6 px-4 py-3 rounded-xl bg-[#F4F3F0] flex items-start gap-3 text-left">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#71717A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 flex-shrink-0">
-              <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
-            </svg>
-            <p className="text-xs text-[#71717A] leading-relaxed">
-              If you approve this script, it trains your engine   future scripts will match its style and quality.
-            </p>
-          </div>
-
-          <div className="flex gap-3 w-full max-w-xs">
-            <button
-              onClick={() => {
-                setStep('input')
-                setIdea('')
-                setScriptId(null)
-                setGeneratedIdeas([])
-                setSelectedFormat('')
-              }}
-              className="flex-1 py-2.5 px-4 rounded-xl border border-[#E4E4E0] text-[#71717A] text-sm font-medium hover:bg-[#F4F3F0] transition-all cursor-pointer"
-            >
-              New idea
-            </button>
-            <button
-              onClick={() => router.push(`/review/${scriptId}`)}
-              className="flex-[2] py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] transition-all cursor-pointer"
-            >
-              Review script →
-            </button>
-          </div>
-        </div>
-      )}
 
     </div>
   )

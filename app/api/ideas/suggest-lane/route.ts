@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildLaneSuggestionPrompt } from '@/lib/prompts'
 import type { LaneSuggestion } from '@/lib/types'
@@ -10,7 +11,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Idea is required' }, { status: 400 })
   }
 
-  const prompt = buildLaneSuggestionPrompt(idea)
+  const supabase = await createClient()
+  const { data: brand } = await supabase.from('brand_settings').select('creator_name').single()
+
+  const prompt = buildLaneSuggestionPrompt(idea, brand?.creator_name ?? undefined)
 
   const raw = await chatCompletion({
     model: MODELS.fast,

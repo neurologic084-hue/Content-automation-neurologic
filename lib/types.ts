@@ -37,6 +37,10 @@ export interface BrandSettings {
   offerings: string
   audience_description: string
   social_proof: string
+  // Per-brand audience lane descriptions. When set, these override the
+  // default LANE_SYSTEM_DESCRIPTIONS constants so the tool works for any niche
+  // without code changes. Configure via brand settings UI.
+  lane_descriptions?: Record<string, string>
   created_at: string
   updated_at: string
 }
@@ -116,9 +120,9 @@ export const LANE_LABELS: Record<AudienceLane, string> = {
 }
 
 export const LANE_DESCRIPTIONS: Record<AudienceLane, string> = {
-  adhd_parents: 'Parents seeking natural, functional approaches for their child',
-  sympathetic_overdrive: 'Adults with anxiety, stress and trauma   mental health is physiologic',
-  burnout_professionals: 'High-performing Seattle professionals who need to slow their brain down',
+  adhd_parents: 'Parents seeking root-cause, functional approaches for their child\'s ADHD brain',
+  sympathetic_overdrive: 'Adults stuck in chronic stress or anxiety — mental health is physiologic',
+  burnout_professionals: 'High-performing Seattle professionals dealing with brain fog and cognitive decline',
 }
 
 export const LANE_COLORS: Record<AudienceLane, string> = {

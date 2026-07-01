@@ -82,6 +82,7 @@ export async function POST(req: NextRequest) {
 
   if (insertError) return NextResponse.json({ error: insertError.message }, { status: 500 })
 
+  await supabase.from('scripts').update({ status: 'rejected' }).eq('id', script_id)
   await supabase.from('ideas').update({ status: 'ready_for_review' }).eq('id', idea.id)
 
   return NextResponse.json({ script_id: newScript.id })
