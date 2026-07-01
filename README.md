@@ -13,7 +13,8 @@ Turn one idea into a published short-form video in minutes. Olympus handles scri
 ## Tech stack
 
 - **Next.js 15** (App Router, Server Components)
-- **Supabase** — Postgres + Auth + Storage
+- **Supabase** — Postgres + Auth
+- **Cloudflare R2** — object storage for source footage + finished renders (S3-compatible)
 - **Remotion** — video rendering
 - **FFmpeg** — trim, overlay, silencedetect
 - **ZapCap** — auto-captions
@@ -37,6 +38,11 @@ Open [http://localhost:3000](http://localhost:3000).
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server-side Supabase access |
+| `R2_BUCKET` | Cloudflare R2 bucket name for footage + renders |
+| `R2_ENDPOINT` | R2 S3-compatible endpoint URL |
+| `R2_ACCESS_KEY_ID` | R2 access key |
+| `R2_SECRET_ACCESS_KEY` | R2 secret key |
+| `R2_PUBLIC_URL` | Public base URL for served R2 objects |
 | `OPENAI_API_KEY` | Script generation + B-roll clip selection |
 | `ZAPCAP_API_KEY` | Auto-caption rendering |
 | `BLOTATO_API_KEY` | Social publishing |

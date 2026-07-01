@@ -1,5 +1,6 @@
 import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
+import type { CaptionLane } from './variant-specs'
 
 // Per-render background-music choice, picked in the video studio and stored on
 // each variant. 'smart' = pick a mood-matched track from the curated library
@@ -384,6 +385,95 @@ export async function pickPremiumTemplates(): Promise<[string | undefined, strin
 
   premiumTemplateCache = { expiresAt: Date.now() + 30 * 60 * 1000, names }
   return names
+}
+
+// ── Submagic   Caption lane classifier (V2) ───────────────────────────────────
+// V2 variants each own a fixed caption "lane" (minimal / clean / bold) — that is
+// the deliberate diversity Daniel picks from. This sorts the discovered template
+// pool into those three lanes ONCE (cached), so a variant's lane resolves to a
+// real Submagic templateName at render time. Hormozi-style templates are excluded
+// to stay on-brand for the clinic (same rule as pickPremiumTemplates).
+
+const LANE_ORDER: CaptionLane[] = ['minimal', 'clean', 'bold']
+
+let captionLaneCache: { expiresAt: number; lanes: Record<CaptionLane, string[]> } | null = null
+
+async function classifyCaptionLanes(): Promise<Record<CaptionLane, string[]>> {
+  if (captionLaneCache && captionLaneCache.expiresAt > Date.now()) return captionLaneCache.lanes
+
+  const templates = await fetchSubmagicTemplates()
+  const candidates = templates.filter(t => !/hormozi/i.test(t.name))
+
+  // Fallback: spread candidates across the three lanes by position so every lane
+  // has something even if the model call fails or no templates are available.
+  const lanes: Record<CaptionLane, string[]> = { minimal: [], clean: [], bold: [] }
+  candidates.forEach((t, i) => { lanes[LANE_ORDER[i % 3]].push(t.name) })
+
+  if (candidates.length) {
+    try {
+      const list = candidates.map((t, i) => `${i + 1}. ${t.name}${t.description ? ` — ${t.description}` : ''}`).join('\n')
+      const raw = await chatCompletion({
+        model: MODELS.fast,
+        json: true,
+        max_tokens: 400,
+        messages: [{
+          role: 'user',
+          content: `Sort these caption templates into three lanes for a med-spa clinic's short-form videos:\n` +
+            `- "minimal": most understated, elegant, barely-there\n` +
+            `- "clean": balanced, premium, clearly readable\n` +
+            `- "bold": punchiest of the tasteful set (never meme/Hormozi-style)\n\n` +
+            `Every template goes in exactly one lane; use the exact names. Return JSON only: ` +
+            `{"minimal": ["..."], "clean": ["..."], "bold": ["..."]}\n\n${list}`,
+        }],
+      })
+      const parsed = JSON.parse(raw) as Partial<Record<CaptionLane, string[]>>
+      const allowed = new Set(candidates.map(t => t.name))
+      const cleaned: Record<CaptionLane, string[]> = { minimal: [], clean: [], bold: [] }
+      for (const lane of LANE_ORDER) {
+        cleaned[lane] = (parsed[lane] ?? []).filter(n => typeof n === 'string' && allowed.has(n))
+      }
+      // Only trust the model's split if it actually placed templates; else keep
+      // the positional fallback so no lane ends up empty.
+      if (LANE_ORDER.some(l => cleaned[l].length)) {
+        for (const lane of LANE_ORDER) if (cleaned[lane].length) lanes[lane] = cleaned[lane]
+      }
+    } catch (e) {
+      console.warn('[submagic] caption lane classification failed, using positional fallback:', (e as Error).message)
+    }
+  }
+
+  captionLaneCache = { expiresAt: Date.now() + 30 * 60 * 1000, lanes }
+  return lanes
+}
+
+// Resolve a variant's fixed lane (nudged by the profile's caption mood) to a
+// concrete Submagic templateName. Returns undefined only when the pool is empty
+// (Submagic then uses its default), which the render tolerates.
+export async function resolveCaptionTemplate(
+  lane: CaptionLane,
+  mood: 'calm' | 'clean' | 'energetic' = 'clean',
+): Promise<string | undefined> {
+  const lanes = await classifyCaptionLanes()
+
+  // Mood is a gentle secondary nudge: an energetic read bumps toward bolder, a
+  // calm read toward softer — but only borrows a neighbor lane if the variant's
+  // own lane is empty, so the deliberate per-variant diversity stays intact.
+  const neighbors: Record<CaptionLane, CaptionLane[]> =
+    mood === 'energetic'
+      ? { minimal: ['minimal', 'clean', 'bold'], clean: ['clean', 'bold', 'minimal'], bold: ['bold', 'clean', 'minimal'] }
+      : mood === 'calm'
+        ? { minimal: ['minimal', 'clean', 'bold'], clean: ['clean', 'minimal', 'bold'], bold: ['bold', 'clean', 'minimal'] }
+        : { minimal: ['minimal', 'clean', 'bold'], clean: ['clean', 'minimal', 'bold'], bold: ['bold', 'clean', 'minimal'] }
+
+  for (const l of neighbors[lane]) {
+    const picks = lanes[l]
+    if (picks?.length) {
+      // Within a lane, an energetic mood reaches for the last (boldest) entry, a
+      // calm mood the first; otherwise the first.
+      return mood === 'energetic' ? picks[picks.length - 1] : picks[0]
+    }
+  }
+  return undefined
 }
 
 // ── Submagic   Fetch first available audio track for music param ──────────────

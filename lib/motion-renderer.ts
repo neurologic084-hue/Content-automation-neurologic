@@ -5,11 +5,14 @@ import fs from 'fs'
 import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage } from './storage'
-import type { VideoVariant, MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE } from './video-pipeline'
+import type { MusicMode } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { getLibraryMusic } from './music-library'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
+import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
+import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
+import { patchVariant } from './job-lock'
 
 // Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
 // explicitly (not a bare side-effect import) so the bundler can't drop it.
@@ -319,6 +322,83 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   }
 }
 
+const contentProfileCache = new Map<string, Promise<ContentProfile>>()
+
+// One Gemini read of the footage per job, cached on the job row and shared by
+// every variant (see lib/video-analysis.ts + lib/VARIANTS-V2-PLAN.md). Idempotent
+// and best-effort: returns the cached profile if present, otherwise analyzes the
+// compressed source once and stores it. Any failure resolves to FALLBACK_PROFILE
+// so a render never blocks on analysis. Grounds the text fields in the ElevenLabs
+// transcript (reused/cached on the same `transcript` column as before).
+export async function ensureContentProfile(jobId: string, sourceUrl: string): Promise<ContentProfile> {
+  const inFlight = contentProfileCache.get(jobId)
+  if (inFlight) return inFlight
+
+  const promise = (async (): Promise<ContentProfile> => {
+    const db = supabaseAdmin()
+
+    // Read the cached profile + transcript. If the content_profile column isn't on
+    // this project yet (migration not applied), that select errors — fall back to
+    // reading transcript alone so we still reuse it, and rely on the in-process
+    // cache (contentProfileCache) for de-duping within this server.
+    let cachedProfile: ContentProfile | null = null
+    let transcript: string | null = null
+    const full = await db.from('video_jobs').select('content_profile, transcript').eq('id', jobId).single()
+    if (!full.error && full.data) {
+      cachedProfile = (full.data.content_profile as ContentProfile | null) ?? null
+      transcript = (full.data.transcript as string | null) ?? null
+    } else {
+      const t = await db.from('video_jobs').select('transcript').eq('id', jobId).single()
+      transcript = (t.data?.transcript as string | null) ?? null
+    }
+
+    if (cachedProfile) return cachedProfile
+
+    try {
+      const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+      const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
+
+      // Transcribe once if we don't have it yet, from the LOCAL compressed file
+      // (transcribeLocalFile) rather than the cloud URL — the cloud-URL path
+      // (transcribeVideo) has been failing with a body-parse error, while the
+      // local upload path is what the caption/graphics steps already use reliably.
+      if (!transcript) {
+        try {
+          const words = await transcribeLocalFile(localPath)
+          transcript = words.map(w => w.text).join(' ').trim() || null
+          if (transcript) await db.from('video_jobs').update({ transcript }).eq('id', jobId)
+        } catch (e) {
+          console.warn('[content-profile] transcription failed, analyzing video only:', (e as Error).message)
+        }
+      }
+
+      const profile = await analyzeVideoFile(localPath, { transcript: transcript ?? undefined })
+      // Only persist a REAL profile — never cache the neutral fallback, so a
+      // transient Gemini failure doesn't get baked in and can be re-attempted.
+      if (profile !== FALLBACK_PROFILE) {
+        const { error: upErr } = await db.from('video_jobs').update({ content_profile: profile }).eq('id', jobId)
+        if (upErr) console.warn(`[content-profile] not persisted (add the content_profile column to enable caching): ${upErr.message}`)
+      }
+      return profile
+    } catch (e) {
+      console.warn('[content-profile] analysis failed, using fallback profile:', (e as Error).message)
+      return FALLBACK_PROFILE
+    }
+  })()
+
+  contentProfileCache.set(jobId, promise)
+  try {
+    const result = await promise
+    // Don't let a transient failure poison the in-memory cache — drop it so the
+    // next call (or next variant) re-attempts instead of reusing the fallback.
+    if (result === FALLBACK_PROFILE) contentProfileCache.delete(jobId)
+    return result
+  } catch {
+    contentProfileCache.delete(jobId)
+    return FALLBACK_PROFILE
+  }
+}
+
 // Runs at job creation (Phase 0), before any variant is started, so the
 // compressed copy is already sitting on disk by the time you click any
 // "Start Edit" button -- v1-v6 all read this same file.
@@ -335,6 +415,11 @@ export async function prepareJobSource(
   // cached upload (getSubmagicSourceUrl) instead of re-uploading.
   await onProgress?.(97, 'Backing up footage to storage')
   await getSubmagicSourceUrl(jobId, sourceUrl)
+  // Analyze the footage once now, while the compressed file is warm on disk, so
+  // the content profile is ready before any variant starts. Best-effort — never
+  // block source prep on it.
+  await onProgress?.(99, 'Analyzing footage')
+  ensureContentProfile(jobId, sourceUrl).catch(() => { /* best-effort; falls back at read time */ })
   await onProgress?.(100, 'Footage ready')
   return { localPath }
 }
@@ -346,21 +431,13 @@ async function markVariant(
   downloadUrl: string | null,
   error: string | null
 ) {
-  const db = supabaseAdmin()
-  const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-  if (!job?.variants) return
-
-  const variants = (job.variants as VideoVariant[]).map((v) =>
-    v.id === variantId
-      ? { ...v, status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null }
-      : v
+  await patchVariant(
+    supabaseAdmin(),
+    jobId,
+    variantId,
+    { status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null },
+    { completeWhenAllDone: true },
   )
-
-  const allDone = variants.every((v) => v.status === 'ready' || v.status === 'failed')
-  await db
-    .from('video_jobs')
-    .update({ variants, ...(allDone ? { status: 'complete' } : {}) })
-    .eq('id', jobId)
 }
 
 async function setVariantProgress(
@@ -371,14 +448,16 @@ async function setVariantProgress(
   label: string
 ): Promise<void> {
   try {
-    const db = supabaseAdmin()
-    const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-    if (!job?.variants) return
-    const variants = (job.variants as VideoVariant[]).map((v) =>
-      v.id === variantId ? { ...v, progress: { step, total, label } } : v
-    )
-    await db.from('video_jobs').update({ variants }).eq('id', jobId)
+    await patchVariant(supabaseAdmin(), jobId, variantId, { progress: { step, total, label } })
   } catch { /* best-effort */ }
+}
+
+// Finished videos always upload to a FIXED path per variant (finished/<job>/<variant>.mp4),
+// so a re-render overwrites the same URL. Browsers and the R2/Cloudflare CDN then keep
+// serving the old cached copy. A per-render version tag forces a fresh URL each time so
+// the page (and CDN) never shows a stale clip after a retry.
+function versioned(url: string): string {
+  return `${url}${url.includes('?') ? '&' : '?'}v=${Date.now()}`
 }
 
 async function finishVariant(
@@ -393,7 +472,7 @@ async function finishVariant(
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
-  const url = r2Url ?? `/renders/${jobId}/${fileName}`
+  const url = versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
@@ -404,7 +483,7 @@ export async function retrieveAndStoreSubmagicResult(
   jobId: string,
   variantId: string,
   downloadUrl: string,
-  music: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
 ): Promise<string> {
   const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
   fs.mkdirSync(outDir, { recursive: true })
@@ -416,7 +495,7 @@ export async function retrieveAndStoreSubmagicResult(
   // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
   if (music) {
     try {
-      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart')
+      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart', music.profile ?? null, music.transcript ?? null, variantId)
       console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
     } catch (e) {
       console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
@@ -430,7 +509,7 @@ export async function retrieveAndStoreSubmagicResult(
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
-  return r2Url ?? `/renders/${jobId}/${fileName}`
+  return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
 }
 
 function cleanTempFiles(outDir: string, variantId: string): void {
@@ -453,11 +532,18 @@ async function mixBackgroundMusic(
   moodTag: string | null,
   scriptFormat?: string,
   mode: MusicMode = DEFAULT_MUSIC_MODE,
+  // Gemini's read of the footage (+ transcript) so the track is matched to what
+  // the clip actually is, not just the typed mood tag. Optional — falls back to
+  // script-only matching when absent.
+  profile: ContentProfile | null = null,
+  transcript: string | null = null,
+  // Lets the matcher give each variant a distinct track from the ranked shortlist.
+  variantId?: string,
 ): Promise<void> {
   if (mode === 'off') return
   const duration = await getVideoDuration(videoPath)
 
-  const lib = await getLibraryMusic({ hook, moodTag, scriptFormat })
+  const lib = await getLibraryMusic({ hook, moodTag, scriptFormat, profile, transcript, variantId })
   if (!lib) {
     console.warn('[motion-renderer] no library track available — skipping music for this render')
     return
@@ -593,6 +679,7 @@ async function addMotionGraphics(
   outDir: string,
   variantId: string,
   style: 'minimal' | 'bold' = 'minimal',
+  profile: ContentProfile | null = null,
 ): Promise<void> {
   console.log('[motion-renderer] planning brand motion graphics...')
 
@@ -608,7 +695,7 @@ async function addMotionGraphics(
     return
   }
 
-  const graphics = await planMotionGraphics(words, hook, cta, moodTag, scriptFormat)
+  const graphics = await planMotionGraphics(words, hook, cta, moodTag, scriptFormat, profile)
   if (!graphics.length) {
     console.log('[motion-renderer] graphics plan returned nothing, skipping')
     return
@@ -694,12 +781,17 @@ async function renderMotionGraphicsTestOnly(
     const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
     fs.copyFileSync(compressedPath, outputPath)
 
+    // v6 is the cheap test path (no Submagic), so it runs the Gemini analysis
+    // itself — this makes it a full test of the content-aware graphics AND music
+    // matching without spending a Submagic job.
+    const profile = await ensureContentProfile(jobId, sourceUrl)
+
     await setVariantProgress(jobId, variantId, 2, STEPS, 'Adding brand motion graphics')
-    await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
+    await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle, profile)
 
     if (musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, 3, STEPS, 'Adding background music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
     }
 
     console.log('[motion-renderer] motion graphics test output ready')
@@ -765,19 +857,45 @@ async function renderSmartCinematic(
 
     await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
     const submagicSourceUrl = await getSubmagicSourceUrl(jobId, sourceUrl)
+
+    // V2: one Gemini read of the footage (shared/cached across variants) drives
+    // both this Submagic pass and the motion-graphics plan below. The variant's
+    // fixed spec + resolver decide caption lane, B-roll %, zooms, and pace, with
+    // the same content guardrails as v1-v3. Falls back to the flags passed by the
+    // route for any variant without a V2 spec.
+    const spec = VARIANT_SPECS[variantId]
+    let profile: ContentProfile | null = null
+    let templateName = submagicTemplateName
+    let magicBrolls = submagicMagicBrolls ?? false
+    let magicBrollsPercentage = submagicMagicBrolls ? 16 : undefined
+    let magicZooms = submagicMagicZooms ?? false
+    let removeSilencePace: 'natural' | 'fast' | 'extra-fast' = 'natural'
+    let hookTitle: boolean | { text: string } | undefined
+    if (spec) {
+      profile = await ensureContentProfile(jobId, sourceUrl)
+      templateName = await resolveCaptionTemplate(spec.captionLane, profile.captionMood)
+      const resolved = resolveSubmagicSettings(spec, profile, { templateName })
+      magicBrolls = resolved.magicBrolls
+      magicBrollsPercentage = resolved.magicBrolls ? resolved.magicBrollsPercentage : undefined
+      magicZooms = resolved.magicZooms
+      removeSilencePace = resolved.removeSilencePace
+      hookTitle = resolved.hookTitle
+    }
+
     const projectId = await submitSubmagicJob(submagicSourceUrl, {
       title: `${variantId}-${jobId.slice(0, 8)}`,
-      templateName: submagicTemplateName,
-      magicBrolls: submagicMagicBrolls ?? false,
-      magicBrollsPercentage: submagicMagicBrolls ? 16 : undefined,
-      magicZooms: submagicMagicZooms ?? false,
+      templateName,
+      magicBrolls,
+      magicBrollsPercentage,
+      magicZooms,
+      hookTitle,
       // cleanAudio requires a Submagic plan tier this account doesn't have yet
       // ("Clean audio requires a higher plan") -- confirmed by a live test
       // failing on this exact validation error. Re-enable once upgraded:
       // cleanAudio: true,
       cleanAudio: false,
       removeBadTakes: true,
-      removeSilencePace: 'natural',
+      removeSilencePace,
     })
     const captionedUrl = await pollSubmagicUntilReady(projectId)
     console.log('[motion-renderer] Submagic edit done')
@@ -790,12 +908,12 @@ async function renderSmartCinematic(
 
     if (motionGraphics) {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding brand motion graphics')
-      await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle)
+      await addMotionGraphics(outputPath, hook, cta, moodTag ?? null, scriptFormat, outDir, variantId, motionGraphicsStyle, profile)
     }
 
     if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding background music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode)
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
     }
 
     console.log('[motion-renderer] output ready')

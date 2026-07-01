@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: jobErr?.message ?? 'Could not create publish job.' }, { status: 500 })
   }
 
-  // Upload to Supabase Storage if it's a local file, otherwise use URL as-is
+  // Upload to R2 Storage if it's a local file, otherwise use URL as-is
   let absoluteUrl: string
   try {
     absoluteUrl = await resolveMediaUrl(downloadUrl)
