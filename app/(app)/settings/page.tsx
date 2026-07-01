@@ -11,11 +11,6 @@ const TONE_OPTIONS = [
 
 const MAX_PROFILES = 3
 
-// Default creator names per slot so Profile 2 starts pre-filled
-const SLOT_CREATOR_DEFAULTS: Record<number, string> = {
-  2: 'Jessica Wandeling',
-}
-
 type Offering = { name: string; description: string }
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
@@ -37,13 +32,12 @@ interface ProfileData {
 }
 
 function emptyProfile(slot: number): ProfileData {
-  const name = SLOT_CREATOR_DEFAULTS[slot] ?? ''
   return {
     id: null,
     profile_slot: slot,
-    profile_name: name || `Profile ${slot}`,
+    profile_name: `Profile ${slot}`,
     is_active: false,
-    creator_name: name,
+    creator_name: '',
     tagline: '',
     location: '',
     tone_keywords: [],
@@ -210,10 +204,9 @@ export default function SettingsPage() {
     if (!silent) setSaveState('saving')
     const supabase = createClient()
 
-    const profileName = form.creator_name.trim() || `Profile ${selectedSlot}`
     const saveData = {
       profile_slot: selectedSlot,
-      profile_name: profileName,
+      profile_name: `Profile ${selectedSlot}`,
       is_active: form.is_active,
       creator_name: form.creator_name,
       tagline: form.tagline,
@@ -249,7 +242,7 @@ export default function SettingsPage() {
     const updatedProfile: ProfileData = {
       ...form,
       id: savedId,
-      profile_name: profileName,
+      profile_name: `Profile ${selectedSlot}`,
       offerings: serializeOfferings(offerings),
     }
     setProfileCache(prev => ({ ...prev, [selectedSlot]: updatedProfile }))
@@ -318,20 +311,19 @@ export default function SettingsPage() {
           const profile = profileCache[slot]
           const isSelected = selectedSlot === slot
           const slotIsActive = profile?.is_active ?? false
-          const label = profile?.creator_name?.trim() || profile?.profile_name || `Profile ${slot}`
 
           return (
             <button
               key={slot}
               onClick={() => switchSlot(slot)}
-              className="flex-1 relative flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-[13px] font-medium transition-all duration-150 cursor-pointer truncate"
+              className="flex-1 relative flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-[13px] font-medium transition-all duration-150 cursor-pointer"
               style={{
                 background: isSelected ? 'white' : 'transparent',
                 color: isSelected ? '#111111' : '#9B9B97',
                 boxShadow: isSelected ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
               }}
             >
-              <span className="truncate">{label}</span>
+              <span>Profile {slot}</span>
               {slotIsActive && (
                 <span
                   className="w-1.5 h-1.5 rounded-full flex-shrink-0"
