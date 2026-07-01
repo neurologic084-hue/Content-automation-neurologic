@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
   if (!idea) return NextResponse.json({ error: 'Idea not found' }, { status: 404 })
   if (!script.revision_notes?.trim()) return NextResponse.json({ error: 'No revision notes on this script' }, { status: 400 })
 
-  const { data: brand } = await supabase.from('brand_settings').select('*').single()
+  const { data: brand } = await supabase.from('brand_settings').select('*').eq('is_active', true).single()
   if (!brand) return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
 
   const { data: fewShotsRaw } = await supabase

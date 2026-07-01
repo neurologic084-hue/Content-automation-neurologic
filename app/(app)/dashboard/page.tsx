@@ -11,7 +11,7 @@ export default async function DashboardPage() {
     supabase.from('ideas').select('id', { count: 'exact', head: true }),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'pending_review'),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
-    supabase.from('brand_settings').select('creator_name').single(),
+    supabase.from('brand_settings').select('creator_name').eq('is_active', true).single(),
   ])
 
   const totalIdeas = ideasRes.count ?? 0

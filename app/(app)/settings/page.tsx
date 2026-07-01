@@ -9,8 +9,52 @@ const TONE_OPTIONS = [
   'Grounded', 'Bold', 'Nurturing', 'No-nonsense', 'Hopeful',
 ]
 
+const MAX_PROFILES = 3
+
+// Default creator names per slot so Profile 2 starts pre-filled
+const SLOT_CREATOR_DEFAULTS: Record<number, string> = {
+  2: 'Jessica Wandeling',
+}
+
 type Offering = { name: string; description: string }
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+interface ProfileData {
+  id: string | null
+  profile_slot: number
+  profile_name: string
+  is_active: boolean
+  creator_name: string
+  tagline: string
+  location: string
+  tone_keywords: string[]
+  unique_angle: string
+  audience_transformation: string
+  audience_description: string
+  offerings: string
+  social_proof: string
+  extra_context: string
+}
+
+function emptyProfile(slot: number): ProfileData {
+  const name = SLOT_CREATOR_DEFAULTS[slot] ?? ''
+  return {
+    id: null,
+    profile_slot: slot,
+    profile_name: name || `Profile ${slot}`,
+    is_active: false,
+    creator_name: name,
+    tagline: '',
+    location: '',
+    tone_keywords: [],
+    unique_angle: '',
+    audience_transformation: '',
+    audience_description: '',
+    offerings: '',
+    social_proof: '',
+    extra_context: '',
+  }
+}
 
 function parseOfferings(raw: string): Offering[] {
   if (!raw?.trim()) return []
@@ -89,49 +133,55 @@ const rowInputCls =
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saveState, setSaveState] = useState<SaveState>('idle')
+  const [activating, setActivating] = useState(false)
 
-  const [form, setForm] = useState({
-    id: null as string | null,
-    creator_name: '',
-    tagline: '',
-    location: '',
-    tone_keywords: [] as string[],
-    unique_angle: '',
-    audience_transformation: '',
-    audience_description: '',
-    offerings: '',
-    social_proof: '',
-    extra_context: '',
-  })
+  const [selectedSlot, setSelectedSlot] = useState(1)
+  const [profileCache, setProfileCache] = useState<Record<number, ProfileData>>({})
 
+  const [form, setForm] = useState<ProfileData>(emptyProfile(1))
   const [offerings, setOfferings] = useState<Offering[]>([])
 
   useEffect(() => {
     async function load() {
       const supabase = createClient()
-      const { data } = await supabase.from('brand_settings').select('*').single()
-      if (data) {
-        setForm({
-          id: data.id,
-          creator_name: data.creator_name ?? '',
-          tagline: data.tagline ?? '',
-          location: data.location ?? '',
-          tone_keywords: data.tone_keywords ?? [],
-          unique_angle: data.unique_angle ?? '',
-          audience_transformation: data.audience_transformation ?? '',
-          audience_description: data.audience_description ?? '',
-          offerings: data.offerings ?? '',
-          social_proof: data.social_proof ?? '',
-          extra_context: data.extra_context ?? '',
-        })
-        setOfferings(parseOfferings(data.offerings ?? ''))
+      const { data } = await supabase
+        .from('brand_settings')
+        .select('*')
+        .order('profile_slot', { ascending: true })
+
+      const cache: Record<number, ProfileData> = {}
+      for (const row of data ?? []) {
+        const slot = row.profile_slot ?? 1
+        if (slot >= 1 && slot <= MAX_PROFILES) {
+          cache[slot] = row as ProfileData
+        }
       }
+      setProfileCache(cache)
+
+      const activeSlot = (Object.values(cache).find(p => p.is_active) ?? cache[1])?.profile_slot ?? 1
+      const startProfile = cache[activeSlot] ?? emptyProfile(activeSlot)
+      setSelectedSlot(activeSlot)
+      setForm(startProfile)
+      setOfferings(parseOfferings(startProfile.offerings ?? ''))
       setLoading(false)
     }
     load()
   }, [])
 
-  function set(field: string, value: unknown) {
+  function switchSlot(slot: number) {
+    if (slot === selectedSlot) return
+    setProfileCache(prev => ({
+      ...prev,
+      [selectedSlot]: { ...form, offerings: serializeOfferings(offerings) },
+    }))
+    const profile = profileCache[slot] ?? emptyProfile(slot)
+    setSelectedSlot(slot)
+    setForm(profile)
+    setOfferings(parseOfferings(profile.offerings ?? ''))
+    setSaveState('idle')
+  }
+
+  function set(field: keyof ProfileData, value: unknown) {
     setForm(prev => ({ ...prev, [field]: value }))
   }
 
@@ -149,39 +199,90 @@ export default function SettingsPage() {
   function addOffering() {
     setOfferings(prev => [...prev, { name: '', description: '' }])
   }
-
   function removeOffering(i: number) {
     setOfferings(prev => prev.filter((_, idx) => idx !== i))
   }
-
   function updateOffering(i: number, field: 'name' | 'description', value: string) {
     setOfferings(prev => prev.map((o, idx) => idx === i ? { ...o, [field]: value } : o))
   }
 
-  async function handleSave() {
-    setSaveState('saving')
+  async function saveProfile(silent = false): Promise<string | null> {
+    if (!silent) setSaveState('saving')
     const supabase = createClient()
-    const { id, ...rest } = form
 
+    const profileName = form.creator_name.trim() || `Profile ${selectedSlot}`
     const saveData = {
-      ...rest,
+      profile_slot: selectedSlot,
+      profile_name: profileName,
+      is_active: form.is_active,
+      creator_name: form.creator_name,
+      tagline: form.tagline,
+      location: form.location,
+      tone_keywords: form.tone_keywords,
+      unique_angle: form.unique_angle,
+      audience_transformation: form.audience_transformation,
+      audience_description: form.audience_description,
       offerings: serializeOfferings(offerings),
+      social_proof: form.social_proof,
+      extra_context: form.extra_context,
       updated_at: new Date().toISOString(),
     }
 
-    const op = id
-      ? supabase.from('brand_settings').update(saveData).eq('id', id)
-      : supabase.from('brand_settings').insert({ ...saveData }).select('id').single()
+    let savedId = form.id
 
-    const { data, error } = await op
-    if (error) {
-      setSaveState('error')
-      setTimeout(() => setSaveState('idle'), 3000)
+    if (form.id) {
+      const { error } = await supabase.from('brand_settings').update(saveData).eq('id', form.id)
+      if (error) {
+        if (!silent) { setSaveState('error'); setTimeout(() => setSaveState('idle'), 3000) }
+        return null
+      }
     } else {
-      if (!id && data && 'id' in data) set('id', (data as { id: string }).id)
+      const { data, error } = await supabase.from('brand_settings').insert(saveData).select('id').single()
+      if (error || !data) {
+        if (!silent) { setSaveState('error'); setTimeout(() => setSaveState('idle'), 3000) }
+        return null
+      }
+      savedId = data.id
+      setForm(prev => ({ ...prev, id: data.id }))
+    }
+
+    const updatedProfile: ProfileData = {
+      ...form,
+      id: savedId,
+      profile_name: profileName,
+      offerings: serializeOfferings(offerings),
+    }
+    setProfileCache(prev => ({ ...prev, [selectedSlot]: updatedProfile }))
+
+    if (!silent) {
       setSaveState('saved')
       setTimeout(() => setSaveState('idle'), 2500)
     }
+
+    return savedId
+  }
+
+  async function handleSetActive() {
+    setActivating(true)
+    let currentId = form.id
+    if (!currentId) {
+      currentId = await saveProfile(true)
+      if (!currentId) { setActivating(false); return }
+    }
+
+    const supabase = createClient()
+    await supabase.from('brand_settings').update({ is_active: false }).in('profile_slot', [1, 2, 3])
+    await supabase.from('brand_settings').update({ is_active: true }).eq('id', currentId)
+
+    setForm(prev => ({ ...prev, is_active: true }))
+    setProfileCache(prev => {
+      const updated: Record<number, ProfileData> = {}
+      for (const [slotKey, profile] of Object.entries(prev)) {
+        updated[Number(slotKey)] = { ...profile, is_active: Number(slotKey) === selectedSlot }
+      }
+      return updated
+    })
+    setActivating(false)
   }
 
   if (loading) {
@@ -192,13 +293,14 @@ export default function SettingsPage() {
     )
   }
 
+  const isActive = form.is_active
   const canSave = form.creator_name.trim().length > 0
 
   return (
     <div className="p-6 md:p-8 max-w-2xl w-full mx-auto pb-32">
 
       {/* Header */}
-      <div className="mb-8">
+      <div className="mb-6">
         <h1
           className="text-2xl font-bold text-[#111111]"
           style={{ fontFamily: 'var(--font-jakarta)' }}
@@ -206,21 +308,75 @@ export default function SettingsPage() {
           Brand voice
         </h1>
         <p className="mt-1.5 text-[13px] text-[#9B9B97] leading-relaxed">
-          Everything here feeds into every script the AI writes. More context means sharper hooks, better CTAs, and content that sounds like you.
+          Everything here feeds into every script the AI writes. The active profile is used for all script generation.
         </p>
       </div>
 
+      {/* Profile Switcher */}
+      <div className="p-1 bg-[#F4F3F0] rounded-2xl mb-5 flex gap-1">
+        {Array.from({ length: MAX_PROFILES }, (_, i) => i + 1).map(slot => {
+          const profile = profileCache[slot]
+          const isSelected = selectedSlot === slot
+          const slotIsActive = profile?.is_active ?? false
+          const label = profile?.creator_name?.trim() || profile?.profile_name || `Profile ${slot}`
+
+          return (
+            <button
+              key={slot}
+              onClick={() => switchSlot(slot)}
+              className="flex-1 relative flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-[13px] font-medium transition-all duration-150 cursor-pointer truncate"
+              style={{
+                background: isSelected ? 'white' : 'transparent',
+                color: isSelected ? '#111111' : '#9B9B97',
+                boxShadow: isSelected ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+              }}
+            >
+              <span className="truncate">{label}</span>
+              {slotIsActive && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  style={{ background: '#22C55E' }}
+                />
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Active / not-active banner */}
+      {isActive ? (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#DCFCE7] border border-[#BBF7D0] mb-5">
+          <span className="w-2 h-2 rounded-full bg-[#22C55E] flex-shrink-0" />
+          <p className="text-[13px] font-medium text-[#16A34A]">
+            Active profile — all scripts use this brand context
+          </p>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-[#FFF8F6] border border-[#FFD7CC] mb-5">
+          <p className="text-[13px] text-[#9B6B5E]">
+            This profile is not active. Scripts are using a different profile.
+          </p>
+          <button
+            onClick={handleSetActive}
+            disabled={activating}
+            className="flex-shrink-0 text-[13px] font-semibold text-[#FF4F17] hover:text-[#E84410] transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {activating ? 'Activating...' : 'Use this profile →'}
+          </button>
+        </div>
+      )}
+
       <div className="space-y-4">
 
-        {/* 01   Identity */}
+        {/* 01 — Identity */}
         <Section num="01" title="Identity" description="Brand name, location and tagline injected into every hook and CTA.">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Brand name" required>
+            <Field label="Brand / Creator name" required>
               <input
                 type="text"
                 value={form.creator_name}
                 onChange={e => set('creator_name', e.target.value)}
-                placeholder="Dr. Jessica Wendling"
+                placeholder="Dr. Jessica Wandeling"
                 maxLength={80}
                 className={inputCls}
               />
@@ -248,12 +404,12 @@ export default function SettingsPage() {
           </Field>
         </Section>
 
-        {/* 02   Positioning */}
+        {/* 02 — Positioning */}
         <Section num="02" title="Positioning & background" description="Your story, credentials, and what makes your approach different. The AI uses this to add credibility to every hook.">
           <textarea
             value={form.unique_angle}
             onChange={e => set('unique_angle', e.target.value)}
-            placeholder={`I'm a functional neurologist with 12 years in clinical practice. Before starting my own practice I worked at the Seattle Integrative Health Center. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine neurology, lifestyle medicine, and nervous system work   not just symptom management.`}
+            placeholder={`I'm a functional neurologist with 12 years in clinical practice. Before starting my own practice I worked at the Seattle Integrative Health Center. I've personally recovered from adrenal burnout using the same protocols I now teach. I combine neurology, lifestyle medicine, and nervous system work — not just symptom management.`}
             rows={5}
             maxLength={1200}
             className={textareaCls}
@@ -261,7 +417,7 @@ export default function SettingsPage() {
           <p className="text-right text-[11px] text-[#C4C0BB]">{form.unique_angle.length} / 1200</p>
         </Section>
 
-        {/* 03   Voice */}
+        {/* 03 — Voice */}
         <Section
           num="03"
           title="Tone of voice"
@@ -295,7 +451,7 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* 04   Offerings */}
+        {/* 04 — Offerings */}
         <Section
           num="04"
           title="Products & programs"
@@ -357,7 +513,7 @@ export default function SettingsPage() {
           )}
         </Section>
 
-        {/* 05   Ideal Client */}
+        {/* 05 — Ideal Client */}
         <Section num="05" title="Ideal audience" description="Who you are talking to. The more specific this is, the more targeted every hook and CTA becomes.">
           <textarea
             value={form.audience_description}
@@ -370,12 +526,12 @@ export default function SettingsPage() {
           <p className="text-right text-[11px] text-[#C4C0BB]">{form.audience_description.length} / 1500</p>
         </Section>
 
-        {/* 06   Social Proof */}
+        {/* 06 — Social Proof */}
         <Section num="06" title="Results & social proof" description="Real wins from your community. The AI weaves these into scripts as specific, credible proof.">
           <textarea
             value={form.social_proof}
             onChange={e => set('social_proof', e.target.value)}
-            placeholder={`Emily   panic attacks 3x/week, zero after 12 weeks, now off Lexapro with her psychiatrist's sign-off\nSarah, burned-out marketing director   recovered energy in 8 weeks, got promoted 3 months later\n35% of clients report measurable sleep improvement within the first 30 days\n87% of 1:1 clients complete the full 90-day program`}
+            placeholder={`Emily — panic attacks 3x/week, zero after 12 weeks, now off Lexapro with her psychiatrist's sign-off\nSarah, burned-out marketing director — recovered energy in 8 weeks, got promoted 3 months later\n35% of clients report measurable sleep improvement within the first 30 days`}
             rows={6}
             maxLength={1500}
             className={textareaCls}
@@ -383,12 +539,12 @@ export default function SettingsPage() {
           <p className="text-right text-[11px] text-[#C4C0BB]">{form.social_proof.length} / 1500</p>
         </Section>
 
-        {/* 07   Rules */}
+        {/* 07 — Rules */}
         <Section num="07" title="Rules" description="Hard constraints the AI must never break. One rule per line. These override everything else.">
           <textarea
             value={form.extra_context}
             onChange={e => set('extra_context', e.target.value)}
-            placeholder={`Never tell someone to stop their prescribed medication\nNever claim to cure or treat   say "support" or "address"\nNever name-drop other practitioners or compare to competitors\nNever use the word "journey"\nAlways keep an empowering tone   no shame, no catastrophising`}
+            placeholder={`Never tell someone to stop their prescribed medication\nNever claim to cure or treat — say "support" or "address"\nNever name-drop other practitioners or compare to competitors\nNever use the word "journey"\nAlways keep an empowering tone — no shame, no catastrophising`}
             rows={7}
             maxLength={1500}
             className={`${textareaCls} font-mono text-[12px]`}
@@ -399,7 +555,7 @@ export default function SettingsPage() {
               <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
             </svg>
             <p className="text-[12px] text-[#4F52E0] leading-relaxed">
-              Injected at the top of every prompt as non-negotiable constraints   they override tone, style, and everything else.
+              Injected at the top of every prompt as non-negotiable constraints — they override tone, style, and everything else.
             </p>
           </div>
         </Section>
@@ -418,10 +574,10 @@ export default function SettingsPage() {
           <p className="text-[12px] text-[#ADADAA]">
             {form.id
               ? 'Changes apply to all future scripts immediately.'
-              : 'First save activates your script engine.'}
+              : 'Save to create this profile.'}
           </p>
           <button
-            onClick={handleSave}
+            onClick={() => saveProfile(false)}
             disabled={saveState === 'saving' || !canSave}
             className="px-6 py-2 rounded-xl text-[13px] font-semibold transition-all duration-200 cursor-pointer disabled:cursor-not-allowed"
             style={{
@@ -440,7 +596,7 @@ export default function SettingsPage() {
               : saveState === 'saved'
               ? '✓ Saved'
               : saveState === 'error'
-              ? 'Error   retry'
+              ? 'Error — retry'
               : 'Save settings'}
           </button>
         </div>

@@ -9,7 +9,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   if (!session) redirect('/login')
 
-  const { data: brand } = await supabase.from('brand_settings').select('creator_name').single()
+  const { data: brand } = await supabase.from('brand_settings').select('creator_name').eq('is_active', true).single()
   const hasSettings = !!(brand?.creator_name && brand.creator_name.trim().length > 0)
 
   return (

@@ -77,7 +77,7 @@ export default function NewIdeaPage() {
   useEffect(() => {
     async function checkSettings() {
       const supabase = createClient()
-      const { data } = await supabase.from('brand_settings').select('creator_name').single()
+      const { data } = await supabase.from('brand_settings').select('creator_name').eq('is_active', true).single()
       setSettingsReady(!!(data?.creator_name && data.creator_name.trim().length > 0))
     }
     checkSettings()

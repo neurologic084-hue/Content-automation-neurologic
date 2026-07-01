@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
 
   if (useBrandContext) {
     // Full pipeline: brand voice + few-shot examples + web search
-    const { data: brand } = await supabase.from('brand_settings').select('*').single()
+    const { data: brand } = await supabase.from('brand_settings').select('*').eq('is_active', true).single()
     if (!brand) {
       return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
     }

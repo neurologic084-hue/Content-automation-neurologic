@@ -26,6 +26,9 @@ export type MoodTag =
 
 export interface BrandSettings {
   id: string
+  profile_slot: number
+  profile_name: string
+  is_active: boolean
   creator_name: string
   tagline: string
   tone_keywords: string[]

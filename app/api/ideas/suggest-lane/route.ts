@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
   }
 
   const supabase = await createClient()
-  const { data: brand } = await supabase.from('brand_settings').select('creator_name').single()
+  const { data: brand } = await supabase.from('brand_settings').select('creator_name').eq('is_active', true).single()
 
   const prompt = buildLaneSuggestionPrompt(idea, brand?.creator_name ?? undefined)
 

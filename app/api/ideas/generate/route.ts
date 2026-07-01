@@ -10,7 +10,7 @@ export async function POST(req: Request) {
 
   const supabase = await createClient()
 
-  const { data: brand } = await supabase.from('brand_settings').select('*').single()
+  const { data: brand } = await supabase.from('brand_settings').select('*').eq('is_active', true).single()
   if (!brand) return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
 
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
