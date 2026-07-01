@@ -5,9 +5,13 @@ export const MODELS = {
   fast: 'anthropic/claude-haiku-4-5',
 } as const
 
+// content is a plain string for text-only turns, or an array of content parts
+// (text + image_url + input_audio) for multimodal turns like audio understanding.
+type ContentPart = Record<string, unknown>
+
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string | ContentPart[]
 }
 
 interface CompletionOptions {

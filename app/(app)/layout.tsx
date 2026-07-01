@@ -9,8 +9,26 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   if (!session) redirect('/login')
 
-  const { data: brand } = await supabase.from('brand_settings').select('creator_name').eq('is_active', true).single()
-  const hasSettings = !!(brand?.creator_name && brand.creator_name.trim().length > 0)
+  // Try active profile first; fall back to any row with a name if the is_active
+  // column doesn't exist yet or no row is marked active (graceful degradation).
+  const { data: activeBrand } = await supabase
+    .from('brand_settings')
+    .select('creator_name')
+    .eq('is_active', true)
+    .limit(1)
+    .maybeSingle()
+
+  let hasSettings = !!(activeBrand?.creator_name?.trim())
+
+  if (!hasSettings) {
+    const { data: anyBrand } = await supabase
+      .from('brand_settings')
+      .select('creator_name')
+      .neq('creator_name', '')
+      .limit(1)
+      .maybeSingle()
+    hasSettings = !!(anyBrand?.creator_name?.trim())
+  }
 
   return (
     <div className="flex min-h-dvh bg-[#FAFAF9]">

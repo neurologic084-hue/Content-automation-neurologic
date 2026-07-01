@@ -64,43 +64,53 @@ Custom GPT and chatbot deployment`,
 export async function GET() {
   const supabase = await createClient()
 
+  // Verify session — RLS requires an authenticated user
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session) {
+    return NextResponse.json(
+      { success: false, message: 'Not logged in. Open the app, log in, then visit this URL.' },
+      { status: 401 },
+    )
+  }
+
   const results: Record<string, string> = {}
 
   for (const profile of [JESSICA, OVRHAUL]) {
     const slot = profile.profile_slot as number
 
-    // Check if this slot already exists
-    const { data: existing } = await supabase
+    const { data: existing, error: fetchError } = await supabase
       .from('brand_settings')
       .select('id')
       .eq('profile_slot', slot)
-      .single()
+      .maybeSingle()
+
+    if (fetchError) {
+      results[`Profile ${slot}`] = `fetch error: ${fetchError.message}`
+      continue
+    }
 
     if (existing?.id) {
-      // Update the existing row
       const { error } = await supabase
         .from('brand_settings')
         .update({ ...profile, updated_at: new Date().toISOString() })
         .eq('id', existing.id)
-      results[`Profile ${slot}`] = error ? `error: ${error.message}` : 'updated'
+      results[`Profile ${slot}`] = error ? `update error: ${error.message}` : 'updated'
     } else {
-      // Insert new row
       const { error } = await supabase
         .from('brand_settings')
         .insert({ ...profile, updated_at: new Date().toISOString() })
-      results[`Profile ${slot}`] = error ? `error: ${error.message}` : 'created'
+      results[`Profile ${slot}`] = error ? `insert error: ${error.message}` : 'created'
     }
   }
 
-  const hasError = Object.values(results).some(v => v.startsWith('error'))
+  const hasError = Object.values(results).some(v => v.includes('error'))
 
   if (hasError) {
     return NextResponse.json(
       {
         success: false,
-        message: 'Some profiles failed — you may need to run the column migration SQL first.',
+        message: 'One or more profiles failed. If you see "column does not exist", run the 3 ALTER TABLE lines from supabase-migration-profiles.sql in your Supabase SQL Editor first, then visit this URL again.',
         results,
-        sql_hint: 'Run supabase-migration-profiles.sql in your Supabase SQL Editor first, then visit this URL again.',
       },
       { status: 500 },
     )
@@ -108,7 +118,7 @@ export async function GET() {
 
   return NextResponse.json({
     success: true,
-    message: 'Both profiles saved successfully.',
+    message: 'Both profiles saved. Open Settings to see them.',
     results,
   })
 }

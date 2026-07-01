@@ -77,8 +77,21 @@ export default function NewIdeaPage() {
   useEffect(() => {
     async function checkSettings() {
       const supabase = createClient()
-      const { data } = await supabase.from('brand_settings').select('creator_name').eq('is_active', true).single()
-      setSettingsReady(!!(data?.creator_name && data.creator_name.trim().length > 0))
+      const { data: active } = await supabase
+        .from('brand_settings')
+        .select('creator_name')
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle()
+      if (active?.creator_name?.trim()) { setSettingsReady(true); return }
+      // Fallback: any row with a name (handles missing is_active column)
+      const { data: any } = await supabase
+        .from('brand_settings')
+        .select('creator_name')
+        .neq('creator_name', '')
+        .limit(1)
+        .maybeSingle()
+      setSettingsReady(!!(any?.creator_name?.trim()))
     }
     checkSettings()
   }, [])

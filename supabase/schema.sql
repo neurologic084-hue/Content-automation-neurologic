@@ -115,6 +115,7 @@ create table if not exists video_jobs (
   variants          jsonb,
   selected_variant  text,
   transcript        text,
+  content_profile   jsonb,                         -- one Gemini read of the footage, shared by every variant (see lib/video-analysis.ts)
   created_at        timestamptz not null default now()
 );
 

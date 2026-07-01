@@ -1,16 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl } from '@/lib/motion-renderer'
+import { startSingleVariant, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   pickPremiumTemplates,
+  resolveCaptionTemplate,
   submitSubmagicJob,
   pollSubmagicJob,
   transcribeVideo,
   VARIANT_DEFINITIONS,
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
+import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
+import { patchVariant } from '@/lib/job-lock'
+import type { ContentProfile } from '@/lib/video-analysis'
 import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 
 function supabaseAdmin() {
@@ -26,7 +30,7 @@ async function pollSubmagicUntilDone(
   jobId: string,
   variantId: string,
   projectId: string,
-  music: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
 ) {
   const db = supabaseAdmin()
   const INTERVAL_MS = 8_000
@@ -37,9 +41,6 @@ async function pollSubmagicUntilDone(
 
     const result = await pollSubmagicJob(projectId).catch(() => null)
     if (!result || result.status === 'processing') continue
-
-    const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-    if (!job?.variants) return
 
     let finalUrl: string | null = result.downloadUrl
     if (result.status === 'ready' && result.downloadUrl) {
@@ -53,26 +54,20 @@ async function pollSubmagicUntilDone(
       }
     }
 
-    const variants = (job.variants as VideoVariant[]).map(v => {
-      if (v.id !== variantId) return v
-      if (result.status === 'ready') {
-        return { ...v, status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null }
-      }
-      return { ...v, status: 'failed', error: result.error ?? 'Submagic failed', progress: null }
-    })
-
-    const allDone = variants.every(v => v.status === 'ready' || v.status === 'failed')
-    await db.from('video_jobs').update({ variants, ...(allDone ? { status: 'complete' } : {}) }).eq('id', jobId)
+    await patchVariant(
+      db,
+      jobId,
+      variantId,
+      result.status === 'ready'
+        ? { status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null }
+        : { status: 'failed', error: result.error ?? 'Submagic failed', progress: null },
+      { completeWhenAllDone: true },
+    )
     return
   }
 
   // Timeout
-  const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-  if (!job?.variants) return
-  const variants = (job.variants as VideoVariant[]).map(v =>
-    v.id === variantId ? { ...v, status: 'failed', error: 'Submagic timed out after 10 minutes', progress: null } : v
-  )
-  await db.from('video_jobs').update({ variants }).eq('id', jobId)
+  await patchVariant(db, jobId, variantId, { status: 'failed', error: 'Submagic timed out after 10 minutes', progress: null })
 }
 
 export async function POST(req: NextRequest) {
@@ -113,12 +108,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, reused: true })
     }
 
-    const variants: VideoVariant[] = (job.variants ?? []).map((v: VideoVariant) =>
-      v.id === variantId
-        ? { ...v, status: 'processing', external_id: null, preview_url: null, download_url: null, error: null }
-        : v
+    await patchVariant(
+      supabase,
+      jobId,
+      variantId,
+      { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null },
+      { jobStatus: 'processing' },
     )
-    await supabase.from('video_jobs').update({ variants, status: 'processing' }).eq('id', jobId)
 
     const { data: scriptRow } = await supabase
       .from('scripts')
@@ -172,12 +168,13 @@ export async function POST(req: NextRequest) {
 
     activeSubmagicStarts.add(lockKey)
     try {
-      const processing = (job.variants as VideoVariant[]).map((v: VideoVariant) =>
-        v.id === variantId
-          ? { ...v, status: 'processing', preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } }
-          : v
+      await patchVariant(
+        supabase,
+        jobId,
+        variantId,
+        { status: 'processing', preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } },
+        { jobStatus: 'processing' },
       )
-      await supabase.from('video_jobs').update({ variants: processing, status: 'processing' }).eq('id', jobId)
 
       const { data: scriptRow } = await supabase
         .from('scripts')
@@ -194,7 +191,7 @@ export async function POST(req: NextRequest) {
       let projectId: string
       // When set, our own library music is mixed onto the finished Submagic video
       // in post (pollSubmagicUntilDone) — so v2/v3 share the v4/v5 music system.
-      let ourMusicCtx: { hook: string; moodTag: string | null; scriptFormat?: string } | null = null
+      let ourMusicCtx: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null
 
       if (preset.aiEditTemplate) {
         // Fully autonomous mode — Submagic controls everything itself, no
@@ -204,61 +201,89 @@ export async function POST(req: NextRequest) {
           aiEditTemplate: preset.aiEditTemplate,
         })
       } else {
-        // Profile-driven path (our-v1/v2/v3): get the ACTUAL spoken transcript
-        // from the footage, not just the written script — creators sometimes
-        // improvise on camera. Cached on the job row so starting a 2nd or 3rd
-        // Submagic variant on the same job doesn't re-transcribe.
-        let actualTranscript = job.transcript as string | null
-        if (!actualTranscript) {
-          try {
-            const transcribed = await transcribeVideo(videoUrlForSubmagic)
-            actualTranscript = transcribed.transcript || null
-            if (actualTranscript) {
-              await supabase.from('video_jobs').update({ transcript: actualTranscript }).eq('id', jobId)
-            }
-          } catch (e) {
-            console.warn('[start-variant] transcription failed, falling back to script text only:', (e as Error).message)
-          }
-        }
+        // V2 content-aware path (our-v1/v2/v3). The variant's fixed spec (caption
+        // lane, zooms, pace) is combined with one Gemini read of the footage
+        // (shared across variants, cached on the job) via resolveSubmagicSettings.
+        // Falls back to the older text-only smart-settings path for any variant
+        // without a V2 spec.
+        const spec = VARIANT_SPECS[variantId]
 
-        const profile = variant.submagicProfile
-        const smart = await deriveSmartSubmagicSettings(
-          {
-            hook: scriptRow?.hook ?? '',
-            cta: scriptRow?.cta ?? '',
-            mood_tag: scriptRow?.mood_tag ?? null,
-            script_format: scriptFormat,
-          },
-          { profileDirective: profile?.directive, actualTranscript: actualTranscript ?? undefined },
-        )
-
-        const useMagicBrolls = smart.magicBrolls
-
-        // Submagic renders WITHOUT its own music — we add a mood-matched track
-        // from our own library in post (pollSubmagicUntilDone), so v2/v3 get the
-        // same music system as v4/v5. v1's profile has useMusic:false, so it stays
-        // voice-only; 'off' mode disables music everywhere.
+        // Submagic renders WITHOUT its own music — we mix a mood-matched library
+        // track in post (pollSubmagicUntilDone), same system as v4/v5. Music is
+        // locked per variant (spec.useMusic); 'off' mode disables it everywhere.
         const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
-        if (!musicOff && (profile?.useMusic ?? true)) {
+        const wantsMusic = spec ? spec.useMusic : (variant.submagicProfile?.useMusic ?? true)
+        if (!musicOff && wantsMusic) {
           ourMusicCtx = { hook: scriptRow?.hook ?? '', moodTag: scriptRow?.mood_tag ?? null, scriptFormat }
         }
 
-        projectId = await submitSubmagicJob(videoUrlForSubmagic, {
-          title: `${variantId}-${jobId.slice(0, 8)}`,
-          templateName: smart.templateName,
-          magicBrolls: useMagicBrolls,
-          magicBrollsPercentage: smart.magicBrollsPercentage,
-          hookTitle: smart.hookTitle,
-          removeSilencePace: smart.removeSilencePace,
-          ...SUBMAGIC_ALWAYS_ON,
-        })
+        if (spec) {
+          const profile = await ensureContentProfile(jobId, job.source_drive_url as string)
+          // Give the post-Submagic music mix the same video understanding, so the
+          // track is matched to what the footage actually is, not just the mood tag.
+          if (ourMusicCtx) {
+            ourMusicCtx.profile = profile
+            ourMusicCtx.transcript = job.transcript as string | null
+          }
+          const templateName = await resolveCaptionTemplate(spec.captionLane, profile.captionMood)
+          const resolved = resolveSubmagicSettings(spec, profile, { templateName })
+
+          // ALWAYS_ON first, then the resolved knobs — so resolved.magicZooms
+          // (a per-variant/guardrail decision now) wins over the baseline's
+          // magicZooms:true instead of being forced back on.
+          projectId = await submitSubmagicJob(videoUrlForSubmagic, {
+            title: `${variantId}-${jobId.slice(0, 8)}`,
+            ...SUBMAGIC_ALWAYS_ON,
+            templateName: resolved.templateName,
+            magicBrolls: resolved.magicBrolls,
+            magicBrollsPercentage: resolved.magicBrollsPercentage,
+            magicZooms: resolved.magicZooms,
+            hookTitle: resolved.hookTitle,
+            removeSilencePace: resolved.removeSilencePace,
+          })
+        } else {
+          // Legacy fallback: written script + directive, no video understanding.
+          let actualTranscript = job.transcript as string | null
+          if (!actualTranscript) {
+            try {
+              const transcribed = await transcribeVideo(videoUrlForSubmagic)
+              actualTranscript = transcribed.transcript || null
+              if (actualTranscript) {
+                await supabase.from('video_jobs').update({ transcript: actualTranscript }).eq('id', jobId)
+              }
+            } catch (e) {
+              console.warn('[start-variant] transcription failed, falling back to script text only:', (e as Error).message)
+            }
+          }
+
+          const smart = await deriveSmartSubmagicSettings(
+            {
+              hook: scriptRow?.hook ?? '',
+              cta: scriptRow?.cta ?? '',
+              mood_tag: scriptRow?.mood_tag ?? null,
+              script_format: scriptFormat,
+            },
+            { profileDirective: variant.submagicProfile?.directive, actualTranscript: actualTranscript ?? undefined },
+          )
+
+          projectId = await submitSubmagicJob(videoUrlForSubmagic, {
+            title: `${variantId}-${jobId.slice(0, 8)}`,
+            ...SUBMAGIC_ALWAYS_ON,
+            templateName: smart.templateName,
+            magicBrolls: smart.magicBrolls,
+            magicBrollsPercentage: smart.magicBrollsPercentage,
+            hookTitle: smart.hookTitle,
+            removeSilencePace: smart.removeSilencePace,
+          })
+        }
       }
 
       // Save external_id immediately
-      const withExternal = (job.variants as VideoVariant[]).map((v: VideoVariant) =>
-        v.id === variantId ? { ...v, status: 'processing', external_id: projectId, progress: { step: 2, total: 2, label: 'Processing in Submagic' } } : v
-      )
-      await supabase.from('video_jobs').update({ variants: withExternal }).eq('id', jobId)
+      await patchVariant(supabase, jobId, variantId, {
+        status: 'processing',
+        external_id: projectId,
+        progress: { step: 2, total: 2, label: 'Processing in Submagic' },
+      })
 
       // Fire-and-forget poll loop (adds our library music in post when set)
       pollSubmagicUntilDone(jobId, variantId, projectId, ourMusicCtx).catch(e =>
@@ -267,10 +292,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({ ok: true })
     } catch (e) {
-      const failed = (job.variants as VideoVariant[]).map((v: VideoVariant) =>
-        v.id === variantId ? { ...v, status: 'failed', error: (e as Error).message, progress: null } : v
-      )
-      await supabase.from('video_jobs').update({ variants: failed }).eq('id', jobId)
+      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: (e as Error).message, progress: null })
       return NextResponse.json({ error: (e as Error).message }, { status: 500 })
     } finally {
       activeSubmagicStarts.delete(lockKey)
