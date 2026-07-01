@@ -9,6 +9,11 @@ create extension if not exists "uuid-ossp";
 create table if not exists brand_settings (
   id                    uuid        primary key default gen_random_uuid(),
 
+  -- Multi-profile support (up to 3 creator profiles per account)
+  profile_slot          integer     not null default 1 check (profile_slot between 1 and 3),
+  profile_name          text        not null default 'Profile 1',
+  is_active             boolean     not null default false,
+
   -- Who you are
   creator_name          text        not null default '',
   tagline               text        not null default '',
