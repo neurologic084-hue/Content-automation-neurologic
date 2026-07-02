@@ -6,6 +6,7 @@ import {
   deriveSmartSubmagicSettings,
   pickPremiumTemplates,
   resolveCaptionTemplate,
+  resolvePooledTemplate,
   submitSubmagicJob,
   pollSubmagicJob,
   transcribeVideo,
@@ -126,9 +127,9 @@ export async function POST(req: NextRequest) {
 
     // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
     // so they read as a real side-by-side comparison rather than two random picks.
-    // our-v6 skips Submagic entirely (testing-only), so it never needs a template.
+    // our-v6 never touches Submagic (Remotion-only edit), so it needs no template.
     let submagicTemplateName: string | undefined
-    if (!variant.motionGraphicsTestOnly) {
+    if (!variant.motionGraphicsTestOnly && !variant.remotionEdit) {
       const [tplA, tplB] = await pickPremiumTemplates()
       submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
     }
@@ -140,6 +141,7 @@ export async function POST(req: NextRequest) {
       moodTag: scriptRow?.mood_tag ?? null,
       scriptFormat,
       motionGraphicsTestOnly: variant.motionGraphicsTestOnly as boolean | undefined,
+      remotionEdit: variant.remotionEdit as boolean | undefined,
       captionTestOnly: variant.captionTestOnly as boolean | undefined,
       motionGraphics: variant.motionGraphics as boolean | undefined,
       motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
@@ -225,7 +227,14 @@ export async function POST(req: NextRequest) {
             ourMusicCtx.profile = profile
             ourMusicCtx.transcript = job.transcript as string | null
           }
-          const templateName = await resolveCaptionTemplate(spec.captionLane, profile.captionMood)
+          // A custom theme (exact caption style) needs no template resolution at
+          // all. Otherwise a pinned template pool (e.g. the UGC Aesthetic Umi
+          // family) wins over the fuzzy caption-lane classifier, with lane
+          // resolution as the fallback.
+          const templateName = spec.userThemeId
+            ? undefined
+            : (spec.templatePool ? await resolvePooledTemplate(spec.templatePool) : undefined)
+              ?? await resolveCaptionTemplate(spec.captionLane, profile.captionMood)
           const resolved = resolveSubmagicSettings(spec, profile, { templateName })
 
           // ALWAYS_ON first, then the resolved knobs — so resolved.magicZooms
@@ -235,6 +244,7 @@ export async function POST(req: NextRequest) {
             title: `${variantId}-${jobId.slice(0, 8)}`,
             ...SUBMAGIC_ALWAYS_ON,
             templateName: resolved.templateName,
+            userThemeId: resolved.userThemeId,
             magicBrolls: resolved.magicBrolls,
             magicBrollsPercentage: resolved.magicBrollsPercentage,
             magicZooms: resolved.magicZooms,

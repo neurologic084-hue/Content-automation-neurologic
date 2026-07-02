@@ -1,6 +1,7 @@
 import React from 'react'
 import { Composition, registerRoot } from 'remotion'
 import { Overlay, type OverlayProps } from './compositions/Overlay'
+import { ShortEdit, type ShortEditProps } from './compositions/ShortEdit'
 
 const RemotionRoot: React.FC = () => (
   <>
@@ -24,6 +25,28 @@ const RemotionRoot: React.FC = () => (
           // Matches whatever shape the source footage actually is -- the base
           // video is never cropped to a fixed aspect ratio anymore, so the
           // overlay has to follow it instead of assuming vertical.
+          width: props.width ?? 1080,
+          height: props.height ?? 1920,
+        }
+      }}
+    />
+    <Composition
+      id="ShortEdit"
+      component={ShortEdit}
+      durationInFrames={900}
+      fps={30}
+      width={1080}
+      height={1920}
+      defaultProps={{ videoFile: '', segments: [], pages: [] } as ShortEditProps}
+      calculateMetadata={({ props }) => {
+        const fps = props.fps ?? 30
+        const totalFrames = (props.segments ?? []).reduce(
+          (a, s) => a + Math.max(1, Math.round((s.duration ?? 0) * fps)),
+          0
+        )
+        return {
+          durationInFrames: Math.max(30, totalFrames),
+          fps,
           width: props.width ?? 1080,
           height: props.height ?? 1920,
         }

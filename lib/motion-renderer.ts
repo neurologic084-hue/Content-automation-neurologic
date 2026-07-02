@@ -13,6 +13,11 @@ import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
+import { buildEditPlan } from './edit-plan'
+import { isolateVoiceInPlace } from './voice-isolation'
+import { buildRenderKit, planSfxCues } from './render-kit'
+import { getSfx } from './sound-effects'
+import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions } from './broll'
 
 // Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
 // explicitly (not a bare side-effect import) so the bundler can't drop it.
@@ -526,7 +531,7 @@ function cleanTempFiles(outDir: string, variantId: string): void {
 // vocal band, light sidechain duck so the music stays present, then master the
 // whole thing to -13 LUFS / -1.5 dBTP (short-form loudness). mode 'off' = no
 // music. Library files are the creator's own and are never deleted.
-async function mixBackgroundMusic(
+export async function mixBackgroundMusic(
   videoPath: string,
   hook: string,
   moodTag: string | null,
@@ -801,6 +806,130 @@ async function renderMotionGraphicsTestOnly(
   }
 }
 
+// ── Remotion-only full edit (v6) ──────────────────────────────────────────────
+// No Submagic anywhere: voice isolation (ElevenLabs), silence/retake cutting
+// (edit-plan), reference-style captions, subtle zooms, blur joins, and whoosh
+// SFX all render as ONE Remotion composition (ShortEdit). Music then mixes on
+// top through the same library system every other variant uses.
+async function renderRemotionEdit(
+  jobId: string,
+  variantId: string,
+  sourceUrl: string,
+  outDir: string,
+  opts: RenderVariantOptions,
+): Promise<void> {
+  const { hook, moodTag, scriptFormat, musicMode = DEFAULT_MUSIC_MODE } = opts
+  const musicStep = MUSIC_ENABLED && musicMode !== 'off' ? 1 : 0
+  const STEPS = 5 + musicStep
+  const staged: string[] = []
+  try {
+    cleanTempFiles(outDir, variantId)
+    const outputPath = path.join(outDir, `${variantId}.mp4`)
+
+    await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
+    const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
+    const workPath = path.join(outDir, `${variantId}_isolated.mp4`)
+    fs.copyFileSync(compressedPath, workPath)
+    staged.push(workPath)
+    const profile = await ensureContentProfile(jobId, sourceUrl)
+
+    await setVariantProgress(jobId, variantId, 2, STEPS, 'Isolating voice')
+    await isolateVoiceInPlace(workPath)
+
+    // The render kit: the variant's FIXED identity (caption style, B-roll
+    // flavor) plus smart-randomized style (transition weighted by footage
+    // energy, shuffled B-roll/caption/zoom seeds) — so every rerun of the same
+    // variant is a fresh take that still looks like that variant.
+    const kit = buildRenderKit(variantId, profile)
+    console.log(`[motion-renderer] kit for ${variantId}: captions=${kit.captionStyle} broll=${kit.brollMedia} transition=${kit.transitionStyle} seed=${kit.variation}`)
+
+    // Transcribe AFTER isolation — cleaner audio, better word timings.
+    await setVariantProgress(jobId, variantId, 3, STEPS, 'Planning cuts and captions')
+    const words = await transcribeLocalFile(workPath)
+    const duration = await getVideoDuration(workPath)
+    const dimensions = await probeVideoDimensions(workPath)
+    const plan = await buildEditPlan(words, duration, profile, kit.variation)
+
+    // B-roll: plan slots against the EDITED timeline, then source real media
+    // (Pexels when a key is set, keyless CC0 images otherwise). Best-effort —
+    // zero resolved slots just means an uninterrupted talking head.
+    await setVariantProgress(jobId, variantId, 4, STEPS, 'Finding B-roll')
+    const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
+    const brollPrefix = `edit-cache/${variantId}-${jobId.slice(0, 8)}-broll`
+    let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
+    try {
+      const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia)
+      broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
+      avoidCaptionCollisions(plan.pages, broll)
+      broll.forEach(b => staged.push(path.join(REMOTION_DIR, 'public', b.file)))
+    } catch (e) {
+      console.warn('[motion-renderer] B-roll pass failed, rendering without it:', (e as Error).message)
+    }
+
+    // Stage assets into remotion/public so staticFile() can reach them.
+    fs.mkdirSync(cacheDir, { recursive: true })
+    const stagedVideoName = `edit-cache/${variantId}-${jobId.slice(0, 8)}.mp4`
+    const stagedVideoPath = path.join(REMOTION_DIR, 'public', stagedVideoName)
+    fs.copyFileSync(workPath, stagedVideoPath)
+    staged.push(stagedVideoPath)
+
+    // Event-driven audio: plan the cues (cover in/out, card entrances, number
+    // emphasis), then stage one file per distinct sound used. Best-effort — a
+    // cue whose sound can't generate simply drops out.
+    const cues = planSfxCues(broll, plan.pages, kit.transitionStyle, kit.variation)
+    const catFiles = new Map<string, string>()
+    for (const category of new Set(cues.map(c => c.category))) {
+      try {
+        const src = await getSfx(category)
+        if (src) {
+          const rel = `edit-cache/sfx-${category}.mp3`
+          fs.copyFileSync(src, path.join(REMOTION_DIR, 'public', rel))
+          catFiles.set(category, rel)
+        }
+      } catch { /* that sound stays silent */ }
+    }
+    const sfx = cues
+      .filter(c => catFiles.has(c.category))
+      .map(c => ({ file: catFiles.get(c.category)!, start: c.start, volume: c.volume }))
+    console.log(`[motion-renderer] ${sfx.length} SFX cue(s): ${cues.map(c => `${c.category}@${c.start.toFixed(1)}s`).join(', ') || 'none'}`)
+
+    const propsPath = path.join(outDir, `${variantId}_edit.json`)
+    fs.writeFileSync(propsPath, JSON.stringify({
+      videoFile: stagedVideoName,
+      width: dimensions.width,
+      height: dimensions.height,
+      fps: 30,
+      segments: plan.segments,
+      pages: plan.pages,
+      broll,
+      transitionStyle: kit.transitionStyle,
+      captionStyle: kit.captionStyle,
+      sfx,
+    }))
+    staged.push(propsPath)
+
+    await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
+    await run(
+      `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
+      `--props="${propsPath}" --codec=h264 --crf=19`,
+      900_000,
+    )
+    if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
+
+    if (MUSIC_ENABLED && musicMode !== 'off') {
+      await setVariantProgress(jobId, variantId, 6, STEPS, 'Adding background music')
+      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+    }
+
+    console.log('[motion-renderer] Remotion-only edit ready')
+    await finishVariant(jobId, variantId, outputPath)
+  } catch (e) {
+    await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
+  } finally {
+    for (const f of staged) { try { if (fs.existsSync(f)) fs.unlinkSync(f) } catch { /* best-effort */ } }
+  }
+}
+
 // Polls a Submagic project to completion and returns its download URL. Used by
 // the submagicCutOnly path below, which needs to await the result inline
 // (unlike the separate fire-and-forget poll loop the plain Submagic variants
@@ -826,6 +955,7 @@ export interface RenderVariantOptions {
   scriptFormat?: string
   captionTestOnly?: boolean
   motionGraphicsTestOnly?: boolean  // skip Submagic entirely; raw footage + Remotion graphics only
+  remotionEdit?: boolean            // Remotion-only FULL edit: cuts, captions, zooms, SFX — no Submagic
   motionGraphics?: boolean
   motionGraphicsStyle?: 'minimal' | 'bold'
   submagicTemplateName?: string    // premium caption template
@@ -948,6 +1078,10 @@ export function startSingleVariant(
   const launch = async () => {
     if (opts.captionTestOnly) {
       await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, opts.moodTag, opts.scriptFormat)
+      return
+    }
+    if (opts.remotionEdit) {
+      await renderRemotionEdit(jobId, variantId, sourceUrl, outDir, opts)
       return
     }
     if (opts.motionGraphicsTestOnly) {
