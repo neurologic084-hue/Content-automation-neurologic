@@ -40,6 +40,9 @@ export interface ContentProfile {
   // Zooms and lower-thirds look bad on already-tight framing — a purely visual
   // fact a transcript can never provide.
   faceFraming: 'tight' | 'wide'
+  // Where the face sits VERTICALLY in frame — graphics/overlay planners place
+  // text in the opposite band so it never covers the speaker.
+  faceArea: 'upper' | 'middle' | 'lower'
 }
 
 // Neutral, middle-of-the-road profile. Returned when Gemini is unavailable or
@@ -59,6 +62,7 @@ export const FALLBACK_PROFILE: ContentProfile = {
   suggestedHookTitle: '',
   captionMood: 'clean',
   faceFraming: 'wide',
+  faceArea: 'middle',
 }
 
 // Google's JSON-schema subset (uppercase type names + enum). gemini.ts passes
@@ -78,11 +82,12 @@ const CONTENT_PROFILE_SCHEMA: Record<string, unknown> = {
     suggestedHookTitle: { type: 'STRING' },
     captionMood: { type: 'STRING', enum: ['calm', 'clean', 'energetic'] },
     faceFraming: { type: 'STRING', enum: ['tight', 'wide'] },
+    faceArea: { type: 'STRING', enum: ['upper', 'middle', 'lower'] },
   },
   required: [
     'speechPace', 'energy', 'sensitivity', 'format', 'brollableRichness',
     'hasNumbers', 'keyNumbers', 'emphasisPhrases', 'hookStrength',
-    'suggestedHookTitle', 'captionMood', 'faceFraming',
+    'suggestedHookTitle', 'captionMood', 'faceFraming', 'faceArea',
   ],
 }
 
@@ -107,6 +112,8 @@ const PROMPT = [
   '- suggestedHookTitle: <=6 words, grounded in what is said, no clickbait.',
   '- faceFraming: "tight" if the face fills much of the frame (overlays would cover',
   '  it), "wide" if there is room around them.',
+  '- faceArea: which vertical band of the frame the face mostly occupies ("upper" /',
+  '  "middle" / "lower") — used to place graphics in the emptiest band.',
 ].join('\n')
 
 // Guessed mime types are fine — Gemini only needs the family right.
@@ -154,6 +161,7 @@ function normalizeProfile(raw: Partial<ContentProfile>): ContentProfile {
     suggestedHookTitle: typeof raw.suggestedHookTitle === 'string' ? raw.suggestedHookTitle.slice(0, 80) : f.suggestedHookTitle,
     captionMood: oneOf(raw.captionMood, ['calm', 'clean', 'energetic'], f.captionMood),
     faceFraming: oneOf(raw.faceFraming, ['tight', 'wide'], f.faceFraming),
+    faceArea: oneOf(raw.faceArea, ['upper', 'middle', 'lower'], f.faceArea),
   }
 }
 

@@ -104,8 +104,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   // sound kits are smart-randomized per render so reruns give fresh takes.
   {
     id: 'our-v4',
-    name: 'Remotion Editorial',
-    description: 'Remotion-only full edit with the calm editorial identity: clean Poppins captions anchored low with warm amber accent words, photo-card B-roll only, smart-randomized transitions and sound kit, library music. Zero render credits.',
+    name: 'Julie — UGC Product',
+    description: 'Remotion template modeled on the Julie UGC reference ("Multiple Shots, Voice Isolation, No Music, Photo B Roll"): white bold captions with heavy italic periwinkle/navy two-tone accent words, mixed caption sizes and positions with rotating entrances (fade / zoom / slide), multi-shot punch-in framing, photo-card B-roll at adaptive density, and the opening spotlight focus on the subject. Shared engine: Auphonic audio cleaning, silence/filler cuts, library music. Zero render credits.',
     tool: 'edit',
     order: 4,
     autoStart: false,
@@ -113,8 +113,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v5',
-    name: 'Remotion Impact',
-    description: 'Remotion-only full edit with the bold impact identity: condensed ALL-CAPS captions with yellow accent words and a scale-pop entrance, video B-roll wherever possible, smart-randomized transitions and sound kit, library music. Zero render credits.',
+    name: 'Ryan — Viral Podcast',
+    description: 'Remotion template modeled on the Ryan viral-podcast reference: two-tier captions (small white sans + big gold italic-serif accents, heavy block numbers with rotating orange/violet colors), adaptive full-screen video B-roll with slide-push transitions, designed poster cards, white inset-card beats, punch-in framing jumps, and the hook caption behind the speaker when a subject matte is available. Shared engine: Auphonic audio cleaning, silence/filler cuts, library music. Zero render credits.',
     tool: 'edit',
     order: 5,
     autoStart: false,
@@ -122,8 +122,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v6',
-    name: 'Remotion UGC Serif',
-    description: 'Remotion-only full edit with the UGC reference identity: white captions with italic serif silver-blue gradient accents, mixed B-roll (photo cards + full-screen video covers), smart-randomized transitions and sound kit, library music. Zero render credits.',
+    name: 'Dan Koe — Cinematic',
+    description: 'Remotion template modeled on the Dan Koe sample: dark cinematic grade with vignette, tiny sentence-case captions, slow push-in framing jumps, red-line mono CTA tag, and context-driven glowing graphics instead of stock B-roll — floating italic-serif hook title with a red rotating subtitle word, bright/dim enumeration lists, and red venn circles that merge when the speech contrasts two ideas. Shared engine: Auphonic audio cleaning, silence/filler cuts, library music. Zero render credits.',
     tool: 'edit',
     order: 6,
     autoStart: false,

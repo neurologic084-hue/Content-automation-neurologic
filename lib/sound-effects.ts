@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import { exec } from 'child_process'
 
 // ── Native sound effects ──────────────────────────────────────────────────────
 // A generic transition whoosh is the same regardless of video content, unlike
@@ -22,7 +23,7 @@ interface SfxDef {
 export type SfxCategory =
   | 'whoosh' | 'impact' | 'ding' | 'riser' | 'shutter'
   | 'whoosh-snap' | 'flash-pop' | 'shutter-soft' | 'pop'
-  | 'whoosh-airy' | 'whoosh-deep' | 'boom-soft'
+  | 'whoosh-airy' | 'whoosh-deep' | 'boom-soft' | 'click-digital'
 
 const SFX_DEFS: Record<SfxCategory, SfxDef> = {
   whoosh: {
@@ -89,10 +90,46 @@ const SFX_DEFS: Record<SfxCategory, SfxDef> = {
     prompt: 'soft cinematic boom hit sound effect, muffled low thump with a quick decay, subtle and modern, no music, no voice, no long rumble tail',
     durationSeconds: 1,
   },
+  // Textured layer (stage two of the sound-design system): a tiny UI tap that
+  // rides on accent-word pops and blends the riser's landing on the poster
+  // card. Directs attention without ever reading as a "sound effect".
+  'click-digital': {
+    name: 'click-digital',
+    prompt: 'single soft digital user interface click sound effect, tiny rounded tap like a modern app button press, very short and subtle, clean, no beep, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+}
+
+// Bumping this regenerates the library with peak normalization applied — old
+// unnormalized files simply go stale in the tmp cache.
+const SFX_CACHE_VERSION = 2
+
+function execP(cmd: string, opts: { maxBuffer?: number; encoding?: 'buffer' } = {}): Promise<string | Buffer> {
+  return new Promise((resolve, reject) => {
+    exec(cmd, { timeout: 60_000, maxBuffer: opts.maxBuffer ?? 32 * 1024 * 1024, encoding: opts.encoding ?? 'utf8' },
+      (err, stdout) => (err ? reject(err) : resolve(stdout)))
+  })
+}
+
+// Peak-normalize a freshly generated SFX to -3 dBFS so the planner's volume
+// multipliers mean the same thing for every category — ElevenLabs output
+// loudness varies a lot between generations. Best-effort: on any failure the
+// raw file is kept.
+async function normalizeSfx(filePath: string): Promise<void> {
+  try {
+    const probe = await execP(`ffmpeg -i "${filePath}" -af volumedetect -f null - 2>&1`) as string
+    const match = probe.match(/max_volume:\s*(-?[\d.]+)\s*dB/)
+    if (!match) return
+    const gain = -3 - parseFloat(match[1])
+    if (Math.abs(gain) < 0.5) return
+    const tmp = `${filePath}.norm.mp3`
+    await execP(`ffmpeg -y -i "${filePath}" -af "volume=${gain.toFixed(2)}dB" -c:a libmp3lame -q:a 4 "${tmp}"`)
+    if (fs.existsSync(tmp) && fs.statSync(tmp).size > 1000) fs.renameSync(tmp, filePath)
+  } catch { /* keep the raw file */ }
 }
 
 async function generateSfx(def: SfxDef): Promise<string> {
-  const cachePath = path.join(CACHE_DIR, `${def.name}.mp3`)
+  const cachePath = path.join(CACHE_DIR, `${def.name}.v${SFX_CACHE_VERSION}.mp3`)
   if (fs.existsSync(cachePath)) return cachePath
 
   const key = process.env.ELEVENLABS_API_KEY
@@ -114,8 +151,50 @@ async function generateSfx(def: SfxDef): Promise<string> {
   const buf = Buffer.from(await res.arrayBuffer())
   fs.mkdirSync(CACHE_DIR, { recursive: true })
   fs.writeFileSync(cachePath, buf)
+  await normalizeSfx(cachePath)
   console.log(`[sound-effects] cached "${def.name}" -> ${cachePath}`)
   return cachePath
+}
+
+// ── Timing probe (peak alignment) ─────────────────────────────────────────────
+// The core trick of premium sound design: the LOUDEST INSTANT of a sound must
+// land on the animation's point of maximum motion — not the file's first
+// sample. This measures where that instant sits inside a file so the planner
+// can back-time each cue (start = peakTarget - peakSec). Risers get this for
+// free: their peak is near the end, so aligning it drops the build-up
+// naturally BEFORE the moment.
+
+export interface SfxTiming {
+  durationSec: number
+  peakSec: number   // offset of the loudest sample from the start of the file
+}
+
+const timingCache = new Map<string, Promise<SfxTiming>>()
+
+export function probeSfxTiming(filePath: string): Promise<SfxTiming> {
+  let cached = timingCache.get(filePath)
+  if (!cached) {
+    cached = (async (): Promise<SfxTiming> => {
+      const RATE = 8000
+      const pcm = await execP(
+        `ffmpeg -v error -i "${filePath}" -f s16le -ac 1 -ar ${RATE} -`,
+        { encoding: 'buffer' },
+      ) as Buffer
+      const samples = Math.floor(pcm.length / 2)
+      let maxAbs = 0
+      let maxAt = 0
+      for (let i = 0; i < samples; i++) {
+        const v = Math.abs(pcm.readInt16LE(i * 2))
+        if (v > maxAbs) { maxAbs = v; maxAt = i }
+      }
+      return { durationSec: samples / RATE, peakSec: maxAt / RATE }
+    })().catch((e) => {
+      timingCache.delete(filePath)
+      throw e
+    })
+    timingCache.set(filePath, cached)
+  }
+  return cached
 }
 
 const sfxAttempts = new Map<SfxCategory, Promise<string | null>>()
@@ -145,7 +224,10 @@ export async function getShutterSfx(): Promise<string | null> {
   return getSfx('shutter')
 }
 
-export type TransitionStyle = 'blur' | 'flash' | 'punch'
+// 'slide' is the viral-podcast push (v5's locked style): covers shove in from
+// the right and shove back out. It stays out of TRANSITION_STYLES so the seeded
+// rotation used by v4/v6 harness runs keeps its original three-style cycle.
+export type TransitionStyle = 'blur' | 'flash' | 'punch' | 'slide'
 
 export const TRANSITION_STYLES: TransitionStyle[] = ['blur', 'flash', 'punch']
 

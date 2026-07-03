@@ -7,7 +7,6 @@
 
 import fs from 'fs'
 import { exec } from 'child_process'
-import FormData from 'form-data'
 
 function run(cmd: string, timeoutMs = 180_000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -37,13 +36,17 @@ export async function isolateVoiceInPlace(videoPath: string): Promise<boolean> {
       return false
     }
 
-    const form = new FormData()
-    form.append('audio', fs.createReadStream(rawAudio), { filename: 'audio.mp3', contentType: 'audio/mpeg' })
+    // Native FormData + Blob, not the npm form-data package — fetch() doesn't
+    // reliably serialize form-data's stream-based body for real file uploads
+    // (the API answered 400 "error parsing the body" for every isolation call
+    // made that way). Same fix as transcribeLocalFile in caption-renderer.ts.
+    const form = new globalThis.FormData()
+    form.append('audio', new Blob([fs.readFileSync(rawAudio)], { type: 'audio/mpeg' }), 'audio.mp3')
 
     const res = await fetch('https://api.elevenlabs.io/v1/audio-isolation', {
       method: 'POST',
-      headers: { 'xi-api-key': key, ...form.getHeaders() },
-      body: form as unknown as BodyInit,
+      headers: { 'xi-api-key': key },
+      body: form,
       signal: AbortSignal.timeout(240_000),
     })
     if (!res.ok) {
