@@ -9,19 +9,27 @@ import { PipelineFlow } from '@/components/pipeline-flow'
 export default async function DashboardPage() {
   const supabase = await createClient()
 
-  const [ideasRes, pendingRes, approvedRes, publishedCountRes, brandRes] = await Promise.all([
-    supabase.from('ideas').select('id', { count: 'exact', head: true }),
-    supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'pending_review'),
-    supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
-    supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']),
-    supabase.from('brand_settings').select('creator_name').eq('is_active', true).maybeSingle(),
+  // Active profile first — every query below is scoped to its slot so
+  // switching profiles swaps the entire workspace.
+  const { data: activeBrand } = await supabase
+    .from('brand_settings')
+    .select('creator_name, profile_slot')
+    .eq('is_active', true)
+    .maybeSingle()
+  const slot = activeBrand?.profile_slot ?? 1
+
+  const [ideasRes, pendingRes, approvedRes, publishedCountRes] = await Promise.all([
+    supabase.from('ideas').select('id', { count: 'exact', head: true }).eq('profile_slot', slot),
+    supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'pending_review').eq('profile_slot', slot),
+    supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved').eq('profile_slot', slot),
+    supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']).eq('profile_slot', slot),
   ])
 
   const totalIdeas = ideasRes.count ?? 0
   const pendingReview = pendingRes.count ?? 0
   const totalApproved = approvedRes.count ?? 0
   const totalPublished = publishedCountRes.count ?? 0
-  const brandName = brandRes.data?.creator_name ?? null
+  const brandName = activeBrand?.creator_name ?? null
   const hasSettings = !!(brandName && brandName.trim().length > 0)
 
   const hour = new Date().getHours()
@@ -30,10 +38,37 @@ export default async function DashboardPage() {
   const ACTIVITY_TTL_DAYS = 7
   const ttlCutoff = new Date(Date.now() - ACTIVITY_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()
 
+  // "Up next" intelligence: read the pipeline and surface the single best move.
+  const [readyJobsRes, jobsScriptIdsRes, weekApprovedRes, weekPublishedRes] = await Promise.all([
+    supabase.from('video_jobs').select('id', { count: 'exact', head: true }).eq('status', 'complete').is('selected_variant', null).eq('profile_slot', slot),
+    supabase.from('video_jobs').select('script_id').eq('profile_slot', slot),
+    supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved').gte('approved_at', ttlCutoff).eq('profile_slot', slot),
+    supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']).gte('created_at', ttlCutoff).eq('profile_slot', slot),
+  ])
+  const variantsReady = readyJobsRes.count ?? 0
+  const scriptIdsWithFootage = new Set((jobsScriptIdsRes.data ?? []).map(j => j.script_id))
+  const weekApproved = weekApprovedRes.count ?? 0
+  const weekPublished = weekPublishedRes.count ?? 0
+
+  const { data: approvedIds } = await supabase.from('scripts').select('id').eq('status', 'approved').eq('profile_slot', slot)
+  const approvedNoFootage = (approvedIds ?? []).filter(s => !scriptIdsWithFootage.has(s.id)).length
+
+  type NextAction = { label: string; sublabel: string; href: string; color: string; bg: string }
+  const nextAction: NextAction | null = !hasSettings
+    ? null // getting-started card already handles this state
+    : pendingReview > 0
+    ? { label: `Review ${pendingReview} waiting script${pendingReview === 1 ? '' : 's'}`, sublabel: 'Approving trains your voice — every approval makes the next script better.', href: '/review', color: '#6366F1', bg: '#EEF2FF' }
+    : variantsReady > 0
+    ? { label: `Pick a winner — ${variantsReady} video${variantsReady === 1 ? ' has' : 's have'} variants ready`, sublabel: 'Choose the best edit and send it to Publish.', href: '/library', color: '#FF4F17', bg: '#FFF3EF' }
+    : approvedNoFootage > 0
+    ? { label: `${approvedNoFootage} approved script${approvedNoFootage === 1 ? '' : 's'} need${approvedNoFootage === 1 ? 's' : ''} footage`, sublabel: 'Film the script, upload to Drive, and the studio edits it for you.', href: '/library', color: '#F59E0B', bg: '#FEF3C7' }
+    : { label: 'Generate fresh ideas', sublabel: 'The pipeline is clear — feed it 10 new AI ideas from your brand.', href: '/ideas/new', color: '#16A34A', bg: '#DCFCE7' }
+
   const { data: recentScripts } = await supabase
     .from('scripts')
     .select(`id, hook, status, mood_tag, created_at, idea:ideas(confirmed_lane, raw_idea)`)
     .eq('status', 'pending_review')
+    .eq('profile_slot', slot)
     .order('created_at', { ascending: false })
     .limit(4)
 
@@ -43,6 +78,7 @@ export default async function DashboardPage() {
       .from('scripts')
       .select('id, hook, mood_tag, approved_at')
       .eq('status', 'approved')
+      .eq('profile_slot', slot)
       .gte('approved_at', ttlCutoff)
       .order('approved_at', { ascending: false })
       .limit(5),
@@ -50,6 +86,7 @@ export default async function DashboardPage() {
       .from('publish_jobs')
       .select('id, status, platform_posts, published_at, scheduled_at, created_at')
       .in('status', ['published', 'scheduled', 'partial'])
+      .eq('profile_slot', slot)
       .gte('created_at', ttlCutoff)
       .order('created_at', { ascending: false })
       .limit(5),
@@ -188,9 +225,50 @@ export default async function DashboardPage() {
               </div>
             ))}
           </div>
+
+          {/* Weekly momentum */}
+          {(weekApproved > 0 || weekPublished > 0) && (
+            <div className="flex items-center gap-1.5 mt-4 pt-3 border-t border-white/10">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ADE80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
+                <polyline points="17 6 23 6 23 12" />
+              </svg>
+              <p className="text-xs text-white/50">
+                This week:{' '}
+                {weekApproved > 0 && <span className="text-white/80 font-medium">{weekApproved} approved</span>}
+                {weekApproved > 0 && weekPublished > 0 && ' · '}
+                {weekPublished > 0 && <span className="text-white/80 font-medium">{weekPublished} published</span>}
+              </p>
+            </div>
+          )}
         </div>
       </div>
       </div>
+
+      {/* ── Up next — the single best move right now ── */}
+      {nextAction && (
+        <div className="animate-fadeInUp" style={{ animationDelay: '40ms' }}>
+          <Link
+            href={nextAction.href}
+            className="flex items-center gap-4 bg-white border border-[#E4E4E0] rounded-2xl p-4 sm:p-5 hover:shadow-md transition-all duration-150 group hover-lift"
+            style={{ borderLeft: `3px solid ${nextAction.color}` }}
+          >
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: nextAction.bg }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={nextAction.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-widest mb-0.5" style={{ color: nextAction.color }}>Up next</p>
+              <p className="text-sm font-semibold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>{nextAction.label}</p>
+              <p className="text-xs text-[#A1A1AA] mt-0.5 hidden sm:block">{nextAction.sublabel}</p>
+            </div>
+            <svg className="flex-shrink-0 text-[#A1A1AA] group-hover:translate-x-1 transition-transform" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: nextAction.color }}>
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          </Link>
+        </div>
+      )}
 
       {/* ── Pipeline — the system at a glance ── */}
       <div className="animate-fadeInUp" style={{ animationDelay: '60ms' }}>
@@ -457,9 +535,9 @@ export default async function DashboardPage() {
         <p className="text-xs font-bold text-[#A1A1AA] uppercase tracking-widest mb-3">Your full workflow</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
 
-          {/* Video Studio */}
+          {/* Scripts hub */}
           <Link
-            href="/edit"
+            href="/library"
             className="bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#6366F1] hover:shadow-sm transition-all duration-150 group hover-lift"
           >
             <div className="flex items-start gap-3 mb-4">
@@ -471,10 +549,10 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1">
                 <p className="font-bold text-sm text-[#18181B] mb-1" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                  Video Studio
+                  Scripts &amp; Studio
                 </p>
                 <ul className="space-y-0.5">
-                  {['Paste your recording from Google Drive', 'AI cuts, captions & music automatically', 'Download or send straight to Publish'].map((f) => (
+                  {['All approved scripts, organized by stage', 'Add footage — AI cuts, captions & music', 'Pick the best variant and publish'].map((f) => (
                     <li key={f} className="text-xs text-[#71717A] flex items-center gap-1.5">
                       <span className="w-1 h-1 rounded-full bg-[#C4C4C0] flex-shrink-0" />
                       {f}
@@ -484,7 +562,7 @@ export default async function DashboardPage() {
               </div>
             </div>
             <div className="flex items-center gap-1.5 text-xs font-semibold text-[#6366F1] group-hover:gap-2.5 transition-all">
-              Open Video Studio
+              Open Scripts
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 18l6-6-6-6" />
               </svg>

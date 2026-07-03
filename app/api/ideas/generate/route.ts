@@ -31,17 +31,23 @@ export async function POST(req: Request) {
     icp,
   ].filter(Boolean).join(' ').slice(0, 300)
 
+  // Scope idea history + approved patterns to the ACTIVE profile only, so
+  // Profile 2's topics never contaminate Profile 1's idea generation.
+  const activeSlot = brand.profile_slot ?? 1
+
   const [newsItems, previousIdeasRes, approvedScriptsRes] = await Promise.allSettled([
     searchNicheNews(nicheQuery),
     supabase
       .from('ideas')
       .select('raw_idea')
+      .eq('profile_slot', activeSlot)
       .order('created_at', { ascending: false })
       .limit(40),
     supabase
       .from('scripts')
       .select('hook, filming_plan, idea:ideas(raw_idea)')
       .eq('status', 'approved')
+      .eq('profile_slot', activeSlot)
       .order('approved_at', { ascending: false })
       .limit(15),
   ])

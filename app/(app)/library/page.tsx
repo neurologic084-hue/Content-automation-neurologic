@@ -1,24 +1,8 @@
 import { createClient } from '@/lib/supabase/server'
+import { getActiveSlot } from '@/lib/active-profile'
 import Link from 'next/link'
-import { ScriptActionsMenu } from '@/components/script-actions-menu'
 import { FolderTabs } from '@/components/folder-tabs'
-
-const MOOD_COLOR: Record<string, string> = {
-  calm: '#6366F1',
-  energetic: '#FF4F17',
-  empathetic: '#EC4899',
-  educational: '#0EA5E9',
-  bold: '#EF4444',
-  'story-driven': '#F59E0B',
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })
-}
+import { ScriptsHubList, type HubJob } from '@/components/scripts-hub-list'
 
 export default async function LibraryPage({
   searchParams,
@@ -28,13 +12,16 @@ export default async function LibraryPage({
   const { folder: folderParam } = await searchParams
   const selectedFolderIds = folderParam ? folderParam.split(',').filter(Boolean) : []
   const supabase = await createClient()
+  const slot = await getActiveSlot(supabase)
 
-  // Try with folder_id first; fall back if the column doesn't exist yet
+  // Approved scripts for the ACTIVE profile only — switching profiles swaps
+  // the whole hub. Falls back to folder-less select if that column is missing.
   let allScripts: { id: string; idea_id: string; hook: string; body: string; cta: string; mood_tag: string | null; approved_at: string | null; folder_id: string | null }[] | null = null
   const { data: withFolder, error: folderColError } = await supabase
     .from('scripts')
     .select('id, idea_id, hook, body, cta, mood_tag, approved_at, folder_id')
     .eq('status', 'approved')
+    .eq('profile_slot', slot)
     .order('approved_at', { ascending: false })
 
   if (folderColError) {
@@ -42,10 +29,21 @@ export default async function LibraryPage({
       .from('scripts')
       .select('id, idea_id, hook, body, cta, mood_tag, approved_at')
       .eq('status', 'approved')
+      .eq('profile_slot', slot)
       .order('approved_at', { ascending: false })
     allScripts = withoutFolder?.map(s => ({ ...s, folder_id: null })) ?? null
   } else {
     allScripts = withFolder
+  }
+
+  // Video pipeline state per script — powers the stage badges and actions
+  const jobsByScript: Record<string, HubJob> = {}
+  const { data: jobs } = await supabase
+    .from('video_jobs')
+    .select('id, script_id, status, selected_variant')
+    .eq('profile_slot', slot)
+  for (const j of jobs ?? []) {
+    jobsByScript[j.script_id] = { id: j.id, status: j.status, selected_variant: j.selected_variant }
   }
 
   const { data: folders } = await supabase.from('folders').select('id, name').order('name')
@@ -70,14 +68,14 @@ export default async function LibraryPage({
           className="text-2xl font-bold text-[#18181B]"
           style={{ fontFamily: 'var(--font-jakarta)' }}
         >
-          Script library
+          Scripts
         </h1>
         <p className="mt-1 text-sm text-[#71717A]">
-          {total} approved script{total !== 1 ? 's' : ''}
+          {total} approved script{total !== 1 ? 's' : ''} — film, edit, and publish from here.
         </p>
       </div>
 
-      {/* Folder tabs   always shown (includes New folder button) */}
+      {/* Folder tabs — always shown (includes New folder button) */}
       <div className="animate-fadeInUp mb-5" style={{ animationDelay: '60ms' }}>
         <FolderTabs
           folders={(folders ?? []).map(f => ({
@@ -95,68 +93,14 @@ export default async function LibraryPage({
         </p>
       )}
 
-      {/* Scripts */}
+      {/* Scripts hub — stage filter + video status + context actions */}
       {scripts && scripts.length > 0 ? (
-        <div className="space-y-3">
-          {scripts.map((script, i) => {
-            const moodColor = script.mood_tag ? MOOD_COLOR[script.mood_tag] : '#A1A1AA'
-            const folder = folders?.find(f => f.id === script.folder_id)
-
-            return (
-              <div
-                key={script.id}
-                className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#D0CCC8] hover:shadow-sm transition-all duration-150 hover-lift"
-                style={{ animationDelay: `${120 + i * 50}ms` }}
-              >
-                <div className="flex items-start gap-4">
-                  <Link href={`/review/${script.id}`} className="flex-1 min-w-0">
-                    <div className="flex flex-wrap items-center gap-2 mb-2.5">
-                      {folder && (
-                        <span className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-[#FFF3EF] text-[#FF4F17] font-medium">
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="#FF4F17">
-                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                          </svg>
-                          {folder.name}
-                        </span>
-                      )}
-                      {script.mood_tag && (
-                        <span
-                          className="text-xs px-2.5 py-1 rounded-full"
-                          style={{ background: `${moodColor}15`, color: moodColor }}
-                        >
-                          {script.mood_tag}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm font-semibold text-[#18181B] leading-snug mb-1.5">
-                      &ldquo;{script.hook}&rdquo;
-                    </p>
-                    <p className="text-xs text-[#71717A] line-clamp-2 leading-relaxed">
-                      {script.body?.replace(/\n/g, ' ')}
-                    </p>
-                    {script.approved_at && (
-                      <p className="text-xs text-[#A1A1AA] mt-2">
-                        Approved {formatDate(script.approved_at)}
-                      </p>
-                    )}
-                  </Link>
-
-                  <div className="flex flex-col items-center flex-shrink-0 -mr-2">
-                    <div className="w-8 h-8 rounded-xl bg-[#DCFCE7] flex items-center justify-center mb-1" aria-label="Approved" role="img">
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2.5" aria-hidden="true">
-                        <path d="M20 6L9 17l-5-5" />
-                      </svg>
-                    </div>
-                    <ScriptActionsMenu
-                      scriptId={script.id}
-                      ideaId={script.idea_id ?? ''}
-                      currentFolderId={script.folder_id ?? null}
-                    />
-                  </div>
-                </div>
-              </div>
-            )
-          })}
+        <div className="animate-fadeInUp" style={{ animationDelay: '100ms' }}>
+          <ScriptsHubList
+            scripts={scripts}
+            jobsByScript={jobsByScript}
+            folders={folders ?? []}
+          />
         </div>
       ) : (
         <div
@@ -181,8 +125,8 @@ export default async function LibraryPage({
                   <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
                 </svg>
               </div>
-              <p className="font-medium text-[#18181B] mb-1">Library is empty</p>
-              <p className="text-sm text-[#A1A1AA] mb-4">Approved scripts will appear here.</p>
+              <p className="font-medium text-[#18181B] mb-1">No scripts yet</p>
+              <p className="text-sm text-[#A1A1AA] mb-4">Approved scripts will appear here, ready to film and publish.</p>
               <Link
                 href="/ideas/new"
                 className="shine-sweep inline-flex items-center gap-2 px-4 py-2 rounded-xl text-white text-sm font-semibold transition-all hover-lift"

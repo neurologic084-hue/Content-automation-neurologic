@@ -60,7 +60,7 @@ export function PipelineFlow({
       key: 'studio',
       label: 'Studio',
       count: approved,
-      href: '/edit',
+      href: '/library',
       color: '#F59E0B',
       bg: '#FEF3C7',
       icon: (

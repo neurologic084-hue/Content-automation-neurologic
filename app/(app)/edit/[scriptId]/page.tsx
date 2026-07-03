@@ -68,6 +68,18 @@ export default async function EditScriptPage({
               </div>
             ))}
           </div>
+          {/* Delivery coaching — read this right before hitting record */}
+          {(script.filming_plan?.delivery_cues?.length ?? 0) > 0 && (
+            <div className="mt-3 pt-3 border-t border-[#FFCAB8]/50 space-y-1.5">
+              <p className="text-[11px] font-bold text-[#FF4F17] uppercase tracking-widest mb-1">Delivery</p>
+              {(script.filming_plan!.delivery_cues as string[]).map((cue: string, i: number) => (
+                <div key={i} className="flex items-start gap-2">
+                  <span className="text-xs font-semibold text-[#FF4F17] flex-shrink-0 pt-0.5">{i + 1}.</span>
+                  <span className="text-sm text-[#18181B] leading-relaxed">{cue}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -76,7 +76,8 @@ export function buildScriptGenerationMessages(
   fewShotExamples: Script[],
   searchContext: string,
   moodTag?: string,
-  scriptFormat?: string
+  scriptFormat?: string,
+  learningSections?: string
 ): Array<{ role: 'system' | 'user'; content: string }> {
   // Use brand-configured lane description when available — this allows the tool
   // to work for any niche without code changes. Falls back to the built-in
@@ -259,7 +260,7 @@ You MUST respond with raw JSON only. No markdown. No backticks. No explanation. 
 
 ${fewShotSection}
 
-${webSection}
+${learningSections?.trim() ? `${learningSections}\n\n` : ''}${webSection}
 
 THE CONTENT IDEA: "${idea}"
 
@@ -277,6 +278,7 @@ Respond ONLY in this exact JSON format:
 {
   "script_format": "tips_tricks|educational|personal_story|myth_busting|lead_magnet",
   "hook": "The exact opening line. Maximum 15 words. Start mid-sentence or mid-thought.",
+  "alt_hooks": ["Alternate hook with a DIFFERENT angle (e.g. question vs statement, curiosity vs pain point). Max 15 words.", "Second alternate with a different structure again. Max 15 words."],
   "re_hook": "For tips_tricks only: the 20-30 word preview that teases all tips. Empty string for other formats.",
   "body": "The full body text. For educational/story: 3 beats separated by blank lines, no labels. For tips_tricks: numbered tips each on a new line.",
   "cta": "Closing call to action. 25-40 words. One action.",
@@ -287,6 +289,7 @@ Respond ONLY in this exact JSON format:
     "wardrobe": "One line: what to wear.",
     "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
+  "delivery_cues": ["3-5 short coaching notes for the creator ON CAMERA, each tied to a specific line or beat: where to pause, which word to punch, when to slow down, when to lean in or smile. E.g. 'Pause a full beat after the hook — let it land before explaining.' Write them for THIS script, not generic advice."],
   "mood_tag": "calm|energetic|empathetic|educational|bold|story-driven",
   "why_this_works": "One sentence: what format you chose and the specific creative decision that makes this script work for this audience."
 }`
@@ -303,7 +306,8 @@ export function buildRevisionMessages(
   idea: string,
   lane: AudienceLane,
   brand: BrandSettings,
-  fewShotExamples: Script[]
+  fewShotExamples: Script[],
+  learningSections?: string
 ): Array<{ role: 'system' | 'user'; content: string }> {
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
   const locationLine = brand.location?.trim() ? ` based in ${brand.location}` : ''
@@ -354,7 +358,7 @@ OUTPUT: Raw JSON only. No markdown. No backticks. Start with { end with }.`
 
 ${fewShotSection}
 
-ORIGINAL SCRIPT:
+${learningSections?.trim() ? `${learningSections}\n\n` : ''}ORIGINAL SCRIPT:
 Format: ${(original as any).script_format || 'educational'}
 Hook: ${original.hook}
 ${(original as any).re_hook ? `Re-hook: ${(original as any).re_hook}\n` : ''}
@@ -374,6 +378,7 @@ Respond ONLY in this exact JSON format:
 {
   "script_format": "tips_tricks|educational|personal_story",
   "hook": "Revised hook. Maximum 15 words. Start mid-sentence.",
+  "alt_hooks": ["Alternate hook with a different angle. Max 15 words.", "Second alternate with a different structure. Max 15 words."],
   "re_hook": "For tips_tricks only. Empty string otherwise.",
   "body": "Revised body. Match format structure.",
   "cta": "Revised CTA. 25-40 words. One action.",
@@ -384,6 +389,7 @@ Respond ONLY in this exact JSON format:
     "wardrobe": "One line: what to wear.",
     "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
+  "delivery_cues": ["3-5 short coaching notes for delivering THIS script on camera: where to pause, which word to punch, when to slow down or lean in."],
   "mood_tag": "calm|energetic|empathetic|educational|bold|story-driven",
   "why_this_works": "One sentence: what changed and why this version is stronger."
 }`
