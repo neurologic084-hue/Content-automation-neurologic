@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildScriptGenerationMessages } from '@/lib/prompts'
 import { searchWebEnhanced, formatSearchContext } from '@/lib/tavily'
+import { parseJsonLoose } from '@/lib/json-loose'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -103,10 +104,15 @@ export async function POST(req: NextRequest) {
 
   let generated: GeneratedScript
   try {
-    generated = JSON.parse(raw)
+    generated = parseJsonLoose<GeneratedScript>(raw)
   } catch {
     await supabase.from('ideas').update({ status: 'pending_lane_confirm' }).eq('id', idea_id)
     return NextResponse.json({ error: 'Failed to parse generated script' }, { status: 500 })
+  }
+
+  if (!generated.hook?.trim() || !generated.body?.trim()) {
+    await supabase.from('ideas').update({ status: 'pending_lane_confirm' }).eq('id', idea_id)
+    return NextResponse.json({ error: 'Generated script was incomplete — try again' }, { status: 500 })
   }
 
   // Save script to DB

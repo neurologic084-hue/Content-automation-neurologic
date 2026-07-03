@@ -1,18 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
-
-const MOOD_COLOR: Record<string, string> = {
-  calm: '#6366F1',
-  energetic: '#FF4F17',
-  empathetic: '#EC4899',
-  educational: '#0EA5E9',
-  bold: '#EF4444',
-  'story-driven': '#F59E0B',
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+import { CountUp } from '@/components/count-up'
+import { EditScriptList } from '@/components/edit-script-list'
 
 export default async function EditPage() {
   const supabase = await createClient()
@@ -23,7 +12,7 @@ export default async function EditPage() {
     .eq('status', 'approved')
     .order('approved_at', { ascending: false })
 
-  let jobsByScript: Record<string, { id: string; status: string; selected_variant: string | null }> = {}
+  const jobsByScript: Record<string, { id: string; status: string; selected_variant: string | null }> = {}
   const { data: jobs } = await supabase
     .from('video_jobs')
     .select('id, script_id, status, selected_variant')
@@ -68,77 +57,19 @@ export default async function EditPage() {
           { label: 'Variants ready', value: complete },
           { label: 'Variant selected', value: selected },
         ].map(s => (
-          <div key={s.label} className="bg-white border border-[#E4E4E0] rounded-2xl p-4">
+          <div key={s.label} className="bg-white border border-[#E4E4E0] rounded-2xl p-4 hover-lift">
             <p className="text-2xl font-bold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
-              {s.value}
+              <CountUp value={s.value} />
             </p>
             <p className="text-xs text-[#A1A1AA] mt-0.5">{s.label}</p>
           </div>
         ))}
       </div>
 
-      {/* Script list */}
+      {/* Script list — filterable by stage, paged so it never scrolls forever */}
       {scripts && scripts.length > 0 ? (
-        <div className="space-y-3">
-          {scripts.map((script, i) => {
-            const job = jobsByScript[script.id]
-            const moodColor = script.mood_tag ? MOOD_COLOR[script.mood_tag] : '#A1A1AA'
-
-            let statusBadge = { label: 'No footage', bg: '#F4F3F0', color: '#A1A1AA' }
-            if (job?.selected_variant) {
-              statusBadge = { label: 'Variant selected', bg: '#DCFCE7', color: '#16A34A' }
-            } else if (job?.status === 'complete') {
-              statusBadge = { label: 'Variants ready', bg: '#FFF3EF', color: '#FF4F17' }
-            } else if (job?.status === 'processing') {
-              statusBadge = { label: 'Processing...', bg: '#FEF3C7', color: '#D97706' }
-            }
-
-            return (
-              <div
-                key={script.id}
-                className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#D0CCC8] hover:shadow-sm transition-all duration-150 hover-lift"
-                style={{ animationDelay: `${80 + i * 40}ms` }}
-              >
-                <div className="flex items-start gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex flex-wrap items-center gap-2 mb-2">
-                      <span
-                        className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
-                        style={{ background: statusBadge.bg, color: statusBadge.color }}
-                      >
-                        {statusBadge.label}
-                      </span>
-                      {script.mood_tag && (
-                        <span
-                          className="text-[11px] px-2.5 py-1 rounded-full"
-                          style={{ background: `${moodColor}15`, color: moodColor }}
-                        >
-                          {script.mood_tag}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm font-semibold text-[#18181B] leading-snug mb-1">
-                      &ldquo;{script.hook}&rdquo;
-                    </p>
-                    {script.approved_at && (
-                      <p className="text-xs text-[#A1A1AA]">Approved {formatDate(script.approved_at)}</p>
-                    )}
-                  </div>
-
-                  <Link
-                    href={`/edit/${script.id}`}
-                    className="flex-shrink-0 h-9 px-4 rounded-xl text-xs font-semibold cursor-pointer transition-all flex items-center"
-                    style={{
-                      background: job?.selected_variant ? '#DCFCE7' : job ? '#FFF3EF' : '#F4F3F0',
-                      color: job?.selected_variant ? '#15803D' : job ? '#FF4F17' : '#71717A',
-                    }}
-                  >
-                    {job?.selected_variant ? 'View' : job ? 'View variants' : 'Add footage'}
-                  </Link>
-                </div>
-              </div>
-            )
-          })}
+        <div className="animate-fadeInUp" style={{ animationDelay: '80ms' }}>
+          <EditScriptList scripts={scripts} jobsByScript={jobsByScript} />
         </div>
       ) : (
         <div
@@ -154,7 +85,8 @@ export default async function EditPage() {
           <p className="text-sm text-[#A1A1AA] mb-4">Approve scripts in Review before adding footage.</p>
           <Link
             href="/review"
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] transition-all"
+            className="shine-sweep inline-flex items-center gap-2 px-4 py-2 rounded-xl text-white text-sm font-semibold transition-all hover-lift"
+            style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
           >
             Go to Review
           </Link>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildLaneSuggestionPrompt } from '@/lib/prompts'
+import { parseJsonLoose } from '@/lib/json-loose'
 import type { LaneSuggestion } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
 
   let suggestion: LaneSuggestion
   try {
-    suggestion = JSON.parse(raw)
+    suggestion = parseJsonLoose<LaneSuggestion>(raw)
   } catch {
     return NextResponse.json({ error: 'Failed to parse AI response' }, { status: 500 })
   }

@@ -185,7 +185,8 @@ export default async function LibraryPage({
               <p className="text-sm text-[#A1A1AA] mb-4">Approved scripts will appear here.</p>
               <Link
                 href="/ideas/new"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] transition-all"
+                className="shine-sweep inline-flex items-center gap-2 px-4 py-2 rounded-xl text-white text-sm font-semibold transition-all hover-lift"
+                style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
               >
                 Create first script
               </Link>

@@ -293,7 +293,7 @@ export default function SettingsPage() {
     <div className="p-6 md:p-8 max-w-2xl w-full mx-auto pb-32">
 
       {/* Header */}
-      <div className="mb-6">
+      <div className="mb-6 animate-fadeInUp">
         <h1
           className="text-2xl font-bold text-[#111111]"
           style={{ fontFamily: 'var(--font-jakarta)' }}
@@ -306,7 +306,7 @@ export default function SettingsPage() {
       </div>
 
       {/* Profile Switcher */}
-      <div className="p-1 bg-[#F4F3F0] rounded-2xl mb-5 flex gap-1">
+      <div className="animate-fadeInUp p-1 bg-[#F4F3F0] rounded-2xl mb-5 flex gap-1" style={{ animationDelay: '50ms' }}>
         {Array.from({ length: MAX_PROFILES }, (_, i) => i + 1).map(slot => {
           const profile = profileCache[slot]
           const isSelected = selectedSlot === slot

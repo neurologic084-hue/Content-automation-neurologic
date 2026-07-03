@@ -449,7 +449,7 @@ export default function ScriptDetailPage() {
             className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
             style={{ background: '#22C55E' }}
           >
-            {bodyBeats.length + 2}
+            {bodyBeats.length + beatNumberOffset}
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-baseline gap-2 mb-1.5">
@@ -625,8 +625,8 @@ export default function ScriptDetailPage() {
                 <button
                   onClick={handleApprove}
                   disabled={saving}
-                  className="py-3 rounded-xl text-white text-sm font-semibold hover:opacity-90 active:scale-[0.98] disabled:opacity-40 transition-all cursor-pointer"
-                  style={{ background: '#FF4F17' }}
+                  className="shine-sweep py-3 rounded-xl text-white text-sm font-semibold active:scale-[0.98] disabled:opacity-40 transition-all cursor-pointer"
+                  style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
                 >
                   {saving ? '...' : 'Approve'}
                 </button>

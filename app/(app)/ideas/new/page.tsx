@@ -303,7 +303,7 @@ export default function NewIdeaPage() {
   return (
     <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
       {/* Header */}
-      <div className="mb-8">
+      <div className="mb-8 animate-fadeInUp">
         <h1 className="text-2xl font-bold text-[#18181B]" style={{ fontFamily: 'var(--font-jakarta)' }}>
           New content idea
         </h1>
@@ -459,7 +459,8 @@ export default function NewIdeaPage() {
               <button
                 onClick={() => handleSuggestLane()}
                 disabled={!idea.trim() || !selectedMood || !selectedFormat || loading}
-                className="w-full py-2.5 px-4 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
+                className="shine-sweep w-full py-2.5 px-4 rounded-xl text-white text-sm font-semibold active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 cursor-pointer"
+                style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
               >
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
@@ -564,8 +565,8 @@ export default function NewIdeaPage() {
                 <button
                   onClick={() => handleSaveOwnScript(true)}
                   disabled={!ownHook.trim() || !ownBody.trim() || ownSaving}
-                  className="flex-[2] h-11 rounded-xl text-sm font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
-                  style={{ background: '#FF4F17', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
+                  className="shine-sweep flex-[2] h-11 rounded-xl text-sm font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
+                  style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
                 >
                   {ownSaving ? 'Saving...' : 'Approve and go to Edit →'}
                 </button>
@@ -611,8 +612,8 @@ export default function NewIdeaPage() {
                       )}
                       <button
                         onClick={() => handleGenerateIdeas()}
-                        className="px-6 py-2.5 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] active:scale-[0.98] transition-all cursor-pointer"
-                        style={{ boxShadow: '0 4px 14px rgba(255,79,23,0.3)' }}
+                        className="shine-sweep px-6 py-2.5 rounded-xl text-white text-sm font-semibold active:scale-[0.98] transition-all cursor-pointer"
+                        style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 14px rgba(255,79,23,0.3)' }}
                       >
                         Generate 10 ideas →
                       </button>
@@ -722,8 +723,8 @@ export default function NewIdeaPage() {
               <button
                 onClick={handleConfirmPendingIdea}
                 disabled={loading}
-                className="w-full py-3 rounded-xl bg-[#FF4F17] text-white text-sm font-semibold hover:bg-[#E84410] disabled:opacity-40 transition-all cursor-pointer"
-                style={{ boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
+                className="shine-sweep w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-40 transition-all cursor-pointer"
+                style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
               >
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">

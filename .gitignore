@@ -53,3 +53,11 @@ env.txt
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Remotion edit staging (per-render, never committed)
+remotion/public/edit-cache/
+
+# Local reference footage and test renders in the project root (large binaries, never committed)
+/*.mp4
+/*.MP4
+/*.mov

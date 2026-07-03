@@ -10,11 +10,14 @@ import { uploadToStorage } from '@/lib/storage'
 async function resolveMediaUrl(url: string): Promise<string> {
   if (!url.startsWith('/renders/')) return url
 
-  // /renders/<jobId>/<fileName>
+  // /renders/<jobId>/<fileName> — both segments must be plain names so the
+  // resolved path can never escape public/renders/ (e.g. jobId of "..").
+  const SAFE_SEGMENT = /^[a-zA-Z0-9_.-]+$/
   const parts = url.replace(/^\/renders\//, '').split('/')
   const jobId = parts[0]
   const fileName = parts[1]
-  if (!jobId || !fileName) return url
+  if (!jobId || !fileName || jobId.startsWith('.') || fileName.startsWith('.')) return url
+  if (!SAFE_SEGMENT.test(jobId) || !SAFE_SEGMENT.test(fileName)) return url
 
   const localPath = path.join(process.cwd(), 'public', 'renders', jobId, fileName)
   return uploadToStorage(localPath, fileName, jobId)

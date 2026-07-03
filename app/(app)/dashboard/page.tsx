@@ -3,22 +3,29 @@ import Link from 'next/link'
 import { TourModal } from '@/components/tour-modal'
 import { TourTriggerButton } from '@/components/tour-trigger-button'
 import { DashboardBg } from '@/components/dashboard-bg'
+import { CountUp } from '@/components/count-up'
+import { PipelineFlow } from '@/components/pipeline-flow'
 
 export default async function DashboardPage() {
   const supabase = await createClient()
 
-  const [ideasRes, pendingRes, approvedRes, brandRes] = await Promise.all([
+  const [ideasRes, pendingRes, approvedRes, publishedCountRes, brandRes] = await Promise.all([
     supabase.from('ideas').select('id', { count: 'exact', head: true }),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'pending_review'),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
-    supabase.from('brand_settings').select('creator_name').eq('is_active', true).single(),
+    supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']),
+    supabase.from('brand_settings').select('creator_name').eq('is_active', true).maybeSingle(),
   ])
 
   const totalIdeas = ideasRes.count ?? 0
   const pendingReview = pendingRes.count ?? 0
   const totalApproved = approvedRes.count ?? 0
+  const totalPublished = publishedCountRes.count ?? 0
   const brandName = brandRes.data?.creator_name ?? null
   const hasSettings = !!(brandName && brandName.trim().length > 0)
+
+  const hour = new Date().getHours()
+  const greeting = hour < 5 ? 'Burning the midnight oil,' : hour < 12 ? 'Good morning,' : hour < 18 ? 'Good afternoon,' : 'Good evening,'
 
   const ACTIVITY_TTL_DAYS = 7
   const ttlCutoff = new Date(Date.now() - ACTIVITY_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()
@@ -147,18 +154,26 @@ export default async function DashboardPage() {
             <span className="text-white/50 text-xs font-semibold tracking-widest uppercase">Olympus</span>
           </div>
 
-          <p className="text-white/40 text-sm mb-0.5">Good to see you,</p>
+          <p className="text-white/40 text-sm mb-0.5">{greeting}</p>
           <div className="flex items-center justify-between gap-3 mb-5">
             <h1
-              className="text-white font-extrabold"
-              style={{ fontSize: 26, fontFamily: 'var(--font-jakarta)', letterSpacing: '-0.5px' }}
+              className="font-extrabold"
+              style={{
+                fontSize: 26,
+                fontFamily: 'var(--font-jakarta)',
+                letterSpacing: '-0.5px',
+                background: 'linear-gradient(100deg, #FFFFFF 30%, #FFB599 55%, #FFFFFF 80%)',
+                WebkitBackgroundClip: 'text',
+                backgroundClip: 'text',
+                color: 'transparent',
+              }}
             >
               {hasSettings ? brandName : 'Creator'}
             </h1>
             <TourTriggerButton />
           </div>
 
-          {/* Inline stats */}
+          {/* Inline stats — count up on load */}
           <div className="flex items-center gap-6">
             {[
               { value: totalIdeas, label: 'Ideas generated' },
@@ -167,7 +182,7 @@ export default async function DashboardPage() {
             ].map((s) => (
               <div key={s.label}>
                 <p className="text-white font-bold text-xl" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                  {s.value}
+                  <CountUp value={s.value} />
                 </p>
                 <p className="text-white/40 text-xs">{s.label}</p>
               </div>
@@ -175,6 +190,16 @@ export default async function DashboardPage() {
           </div>
         </div>
       </div>
+      </div>
+
+      {/* ── Pipeline — the system at a glance ── */}
+      <div className="animate-fadeInUp" style={{ animationDelay: '60ms' }}>
+        <PipelineFlow
+          ideas={totalIdeas}
+          pending={pendingReview}
+          approved={totalApproved}
+          published={totalPublished}
+        />
       </div>
 
       {/* ── Getting started (until all 3 steps done) ── */}
@@ -275,8 +300,8 @@ export default async function DashboardPage() {
       {step1Done ? (
         <Link
           href="/ideas/new"
-          className="animate-fadeInUp flex items-center gap-4 rounded-2xl p-5 hover:opacity-90 active:scale-[0.99] transition-all duration-150 group hover-lift"
-          style={{ background: '#FF4F17', boxShadow: '0 8px 24px rgba(255,79,23,0.25)', animationDelay: '160ms' }}
+          className="animate-fadeInUp shine-sweep flex items-center gap-4 rounded-2xl p-5 active:scale-[0.99] transition-all duration-150 group hover-lift"
+          style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 8px 24px rgba(255,79,23,0.25)', animationDelay: '160ms' }}
         >
           <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center flex-shrink-0">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildHumanizerInstruction } from '@/lib/humanizer'
 import { searchNicheNews } from '@/lib/tavily'
+import { parseJsonLoose } from '@/lib/json-loose'
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
@@ -171,7 +172,7 @@ Respond ONLY with raw JSON, no markdown:
 
   let parsed: { ideas: Array<{ format: string; idea: string } | string> }
   try {
-    parsed = JSON.parse(raw)
+    parsed = parseJsonLoose<typeof parsed>(raw)
     if (!Array.isArray(parsed.ideas)) throw new Error('bad shape')
   } catch {
     return NextResponse.json({ error: 'Failed to parse generated ideas' }, { status: 500 })

@@ -32,7 +32,17 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   // Public routes — no auth check needed
-  if (pathname.startsWith('/login') || pathname.startsWith('/api') || pathname.startsWith('/onboarding')) {
+  if (pathname.startsWith('/login') || pathname.startsWith('/onboarding')) {
+    return supabaseResponse
+  }
+
+  // API routes: every endpoint spends money (LLM, Tavily, Blotato, Submagic)
+  // or takes actions on connected accounts — none are public. Return 401 JSON
+  // instead of a login redirect so client fetch() calls fail loudly.
+  if (pathname.startsWith('/api')) {
+    if (!user) {
+      return NextResponse.json({ error: 'Not authenticated.' }, { status: 401 })
+    }
     return supabaseResponse
   }
 

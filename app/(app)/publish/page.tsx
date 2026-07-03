@@ -653,7 +653,7 @@ function PublishForm() {
     <div className="p-6 md:p-8 max-w-2xl w-full mx-auto">
 
       {/* Header */}
-      <div className="mb-7">
+      <div className="mb-7 animate-fadeInUp">
         <Link href="/dashboard" className="inline-flex items-center gap-1.5 text-xs text-[#A1A1AA] hover:text-[#71717A] transition-colors mb-4">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 18l-6-6 6-6" />
@@ -666,7 +666,7 @@ function PublishForm() {
 
       {/* Selected video banner   shown when coming from the edit page */}
       {selectedJob && paramJobId && (
-        <div className="bg-[#FFF4F1] border border-[#FFCAB8] rounded-2xl px-5 py-4 mb-4 flex items-start gap-3">
+        <div className="animate-fadeInUp bg-[#FFF4F1] border border-[#FFCAB8] rounded-2xl px-5 py-4 mb-4 flex items-start gap-3" style={{ animationDelay: '60ms' }}>
           <div className="w-8 h-8 rounded-xl bg-[#FF4F17] flex items-center justify-center flex-shrink-0 mt-0.5">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <polygon points="23 7 16 12 23 17 23 7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
@@ -1189,8 +1189,8 @@ function PublishForm() {
           <button
             type="submit"
             disabled={submitting || !canPublish || (scheduleMode === 'later' && !scheduledAt)}
-            className="w-full h-12 rounded-2xl text-sm font-semibold text-white disabled:opacity-40 transition-opacity flex items-center justify-center gap-2"
-            style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.25)', cursor: canPublish ? 'pointer' : 'not-allowed' }}
+            className="shine-sweep w-full h-12 rounded-2xl text-sm font-semibold text-white disabled:opacity-40 transition-opacity flex items-center justify-center gap-2"
+            style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 14px rgba(255,79,23,0.25)', cursor: canPublish ? 'pointer' : 'not-allowed' }}
           >
             {submitting ? (
               <>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildRevisionMessages } from '@/lib/prompts'
+import { parseJsonLoose } from '@/lib/json-loose'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -58,9 +59,13 @@ export async function POST(req: NextRequest) {
 
   let generated: GeneratedScript
   try {
-    generated = JSON.parse(raw)
+    generated = parseJsonLoose<GeneratedScript>(raw)
   } catch {
     return NextResponse.json({ error: 'Failed to parse revised script' }, { status: 500 })
+  }
+
+  if (!generated.hook?.trim() || !generated.body?.trim()) {
+    return NextResponse.json({ error: 'Revised script was incomplete — try again' }, { status: 500 })
   }
 
   const { data: newScript, error: insertError } = await supabase
@@ -71,8 +76,13 @@ export async function POST(req: NextRequest) {
       body: generated.body,
       cta: generated.cta,
       full_script: generated.full_script,
-      filming_plan: generated.filming_plan,
-      mood_tag: generated.mood_tag,
+      // Carry the original script's format/re-hook metadata through the revision
+      // so the review page keeps rendering beats and re-hook consistently.
+      filming_plan: {
+        ...((script.filming_plan as object) ?? {}),
+        ...((generated.filming_plan as object) ?? {}),
+      },
+      mood_tag: generated.mood_tag ?? script.mood_tag,
       why_this_works: generated.why_this_works,
       search_context: script.search_context,
       status: 'pending_review',

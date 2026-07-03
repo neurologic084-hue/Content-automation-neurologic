@@ -163,7 +163,11 @@ export default async function ReviewPage() {
             Review queue
           </h1>
           {totalAction > 0 && (
-            <span className="text-xs font-bold px-3 py-1.5 rounded-full bg-[#FFF3EF] text-[#FF4F17]">
+            <span className="relative text-xs font-bold px-3 py-1.5 rounded-full bg-[#FFF3EF] text-[#FF4F17] flex items-center gap-1.5">
+              <span className="relative flex w-1.5 h-1.5">
+                <span className="pulse-ring absolute inline-flex h-full w-full rounded-full bg-[#FF4F17]" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-[#FF4F17]" />
+              </span>
               {totalAction} need{totalAction === 1 ? 's' : ''} attention
             </span>
           )}

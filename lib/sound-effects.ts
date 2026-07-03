@@ -19,12 +19,22 @@ interface SfxDef {
 // Small fixed category library — the AI picks WHICH category fits a given
 // sentence's content, never invents new bespoke audio per sentence. Each
 // category is generated once and reused across every video forever after.
-export type SfxCategory = 'whoosh' | 'impact' | 'ding' | 'riser'
+export type SfxCategory =
+  | 'whoosh' | 'impact' | 'ding' | 'riser' | 'shutter'
+  | 'whoosh-snap' | 'flash-pop' | 'shutter-soft' | 'pop'
+  | 'whoosh-airy' | 'whoosh-deep' | 'boom-soft'
 
 const SFX_DEFS: Record<SfxCategory, SfxDef> = {
   whoosh: {
     name: 'whoosh-transition',
     prompt: 'short subtle whoosh transition sound effect, quick clean air swipe, modern and minimal, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+  // B-roll photo cards: the modern "photo pops on screen" grammar — a single
+  // crisp mechanical shutter snap, professional and tight.
+  shutter: {
+    name: 'camera-shutter',
+    prompt: 'single professional DSLR camera shutter click sound effect, crisp tight mechanical snap, fast attack, clean and modern, no beep, no music, no voice, no reverb tail',
     durationSeconds: 1,
   },
   impact: {
@@ -41,6 +51,43 @@ const SFX_DEFS: Record<SfxCategory, SfxDef> = {
     name: 'tension-riser',
     prompt: 'short rising tension riser sound effect, builds anticipation, subtle and modern, no music, no voice, no cymbal crash at the end',
     durationSeconds: 2,
+  },
+  // Variation kit — multi-version renders pair each transition style with its
+  // own join sound and each run with its own B-roll entrance sound.
+  'whoosh-snap': {
+    name: 'whoosh-snap',
+    prompt: 'very fast tight whip swish transition sound effect, snappy with a crisp transient at the end, modern short-form editing style, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+  'flash-pop': {
+    name: 'flash-pop',
+    prompt: 'bright quick camera flash pop sound effect, soft airy burst with a subtle sparkle transient, clean and modern, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+  'shutter-soft': {
+    name: 'shutter-soft',
+    prompt: 'soft mirrorless camera shutter sound effect, gentle quick double click, quiet and refined, no beep, no music, no voice, no reverb',
+    durationSeconds: 1,
+  },
+  pop: {
+    name: 'ui-pop',
+    prompt: 'minimal soft pop click sound effect, like a clean modern UI element appearing, subtle and satisfying, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+  'whoosh-airy': {
+    name: 'whoosh-airy',
+    prompt: 'soft airy swish transition sound effect, gentle breathy air movement, light and elegant, modern short-form editing, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+  'whoosh-deep': {
+    name: 'whoosh-deep',
+    prompt: 'deep cinematic swoosh transition sound effect, low sub-heavy air movement with a smooth body, powerful but short, no music, no voice, no long tail',
+    durationSeconds: 1,
+  },
+  'boom-soft': {
+    name: 'boom-soft',
+    prompt: 'soft cinematic boom hit sound effect, muffled low thump with a quick decay, subtle and modern, no music, no voice, no long rumble tail',
+    durationSeconds: 1,
   },
 }
 
@@ -92,4 +139,16 @@ export async function getSfx(category: SfxCategory): Promise<string | null> {
 // Back-compat convenience for the existing transition call site.
 export async function getWhooshSfx(): Promise<string | null> {
   return getSfx('whoosh')
+}
+
+export async function getShutterSfx(): Promise<string | null> {
+  return getSfx('shutter')
+}
+
+export type TransitionStyle = 'blur' | 'flash' | 'punch'
+
+export const TRANSITION_STYLES: TransitionStyle[] = ['blur', 'flash', 'punch']
+
+export function transitionStyleFor(variation: number): TransitionStyle {
+  return TRANSITION_STYLES[variation % TRANSITION_STYLES.length]
 }

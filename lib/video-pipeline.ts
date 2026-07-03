@@ -36,6 +36,7 @@ export interface VideoVariantDef {
   nativeCaptions?: boolean     // burn ASS karaoke captions via ElevenLabs Scribe + FFmpeg
   captionTestOnly?: boolean    // skip Submagic entirely, caption the raw footage directly
   motionGraphicsTestOnly?: boolean  // skip Submagic entirely; raw footage + Remotion graphics only
+  remotionEdit?: boolean       // Remotion-only FULL edit (cuts, captions, zooms, SFX) — no Submagic anywhere
   motionGraphics?: boolean     // plan + render front-loaded brand graphics (Remotion) and composite them in
   motionGraphicsStyle?: 'minimal' | 'bold'  // which Remotion visual treatment to render
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll (our-v4/v5's edit-tool path)
@@ -74,61 +75,59 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v2',
-    name: 'Submagic Balanced Energy',
-    description: 'Natural-to-brisk pacing, moderate B-roll, subtle background music. A balanced general-purpose edit.',
+    name: 'UGC Aesthetic',
+    description: 'Modeled on the UGC reference edit: elegant aesthetic captions (Umi family) with italic accent words, punch-in zooms, voice isolation, and stock B-roll cutaways. Library music mixes quietly under the voice in post.',
     tool: 'submagic',
     order: 2,
     autoStart: false,
     submagicProfile: {
-      directive: 'Balanced, natural energy suited to general short-form content. Moderate B-roll coverage, natural-to-brisk pacing, noticeable but not aggressive zooms. Subtle background music sits quietly under the voice.',
+      directive: 'UGC-style aesthetic edit: small elegant captions, brisk-but-natural pacing, punch-in zooms, light photo-style B-roll grounded in what is said. Clean isolated voice carries the video; music stays subtle underneath.',
       useMusic: true,
     },
   },
   {
     id: 'our-v3',
-    name: 'Submagic Bold & Punchy',
-    description: 'Fast cuts, heavier B-roll, strong zooms, energetic music. For punchy, attention-grabbing content.',
+    name: 'UGC Reference',
+    description: 'The closest match to the UGC reference edit: captions from the custom "Kelly 3" theme (italic blue/silver accent words), punch-in zooms standing in for multi-angle cuts, stock cutaways, and library music mixed quietly under the isolated voice.',
     tool: 'submagic',
     order: 3,
     autoStart: false,
     submagicProfile: {
-      directive: 'High energy, fast-paced, attention-grabbing edit. Heavier B-roll coverage, tight cuts, strong confident zooms, a bold hook title. Energetic background music under the voice.',
+      directive: 'UGC-style aesthetic edit: small elegant captions, brisk-but-natural pacing, punch-in zooms, light stock B-roll grounded in what is said. Clean isolated voice carries the video; music stays subtle underneath.',
       useMusic: true,
     },
   },
+  // v4/v5/v6 are the Remotion-only family: the full edit (voice isolation,
+  // silence/retake cuts, captions, zooms, transitions, B-roll, SFX, music)
+  // renders locally with zero Submagic involvement. Each variant has a FIXED
+  // caption identity + B-roll flavor (see lib/render-kit.ts); transitions and
+  // sound kits are smart-randomized per render so reruns give fresh takes.
   {
     id: 'our-v4',
-    name: 'Premium Captions + Motion Graphics A',
-    description: 'Submagic cuts, cleans, captions, and adds B-roll (a premium template, never Hormozi-style, zooms off for a calmer feel) — then front-loaded Neuro Logic motion graphics (intro, callouts, stats) render on top in the minimal house style.',
+    name: 'Remotion Editorial',
+    description: 'Remotion-only full edit with the calm editorial identity: clean Poppins captions anchored low with warm amber accent words, photo-card B-roll only, smart-randomized transitions and sound kit, library music. Zero render credits.',
     tool: 'edit',
     order: 4,
     autoStart: false,
-    submagicMagicBrolls: true,
-    submagicMagicZooms: false,
-    motionGraphics: true,
-    motionGraphicsStyle: 'minimal',
+    remotionEdit: true,
   },
   {
     id: 'our-v5',
-    name: 'Premium Captions + Motion Graphics B',
-    description: 'Same recipe as variant A — Submagic cuts, cleans, captions, and adds B-roll with a second premium template — but zooms on for extra energy, paired with the bolder, punchier motion-graphics style.',
+    name: 'Remotion Impact',
+    description: 'Remotion-only full edit with the bold impact identity: condensed ALL-CAPS captions with yellow accent words and a scale-pop entrance, video B-roll wherever possible, smart-randomized transitions and sound kit, library music. Zero render credits.',
     tool: 'edit',
     order: 5,
     autoStart: false,
-    submagicMagicBrolls: true,
-    submagicMagicZooms: true,
-    motionGraphics: true,
-    motionGraphicsStyle: 'bold',
+    remotionEdit: true,
   },
   {
     id: 'our-v6',
-    name: 'Motion Graphics Only (Test)',
-    description: 'Testing only — skips Submagic entirely. Raw footage with Neuro Logic motion graphics on top, no cuts, no captions, no B-roll. For checking graphics/styles without spending a Submagic job.',
+    name: 'Remotion UGC Serif',
+    description: 'Remotion-only full edit with the UGC reference identity: white captions with italic serif silver-blue gradient accents, mixed B-roll (photo cards + full-screen video covers), smart-randomized transitions and sound kit, library music. Zero render credits.',
     tool: 'edit',
     order: 6,
     autoStart: false,
-    motionGraphicsTestOnly: true,
-    motionGraphicsStyle: 'minimal',
+    remotionEdit: true,
   },
 ]
 
@@ -180,6 +179,7 @@ export interface SubmagicJobOptions {
   title: string
   aiEditTemplate?: 'kelly' | 'karl' | 'ella'
   templateName?: string
+  userThemeId?: string   // custom theme (mutually exclusive with templateName — wins when both set)
   magicBrolls?: boolean
   magicBrollsPercentage?: number
   magicZooms?: boolean
@@ -476,6 +476,16 @@ export async function resolveCaptionTemplate(
   return undefined
 }
 
+// Resolve a variant's pinned template pool: first pool entry that actually
+// exists on the account wins, so a renamed/removed Submagic template degrades
+// to the next choice instead of breaking the render. Returns undefined when
+// none match (caller falls back to lane resolution).
+export async function resolvePooledTemplate(pool: string[]): Promise<string | undefined> {
+  const templates = await fetchSubmagicTemplates()
+  const available = new Set(templates.map(t => t.name))
+  return pool.find(name => available.has(name))
+}
+
 // ── Submagic   Fetch first available audio track for music param ──────────────
 
 export async function fetchSubmagicAudioTrack(): Promise<string | null> {
@@ -529,6 +539,10 @@ export async function submitSubmagicJob(
     if (opts.magicBrolls) body.magicBrollsPercentage = opts.magicBrollsPercentage ?? 40
     if (opts.hookTitle !== undefined) body.hookTitle = opts.hookTitle
     if (opts.musicTrackId) body.music = { userMediaId: opts.musicTrackId, volume: 30, fade: true }
+    if (opts.userThemeId) {
+      body.userThemeId = opts.userThemeId
+      delete body.templateName
+    }
   }
 
   console.log('[submagic] create project body:', JSON.stringify({
@@ -574,13 +588,17 @@ export async function pollSubmagicJob(projectId: string): Promise<{
     return { status: 'failed', previewUrl: null, downloadUrl: null, error: data.failureReason ?? 'Transcription failed' }
   }
 
-  const done = data.status === 'done' || data.status === 'completed'
+  // A project can report completed with no rendered file yet (e.g. transcription
+  // finished but the export hasn't produced a video). Only a completed status
+  // WITH a download URL is truly ready.
+  const hasFile = Boolean(data.videoUrl ?? data.downloadUrl ?? data.directUrl)
+  const done = (data.status === 'done' || data.status === 'completed') && hasFile
   const processing = !done && data.status !== 'failed'
 
   return {
     status: done ? 'ready' : processing ? 'processing' : 'failed',
     previewUrl: data.previewUrl ?? null,
-    downloadUrl: data.videoUrl ?? data.downloadUrl ?? null,
+    downloadUrl: data.videoUrl ?? data.downloadUrl ?? data.directUrl ?? null,
     error: done || processing ? null : (data.failureReason ?? 'Unknown error'),
   }
 }

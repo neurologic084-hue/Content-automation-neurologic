@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { PLATFORM_INSTRUCTIONS, PLATFORM_CAPS, enforceYouTubeLimits } from '@/lib/caption-platforms'
+import { parseJsonLoose } from '@/lib/json-loose'
 
 export async function POST(req: NextRequest) {
   const { hook, body, cta, platforms } = await req.json() as {
@@ -67,7 +68,7 @@ Example: {"instagram":"caption here","tiktok":"caption here"}`
         json: true,
       })
 
-      const rawCaptions = JSON.parse(raw) as Record<string, string>
+      const rawCaptions = parseJsonLoose<Record<string, string>>(raw)
       const lowerCased = Object.fromEntries(
         Object.entries(rawCaptions).map(([k, v]) => [k.toLowerCase().trim(), v])
       )
