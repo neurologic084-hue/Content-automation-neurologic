@@ -54,6 +54,10 @@ export interface FilmingPlan {
   setup?: string
   body_labels?: string[]
   re_hook?: string
+  // Alternate hooks the creator can swap in from the review page
+  alt_hooks?: string[]
+  // Per-script on-camera coaching notes (pauses, emphasis, tone shifts)
+  delivery_cues?: string[]
   // legacy fields (older scripts)
   location?: string
   props?: string[]

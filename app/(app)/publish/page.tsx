@@ -426,11 +426,20 @@ function PublishForm() {
     setLoadingJobs(true)
     try {
       const supabase = createClient()
+      // Only the active profile's videos are publishable from here
+      const { data: activeBrand } = await supabase
+        .from('brand_settings')
+        .select('profile_slot')
+        .eq('is_active', true)
+        .limit(1)
+        .maybeSingle()
+      const slot = activeBrand?.profile_slot ?? 1
       const [jobsRes, publishedRes] = await Promise.all([
         supabase
           .from('video_jobs')
           .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
           .eq('status', 'complete')
+          .eq('profile_slot', slot)
           .not('selected_variant', 'is', null)
           .order('created_at', { ascending: false })
           .limit(30),

@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildRevisionMessages } from '@/lib/prompts'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { getLearningContext, formatLearningSections } from '@/lib/learning'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -26,14 +27,14 @@ export async function POST(req: NextRequest) {
   const { data: brand } = await supabase.from('brand_settings').select('*').eq('is_active', true).single()
   if (!brand) return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
 
-  const { data: fewShotsRaw } = await supabase
-    .from('scripts')
-    .select('hook, body, cta')
-    .eq('status', 'approved')
-    .order('approved_at', { ascending: false })
-    .limit(15)
-
-  const fewShots = (fewShotsRaw ?? []) as any[]
+  const scriptFormat = (script.filming_plan as { script_format?: string } | null)?.script_format
+  const learning = await getLearningContext(supabase, {
+    lane: (idea.confirmed_lane as AudienceLane) ?? null,
+    scriptFormat: scriptFormat ?? null,
+    profileSlot: brand.profile_slot ?? 1,
+  })
+  // A revision may legitimately keep its own hook — only block OTHER scripts' hooks.
+  learning.recentHooks = learning.recentHooks.filter(h => h !== script.hook)
 
   const messages = buildRevisionMessages(
     { hook: script.hook, body: script.body, cta: script.cta },
@@ -41,7 +42,8 @@ export async function POST(req: NextRequest) {
     idea.raw_idea,
     idea.confirmed_lane as AudienceLane,
     brand,
-    fewShots
+    learning.fewShots as any[],
+    formatLearningSections(learning)
   )
 
   let raw: string
@@ -81,6 +83,12 @@ export async function POST(req: NextRequest) {
       filming_plan: {
         ...((script.filming_plan as object) ?? {}),
         ...((generated.filming_plan as object) ?? {}),
+        alt_hooks: Array.isArray((generated as any).alt_hooks)
+          ? (generated as any).alt_hooks.slice(0, 2)
+          : ((script.filming_plan as any)?.alt_hooks ?? []),
+        delivery_cues: Array.isArray((generated as any).delivery_cues)
+          ? (generated as any).delivery_cues.slice(0, 5)
+          : ((script.filming_plan as any)?.delivery_cues ?? []),
       },
       mood_tag: generated.mood_tag ?? script.mood_tag,
       why_this_works: generated.why_this_works,

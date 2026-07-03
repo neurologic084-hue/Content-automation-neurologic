@@ -144,6 +144,21 @@ export default function ScriptDetailPage() {
     setEditing(true)
   }
 
+  async function swapHook(altHook: string) {
+    if (!script) return
+    const oldHook = script.hook
+    const alts: string[] = (script.filming_plan?.alt_hooks ?? []).filter((h: string) => h !== altHook)
+    alts.push(oldHook)
+    const newPlan = { ...script.filming_plan, alt_hooks: alts }
+    const fullScript = `HOOK:\n${altHook}\n\nBODY:\n${script.body}\n\nCTA:\n${script.cta}`
+    const supabase = createClient()
+    await supabase
+      .from('scripts')
+      .update({ hook: altHook, full_script: fullScript, filming_plan: newPlan })
+      .eq('id', script.id)
+    setScript({ ...script, hook: altHook, full_script: fullScript, filming_plan: newPlan })
+  }
+
   async function handleSaveEdit() {
     if (!script) return
     setEditSaving(true)
@@ -369,12 +384,32 @@ export default function ScriptDetailPage() {
                 style={{ fontFamily: 'var(--font-jakarta)' }}
               />
             ) : (
-              <p
-                className="text-[15px] sm:text-[17px] font-semibold text-[#18181B] leading-snug"
-                style={{ fontFamily: 'var(--font-jakarta)' }}
-              >
-                {script.hook}
-              </p>
+              <>
+                <p
+                  className="text-[15px] sm:text-[17px] font-semibold text-[#18181B] leading-snug"
+                  style={{ fontFamily: 'var(--font-jakarta)' }}
+                >
+                  {script.hook}
+                </p>
+                {/* Alternate hooks — tap to swap */}
+                {(script.filming_plan?.alt_hooks?.length ?? 0) > 0 && !isApproved && (
+                  <div className="mt-2.5 space-y-1.5">
+                    <p className="text-[10px] font-bold text-[#A1A1AA] uppercase tracking-widest">Try another opener</p>
+                    {(script.filming_plan!.alt_hooks as string[]).map((alt, i) => (
+                      <button
+                        key={i}
+                        onClick={() => swapHook(alt)}
+                        className="w-full flex items-center gap-2 text-left px-3 py-2 rounded-xl border border-dashed border-[#E4E4E0] text-[13px] text-[#71717A] hover:border-[#FF4F17] hover:text-[#18181B] hover:bg-[#FFF8F6] transition-all cursor-pointer group/alt"
+                      >
+                        <svg className="flex-shrink-0 opacity-50 group-hover/alt:opacity-100 transition-opacity" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#FF4F17" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
+                        </svg>
+                        {alt}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -470,6 +505,33 @@ export default function ScriptDetailPage() {
         </div>
 
       </div>
+
+      {/* How to deliver it */}
+      {(script.filming_plan?.delivery_cues?.length ?? 0) > 0 && (
+        <div className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl p-5 mb-5" style={{ animationDelay: '440ms' }}>
+          <h2
+            className="font-semibold text-[#18181B] mb-3 flex items-center gap-2"
+            style={{ fontFamily: 'var(--font-jakarta)' }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+            </svg>
+            How to deliver it
+          </h2>
+          <div className="space-y-2">
+            {(script.filming_plan!.delivery_cues as string[]).map((cue, i) => (
+              <div key={i} className="flex items-start gap-2.5">
+                <span className="flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold mt-0.5" style={{ background: '#EEF2FF', color: '#6366F1' }}>
+                  {i + 1}
+                </span>
+                <p className="text-sm text-[#18181B] leading-relaxed">{cue}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Filming Plan */}
       {(script.filming_plan?.shot_type || script.filming_plan?.setup || script.filming_plan?.wardrobe) && (

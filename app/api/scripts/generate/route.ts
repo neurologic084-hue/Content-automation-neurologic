@@ -4,6 +4,7 @@ import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildScriptGenerationMessages } from '@/lib/prompts'
 import { searchWebEnhanced, formatSearchContext } from '@/lib/tavily'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { getLearningContext, formatLearningSections } from '@/lib/learning'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -45,24 +46,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Brand settings not configured' }, { status: 400 })
     }
 
-    const { data: fewShotsRaw } = await supabase
-      .from('scripts')
-      .select('hook, body, cta')
-      .eq('status', 'approved')
-      .order('approved_at', { ascending: false })
-      .limit(15)
-
-    searchResponse = await searchWebEnhanced(idea.raw_idea, lane)
+    // Learning loop: relevance-ranked few-shots (same lane/format first),
+    // past revision feedback as standing lessons, recent hooks as a no-repeat
+    // list — so every generation improves on what came before.
+    const [learning, sr] = await Promise.all([
+      getLearningContext(supabase, { lane, scriptFormat: scriptFormat ?? null, profileSlot: brand.profile_slot ?? 1 }),
+      searchWebEnhanced(idea.raw_idea, lane),
+    ])
+    searchResponse = sr
     const searchContext = formatSearchContext(searchResponse)
 
     messages = buildScriptGenerationMessages(
       idea.raw_idea,
       lane,
       brand,
-      (fewShotsRaw ?? []) as any[],
+      learning.fewShots as any[],
       searchContext,
       requestedMood ?? undefined,
-      scriptFormat ?? undefined
+      scriptFormat ?? undefined,
+      formatLearningSections(learning)
     )
   } else {
     // Lean pipeline: purely from the idea, no brand/audience context
@@ -128,6 +130,8 @@ export async function POST(req: NextRequest) {
         ...((generated.filming_plan as object) ?? {}),
         script_format: (generated as any).script_format ?? 'educational',
         re_hook: (generated as any).re_hook ?? '',
+        alt_hooks: Array.isArray((generated as any).alt_hooks) ? (generated as any).alt_hooks.slice(0, 2) : [],
+        delivery_cues: Array.isArray((generated as any).delivery_cues) ? (generated as any).delivery_cues.slice(0, 5) : [],
       },
       mood_tag: requestedMood ?? generated.mood_tag,
       why_this_works: generated.why_this_works,
