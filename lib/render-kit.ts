@@ -222,6 +222,17 @@ export function planSfxCues(
         cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + inPeak, category: pick(COVER_IN[style]), volume: 0.3 })
       }
       cues.push({ start: end - 0.3, peakAt: end - COVER_OUT_FRAMES + inPeak, category: pick(COVER_OUT), volume: 0.2 })
+    } else if (b.layout === 'split') {
+      // The stage slide + media rising from below: airy swish in, softer out.
+      cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + 0.17, category: 'whoosh-airy', volume: 0.26 })
+      cues.push({ start: b.start + b.duration - 0.4, peakAt: b.start + b.duration - 0.15, category: pick(COVER_OUT), volume: 0.16 })
+    } else if (b.layout === 'panel') {
+      // Translucent panel: a soft shutter/pop on arrival — one per pane when
+      // the beat is a carousel, staggered with the panes' entrances.
+      const panes = 1 + Math.min(2, b.extraFiles?.length ?? 0)
+      for (let k = 0; k < panes; k++) {
+        cues.push({ start: Math.max(0, b.start - 0.04 + k * 0.18), peakAt: b.start + 0.1 + k * 0.18, category: pick(CARD_IN), volume: 0.26 })
+      }
     } else {
       cues.push({ start: Math.max(0, b.start - 0.04), category: pick(CARD_IN), volume: 0.38 })
     }

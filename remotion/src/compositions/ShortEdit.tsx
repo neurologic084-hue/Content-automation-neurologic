@@ -97,9 +97,15 @@ export type ShortEditBroll = {
   duration: number
   file: string                   // filename inside remotion/public/
   kind: 'video' | 'image'
-  layout: 'card' | 'cover'
+  // split: footage slides to the top ~55%, media fills the bottom, captions
+  // ride the seam. panel: translucent rounded panel over the speaker.
+  layout: 'card' | 'cover' | 'split' | 'panel'
   // Per-cover transition (eubank combo rotation) — overrides transitionStyle.
   transition?: 'blur' | 'flash' | 'punch' | 'slide' | 'zoom' | 'whip'
+  // panel: which edge it slides in from (rotated by the planner).
+  from?: 'left' | 'right' | 'top'
+  // panel carousel: extra stills rendered as more translucent panels.
+  extraFiles?: string[]
   // Designed poster card (viral): media floats on a gradient canvas with this
   // copy as the card's own headline. file may be '' — the poster then renders
   // as a typography-only animation. Palette rotates per card.
@@ -133,7 +139,7 @@ export type ShortEditProps = {
   graphics?: Array<{
     start: number
     duration: number
-    kind: 'title' | 'list' | 'venn' | 'notes' | 'equation' | 'crossout' | 'cards' | 'keyword'
+    kind: 'title' | 'list' | 'venn' | 'notes' | 'equation' | 'crossout' | 'cards' | 'keyword' | 'hook'
     placement?: 'top' | 'bottom'   // face-aware: text goes where the face isn't
     title?: string                 // koe title / notes header / keyword text / cards verdict
     subtitleBase?: string
@@ -158,6 +164,12 @@ export type ShortEditProps = {
   // Eubank: tiny organic position/rotation drift on every shot — the reference
   // never lets a frame sit perfectly still.
   handheld?: boolean
+  // Split-screen windows (derived from broll items with layout 'split'): the
+  // footage stage slides to the top ~55% while the media fills the bottom.
+  splits?: Array<{ start: number; end: number }>
+  // Which vertical band the face occupies — the split crop keeps that band on
+  // screen when the stage shrinks.
+  faceArea?: 'upper' | 'middle' | 'lower'
   // Event-driven audio cues, fully planned and peak-aligned pipeline-side
   // (lib/render-kit.ts + lib/sfx-stage.ts). durationSec is the real file
   // length so long sounds (risers) never get clipped mid-build.
@@ -304,6 +316,72 @@ const SegmentClip: React.FC<{
           {inner}
         </div>
       </AbsoluteFill>
+    </AbsoluteFill>
+  )
+}
+
+// Split-screen stage (the "One Shot" reference's signature layout move): during
+// a split window the whole footage stack shrinks to the top ~55% of the frame
+// (cropped, face band kept in view), a thin white divider draws the seam, and
+// the split B-roll fills the bottom. Everything animates over ~10 frames.
+const FootageStage: React.FC<{
+  splits: Array<{ start: number; end: number }>
+  faceArea?: 'upper' | 'middle' | 'lower'
+  children: React.ReactNode
+}> = ({ splits, faceArea = 'middle', children }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const t = frame / fps
+
+  let amt = 0
+  for (const w of splits) {
+    if (t < w.start || t > w.end) continue
+    const inT = interpolate(t, [w.start, w.start + 0.33], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    const outT = interpolate(t, [w.end - 0.33, w.end], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    amt = Math.max(amt, Math.min(inT, outT))
+  }
+  if (amt <= 0.001) return <AbsoluteFill>{children}</AbsoluteFill>
+
+  const stageH = 1 - 0.45 * amt   // 100% -> 55% of the frame
+  // Keep the face band on screen as the stage crops, with a strong TOP bias —
+  // talking-head faces sit above center far more often than the profile's
+  // coarse bands suggest, and a cut-off forehead reads as a bug (feedback).
+  // upper: keep the very top; middle: barely shift (headroom absorbs it);
+  // lower: shift partway, never the full crop.
+  const shiftPct =
+    faceArea === 'upper' ? 0
+    : faceArea === 'lower' ? -(1 - stageH) * 60
+    : -(1 - stageH) * 18
+
+  return (
+    <AbsoluteFill>
+      <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: `${(stageH * 100).toFixed(2)}%`, overflow: 'hidden' }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: `${(100 / stageH).toFixed(2)}%`,
+            translate: `0px ${shiftPct.toFixed(2)}%`,
+          }}
+        >
+          {children}
+        </div>
+      </div>
+      {/* soft falloff under the stage — the split card's scrim completes the
+          blend, so no hard divider line (feedback: smoother reads better) */}
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          width: '100%',
+          top: `${(stageH * 100 - 3).toFixed(2)}%`,
+          height: '6%',
+          background: 'linear-gradient(180deg, transparent, rgba(3, 4, 7, 0.6))',
+          opacity: amt,
+        }}
+      />
     </AbsoluteFill>
   )
 }
@@ -561,6 +639,123 @@ const BrollClip: React.FC<{
   const media = !item.file ? null : item.kind === 'video'
     ? <OffthreadVideo src={staticFile(item.file)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+
+  // Split: FootageStage carries the footage to the top while the media rises
+  // into the bottom as a slightly TILTED rounded card over a dark gradient
+  // scrim (the reference's smooth slide-in, no hard divider line).
+  if (item.layout === 'split') {
+    const inT = interpolate(frame, [0, 11], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    const outT = interpolate(frame, [durationInFrames - 11, durationInFrames], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.in(Easing.cubic) })
+    const vis = Math.min(inT, outT)
+    return (
+      <AbsoluteFill style={{ pointerEvents: 'none' }}>
+        {/* dark scrim blending the lower half into the card */}
+        <AbsoluteFill
+          style={{
+            opacity: vis,
+            background: 'linear-gradient(180deg, transparent 44%, rgba(3, 4, 7, 0.55) 56%, rgba(3, 4, 7, 0.92) 72%)',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            left: '1%',
+            bottom: '1.5%',
+            width: '98%',
+            height: '42%',
+            overflow: 'hidden',
+            borderRadius: 20,
+            rotate: '-2.4deg',
+            translate: `0px ${((1 - vis) * 110).toFixed(2)}%`,
+            boxShadow: '0 -14px 60px rgba(0, 0, 0, 0.45)',
+          }}
+        >
+          <div style={{ width: '100%', height: '100%', scale: String(kenBurns) }}>{media}</div>
+        </div>
+      </AbsoluteFill>
+    )
+  }
+
+  // Panel: translucent media over the speaker (the reference's collage
+  // moments). With extra stills it becomes the CAROUSEL — 2-3 tall ghost
+  // panels across the top half sliding in staggered, the speaker visible
+  // through them. A single panel hugs the face-free side instead.
+  if (item.layout === 'panel') {
+    const outP = interpolate(frame, [durationInFrames - 9, durationInFrames], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+
+    const files = [item.file, ...(item.extraFiles ?? [])].filter(Boolean)
+    if (files.length >= 2) {
+      // Carousel: left / center-tall / right panes, staggered entrances from
+      // above with a slow drift while they hold.
+      const PANES: Array<{ left: string; top: string; w: string; h: string; delay: number }> = [
+        { left: '1.5%', top: '7%', w: '29%', h: '36%', delay: 5 },
+        { left: '32.5%', top: '2.5%', w: '35%', h: '48%', delay: 0 },
+        { left: '69.5%', top: '9%', w: '29%', h: '34%', delay: 9 },
+      ]
+      const mediaFor = (f: string) =>
+        f.endsWith('.mp4')
+          ? <OffthreadVideo src={staticFile(f)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          : <Img src={staticFile(f)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+      return (
+        <AbsoluteFill style={{ pointerEvents: 'none' }}>
+          {PANES.slice(0, Math.min(3, files.length === 2 ? 2 : 3)).map((p, i) => {
+            const f = files[i % files.length]
+            const inP = frame >= p.delay
+              ? spring({ frame: frame - p.delay, fps, config: { damping: 15, stiffness: 120, mass: 0.9 } })
+              : 0
+            const drift = Math.sin((frame + i * 40) * 0.02) * 4
+            return (
+              <div
+                key={i}
+                style={{
+                  position: 'absolute',
+                  left: p.left,
+                  top: p.top,
+                  width: p.w,
+                  height: p.h,
+                  translate: `0px ${(1 - inP) * -60 + drift}px`,
+                  opacity: 0.5 * Math.min(1, inP * 1.4) * outP,
+                  borderRadius: 14,
+                  overflow: 'hidden',
+                  boxShadow: '0 14px 44px rgba(0, 0, 0, 0.3)',
+                  border: '1px solid rgba(255, 255, 255, 0.3)',
+                }}
+              >
+                <div style={{ width: '100%', height: '100%', scale: String(kenBurns) }}>{mediaFor(f)}</div>
+              </div>
+            )
+          })}
+        </AbsoluteFill>
+      )
+    }
+
+    const from = item.from ?? 'right'
+    const inP = spring({ frame, fps, config: { damping: 14, stiffness: 150, mass: 0.8 } })
+    const slide = (1 - inP) * 110
+    const place: React.CSSProperties =
+      from === 'left' ? { left: '3%', top: '5%', translate: `${-slide}% 0%` }
+      : from === 'top' ? { left: '24%', top: '3.5%', translate: `0% ${-slide}%` }
+      : { right: '3%', top: '5%', translate: `${slide}% 0%` }
+    return (
+      <AbsoluteFill style={{ pointerEvents: 'none' }}>
+        <div
+          style={{
+            position: 'absolute',
+            width: '52%',
+            height: '23%',
+            ...place,
+            opacity: 0.55 * Math.min(1, inP * 1.4) * outP,
+            borderRadius: 22,
+            overflow: 'hidden',
+            boxShadow: '0 18px 50px rgba(0, 0, 0, 0.35)',
+            border: '1px solid rgba(255, 255, 255, 0.35)',
+          }}
+        >
+          <div style={{ width: '100%', height: '100%', scale: String(kenBurns) }}>{media}</div>
+        </div>
+      </AbsoluteFill>
+    )
+  }
 
   if (item.layout === 'cover') {
     const IN = transitionStyle === 'slide' ? 7 : 6
@@ -1145,126 +1340,243 @@ const JulieCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ 
 // MEANING (green = positive, red = negative, gold = neutral emphasis), big
 // centered punchline pages, and concept graphics that visualize the speech.
 
+// Accent palette matched to the "One Shot" reference: light cyan is the
+// signature highlight; mint keeps "good", soft red keeps "bad".
 const EUBANK_TONES = {
-  good: { color: '#4ADE80', glow: 'rgba(74, 222, 128, 0.45)' },
-  bad: { color: '#F87171', glow: 'rgba(248, 113, 113, 0.45)' },
-  gold: { color: '#FFD84D', glow: 'rgba(255, 216, 77, 0.4)' },
+  good: { color: '#86EFAC', glow: 'rgba(134, 239, 172, 0.55)' },
+  bad: { color: '#F87171', glow: 'rgba(248, 113, 113, 0.5)' },
+  gold: { color: '#4DEEEA', glow: 'rgba(77, 238, 234, 0.6)' },
 } as const
 const EUBANK_INK = '#1C1E24'
 
+// Eubank captions v2, matched to the "One Shot" reference: HUGE heavy caps
+// (~5-6.5% of frame width), white with a strong dark shadow, revealed as a
+// whole page with a snappy spring pop. Accent words glow in the light-cyan
+// signature (or mint/red for semantic good/bad) — in caps like the base, or
+// as the elegant tilted italic script (rotates per page). Captions hold the
+// chest band below the chin and NEVER cover the face.
 const EubankCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ page, widthPx }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
   const h = Math.abs(Math.floor(page.start * 977))
 
-  // Punch page: the whole phrase lands at once, big and centered, with a
-  // spring pop — the reference's "every single time." beat.
-  if (page.big) {
-    const pop = spring({ frame, fps, config: { damping: 13, stiffness: 210, mass: 0.7 } })
-    return (
-      <AbsoluteFill style={{ pointerEvents: 'none' }}>
-        <div
-          style={{
-            position: 'absolute',
-            left: '6%',
-            width: '88%',
-            top: '42%',
-            textAlign: 'center',
-            opacity: Math.min(1, pop * 1.4),
-            scale: String(0.78 + 0.22 * pop),
-            lineHeight: 1.16,
-          }}
-        >
-          {page.words.map((w, i) => {
-            const tone = w.accent ? EUBANK_TONES[w.tone ?? 'gold'] : null
-            return (
-              <span
-                key={i}
-                style={{
-                  fontFamily: KOE_SANS,
-                  fontSize: widthPx * 0.072,
-                  color: tone ? tone.color : '#FFFFFF',
-                  padding: '0 0.08em',
-                  textShadow: tone
-                    ? `0 0 26px ${tone.glow}, 0 3px 14px rgba(0, 0, 0, 0.55)`
-                    : '0 3px 14px rgba(0, 0, 0, 0.55)',
-                }}
-              >
-                {w.t}{' '}
-              </span>
-            )
-          })}
-        </div>
-      </AbsoluteFill>
-    )
-  }
+  // Whole-page spring pop (reference: ~3-4 frames with a slight overshoot).
+  const pop = spring({ frame, fps, config: { damping: 11, stiffness: 220, mass: 0.5 } })
+  const scale = (page.big ? 0.8 : 0.86) + (page.big ? 0.2 : 0.14) * pop
 
-  // Regular page: words build one by one; accent words land bold, colored, and
-  // with a small scale pop. Entrances AND sizes rotate per page — the reference
-  // mixes caption scale constantly, so no two consecutive pages read identical —
-  // but the POSITION holds one band (movement was churn, per feedback).
-  const entrance = h % 3
-  const sizeStep = [0.047, 0.053, 0.059][Math.floor(h / 3) % 3]
-  const pageIn = interpolate(frame, [0, 4], [0, 1], { extrapolateRight: 'clamp' })
-  const rise = entrance === 1
-    ? interpolate(frame, [0, 5], [12, 0], { extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
-    : 0
-  const scaleIn = entrance === 2
-    ? interpolate(frame, [0, 5], [1.06, 1], { extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
-    : 1
+  const sizeStep = page.big ? 0.085 : [0.06, 0.068, 0.075][Math.floor(h / 3) % 3]
+  // Accent mode rotates per page: caps-glow most of the time, the tilted
+  // italic script for a softer read every third accent page — and every ~5th
+  // page flips SCRIPT-DOMINANT (the reference's "Hey, thanks for clicking"):
+  // content words in glowing cyan script, only the glue words in white caps.
+  const scriptAccent = h % 3 === 2
+  const scriptDominant = h % 5 === 4
+  // Intra-page size contrast (feedback: same-size words read flat): glue words
+  // shrink, content words hold, accents grow — the reference's "and then the
+  // AUTOMATION" hierarchy.
+  const GLUE_RE = /^(the|a|an|and|or|but|of|to|in|on|at|for|is|are|was|it|i|you|we|so|that|this|with|my|me|be)[.,!?"']*$/i
+  const wordScale = (w: { t: string; accent: boolean }) =>
+    w.accent ? 1.18 : GLUE_RE.test(w.t) ? 0.72 : 1
 
-  // low sits a touch higher than the other styles' floor — the reference's
-  // captions ride just under the chest line, clear of platform UI.
+  // Two-line composition (feedback: everything on one line reads flat): pages
+  // of 4+ words break into a short line and a long line, and the LINES carry
+  // different scales — sometimes the short opener huge and the rest smaller,
+  // sometimes the payoff line dominating ("RIGHT NOW, / and then the
+  // AUTOMATION"). All rotation is page-hash-seeded, so reruns re-deal it.
+  const lines: Array<typeof page.words> =
+    !page.big && page.words.length >= 4
+      ? (() => {
+          const cut = 1 + (h % 2)
+          return [page.words.slice(0, cut), page.words.slice(cut)]
+        })()
+      : [page.words]
+  const lineScales: number[] =
+    lines.length === 2
+      ? (Math.floor(h / 9) % 2 === 0 ? [1.2, 0.82] : [0.8, 1.14])
+      : [1]
+
   const positionStyle: React.CSSProperties =
-    page.position === 'low' ? { bottom: '22%' }
-    : page.position === 'mid' ? { top: '44%' }
-    : { top: '13%' }
-  const left = page.align === 'left'
+    page.position === 'low' ? { bottom: '26%' }
+    : page.position === 'mid' ? { top: '47%' }
+    : { top: '12%' }
 
   return (
     <AbsoluteFill style={{ pointerEvents: 'none' }}>
       <div
         style={{
           position: 'absolute',
-          left: left ? '9%' : '6%',
-          width: left ? '74%' : '88%',
-          textAlign: left ? 'left' : 'center',
-          opacity: pageIn,
-          translate: `0px ${rise}px`,
-          scale: String(scaleIn),
-          lineHeight: 1.24,
+          left: '4%',
+          width: '92%',
+          textAlign: 'center',
+          opacity: Math.min(1, pop * 1.5),
+          scale: String(scale),
+          lineHeight: 1.14,
           ...positionStyle,
         }}
       >
-        {page.words.map((w, i) => {
-          const at = i * 2
-          const wo = interpolate(frame, [at, at + 3], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+        {lines.map((lineWords, li) => (
+        <div key={li}>
+        {lineWords.map((w, i) => {
+          const lineScale = lineScales[li]
           const tone = w.accent ? EUBANK_TONES[w.tone ?? 'gold'] : null
-          const wpop = tone
-            ? interpolate(frame, [at, at + 6], [1.14, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
-            : 1
-          // The reference's weight contrast: Medium base so the Bold colored
-          // emphasis visibly jumps out, and accents run a step larger.
+          if (scriptDominant) {
+            const glue = GLUE_RE.test(w.t) && !w.accent
+            if (!glue) {
+              const c = tone ?? EUBANK_TONES.gold
+              return (
+                <span
+                  key={i}
+                  style={{
+                    display: 'inline-block',
+                    fontFamily: ACCENT_FONT,
+                    fontStyle: 'italic',
+                    fontWeight: 700,
+                    fontSize: widthPx * sizeStep * lineScale * (w.accent ? 1.3 : 1.12),
+                    color: c.color,
+                    rotate: '-2deg',
+                    padding: '0 0.09em',
+                    textShadow: `0 0 26px ${c.glow}, 0 0 9px ${c.glow}, 0 3px 12px rgba(0, 0, 0, 0.5)`,
+                  }}
+                >
+                  {w.t}
+                </span>
+              )
+            }
+            return (
+              <span
+                key={i}
+                style={{
+                  display: 'inline-block',
+                  fontFamily: IMPACT_FONT,
+                  fontSize: widthPx * sizeStep * lineScale * 0.72,
+                  textTransform: 'uppercase',
+                  color: '#FFFFFF',
+                  padding: '0 0.08em',
+                  textShadow: '0 3px 12px rgba(0, 0, 0, 0.6)',
+                }}
+              >
+                {w.t}
+              </span>
+            )
+          }
+          if (tone && scriptAccent) {
+            // Script accent: elegant italic, natural case, slight tilt and
+            // scale-up — the reference's handwritten cyan moments.
+            return (
+              <span
+                key={i}
+                style={{
+                  display: 'inline-block',
+                  fontFamily: ACCENT_FONT,
+                  fontStyle: 'italic',
+                  fontWeight: 700,
+                  fontSize: widthPx * sizeStep * lineScale * 1.3,
+                  color: tone.color,
+                  rotate: '-4deg',
+                  padding: '0 0.1em',
+                  textShadow: `0 0 26px ${tone.glow}, 0 0 8px ${tone.glow}, 0 3px 12px rgba(0, 0, 0, 0.5)`,
+                }}
+              >
+                {w.t}
+              </span>
+            )
+          }
           return (
             <span
               key={i}
               style={{
                 display: 'inline-block',
-                fontFamily: tone ? KOE_SANS : VIRAL_SANS_STRONG,
-                fontSize: widthPx * (tone ? sizeStep * 1.16 : sizeStep),
-                color: tone ? tone.color : '#F5F5F2',
-                opacity: wo,
-                scale: String(wpop),
-                padding: '0 0.075em',
+                fontFamily: IMPACT_FONT,
+                fontSize: widthPx * sizeStep * lineScale * wordScale(w),
+                textTransform: 'uppercase',
+                letterSpacing: '-0.01em',
+                color: tone ? tone.color : '#FFFFFF',
+                padding: '0 0.07em',
                 textShadow: tone
-                  ? `0 0 22px ${tone.glow}, 0 2px 10px rgba(0, 0, 0, 0.5)`
-                  : '0 2px 10px rgba(0, 0, 0, 0.5)',
+                  ? `0 0 24px ${tone.glow}, 0 0 8px ${tone.glow}, 0 4px 14px rgba(0, 0, 0, 0.6)`
+                  : '0 4px 16px rgba(0, 0, 0, 0.65), 0 1px 4px rgba(0, 0, 0, 0.5)',
               }}
             >
               {w.t}
             </span>
           )
         })}
+        </div>
+        ))}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// Opening hook (reference's first seconds): the title word doubled — solid
+// white heavy caps with a glowing cyan italic echo behind/below — over a
+// darkened top band with slow-falling white dust particles.
+const EubankHook: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const io = interpolate(frame, [0, 8, durationInFrames - 10, durationInFrames], [0, 1, 1, 0], {
+    extrapolateLeft: 'clamp', extrapolateRight: 'clamp',
+  })
+  const title = (g.title ?? '').toUpperCase()
+  // Deterministic particle field: 22 dots, each with its own fall speed and
+  // sinusoidal sway, seeded by index so renders are reproducible.
+  const dots = Array.from({ length: 22 }, (_, i) => {
+    const seed = (i * 733) % 100
+    const x = (seed / 100) * 96 + 2
+    const speed = 0.55 + ((i * 397) % 50) / 100
+    const y = ((seed * 1.7 + frame * speed) % 110) - 5
+    const sway = Math.sin((frame + i * 31) * 0.05) * 1.6
+    const size = 1.5 + ((i * 211) % 20) / 10
+    return { x: x + sway, y, size, o: 0.14 + ((i * 149) % 25) / 100 }
+  })
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none', opacity: io }}>
+      {/* darkened top band so the title owns the opening frame */}
+      <AbsoluteFill style={{ background: 'linear-gradient(180deg, rgba(4, 6, 10, 0.72) 0%, rgba(4, 6, 10, 0.25) 26%, transparent 45%)' }} />
+      {dots.map((d, i) => (
+        <div
+          key={i}
+          style={{
+            position: 'absolute',
+            left: `${d.x}%`,
+            top: `${d.y}%`,
+            width: d.size,
+            height: d.size,
+            borderRadius: '50%',
+            background: '#FFFFFF',
+            opacity: d.o,
+          }}
+        />
+      ))}
+      {/* solid white caps + glowing cyan italic echo, like the reference */}
+      <div style={{ position: 'absolute', left: '5%', width: '90%', top: '5.5%', textAlign: 'center' }}>
+        <div
+          style={{
+            fontFamily: IMPACT_FONT,
+            fontSize: widthPx * 0.085,
+            letterSpacing: '0.01em',
+            color: '#FFFFFF',
+            textShadow: '0 4px 18px rgba(0, 0, 0, 0.6)',
+          }}
+        >
+          {title}
+        </div>
+        <div
+          style={{
+            marginTop: `-${widthPx * 0.078}px`,
+            translate: `-${widthPx * 0.01}px 0px`,
+            fontFamily: ACCENT_FONT,
+            fontStyle: 'italic',
+            fontWeight: 700,
+            fontSize: widthPx * 0.082,
+            color: EUBANK_TONES.gold.color,
+            opacity: 0.92,
+            rotate: '-3deg',
+            textShadow: `0 0 30px ${EUBANK_TONES.gold.glow}, 0 0 10px ${EUBANK_TONES.gold.glow}`,
+          }}
+        >
+          {(g.title ?? '').toLowerCase()}
+        </div>
       </div>
     </AbsoluteFill>
   )
@@ -1362,8 +1674,10 @@ const EubankNotes: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthP
   )
 }
 
-// Conceptual equation: "LEFT > RIGHT" centered over the dimmed frame — the ">"
-// lands with a pop as the claim is made.
+// Conceptual equation: "LEFT > RIGHT" over the dimmed frame — BIG, with the
+// hierarchy in the type itself: the winner renders much larger than the loser,
+// and the glowing ">" lands with a pop as the claim is made. Sits in the
+// face-free band, never over the speaker.
 const EubankEquation: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
@@ -1371,40 +1685,44 @@ const EubankEquation: React.FC<EubankGraphicProps> = ({ g, durationInFrames, wid
   const gtAt = 15
   const gtPop = frame >= gtAt ? spring({ frame: frame - gtAt, fps, config: { damping: 11, stiffness: 230, mass: 0.6 } }) : 0
   const rightIn = interpolate(frame, [gtAt + 5, gtAt + 11], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
-  const band = g.placement === 'bottom' ? { top: '60%' } : { top: '22%' }
+  const band = g.placement === 'top' ? { top: '16%' } : { top: '58%' }
+
+  // Auto-shrink so long word pairs still fit one line at these display sizes.
+  const chars = (g.eq?.left ?? '').length + (g.eq?.right ?? '').length
+  const fit = Math.min(1, 17 / Math.max(1, chars))
 
   return (
     <AbsoluteFill style={{ pointerEvents: 'none' }}>
-      <EubankDim durationInFrames={durationInFrames} amount={0.52} />
+      <EubankDim durationInFrames={durationInFrames} amount={0.55} />
       <div
         style={{
           position: 'absolute',
-          left: '5%',
-          width: '90%',
+          left: '3%',
+          width: '94%',
           textAlign: 'center',
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'baseline',
           justifyContent: 'center',
-          gap: widthPx * 0.022,
+          gap: widthPx * 0.026 * fit,
           ...band,
         }}
       >
-        <span style={{ fontFamily: KOE_SANS, fontSize: widthPx * 0.055, color: '#FFFFFF', opacity: leftIn, textShadow: '0 0 24px rgba(255,255,255,0.35), 0 2px 12px rgba(0,0,0,0.5)' }}>
+        <span style={{ fontFamily: KOE_SANS, fontSize: widthPx * 0.1 * fit, color: '#FFFFFF', opacity: leftIn, textShadow: '0 0 34px rgba(255,255,255,0.45), 0 3px 16px rgba(0,0,0,0.55)' }}>
           {g.eq?.left}
         </span>
         <span
           style={{
             fontFamily: KOE_SANS,
-            fontSize: widthPx * 0.064,
+            fontSize: widthPx * 0.105 * fit,
             color: EUBANK_TONES.gold.color,
             opacity: Math.min(1, gtPop * 1.3),
             scale: String(0.6 + 0.4 * gtPop),
-            textShadow: `0 0 28px ${EUBANK_TONES.gold.glow}, 0 2px 12px rgba(0,0,0,0.5)`,
+            textShadow: `0 0 34px ${EUBANK_TONES.gold.glow}, 0 0 12px ${EUBANK_TONES.gold.glow}, 0 3px 14px rgba(0,0,0,0.5)`,
           }}
         >
           {'>'}
         </span>
-        <span style={{ fontFamily: VIRAL_SANS_STRONG, fontSize: widthPx * 0.055, color: 'rgba(255,255,255,0.82)', opacity: rightIn, textShadow: '0 2px 12px rgba(0,0,0,0.5)' }}>
+        <span style={{ fontFamily: VIRAL_SANS_STRONG, fontSize: widthPx * 0.068 * fit, color: 'rgba(255,255,255,0.72)', opacity: rightIn, textShadow: '0 2px 12px rgba(0,0,0,0.5)' }}>
           {g.eq?.right}
         </span>
       </div>
@@ -1642,11 +1960,13 @@ const EubankCards: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthP
   const out = interpolate(frame, [durationInFrames - 7, durationInFrames], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
 
   // Diagonal cascade positions (2 labels: TL + BR like the reference; a third
-  // slots mid-right).
+  // slots top-right, ABOVE the center card's zone — labels and card must never
+  // share pixels). Widths cap each label so long copy wraps inside its corner
+  // instead of reaching the middle.
   const SPOTS: Array<React.CSSProperties> = [
-    { left: '9%', top: '13%', textAlign: 'left' },
-    { right: '9%', top: '68%', textAlign: 'right' },
-    { right: '9%', top: '36%', textAlign: 'right' },
+    { left: '8%', top: '11%', textAlign: 'left', width: '46%' },
+    { right: '8%', top: '70%', textAlign: 'right', width: '52%' },
+    { right: '6%', top: '24%', textAlign: 'right', width: '42%' },
   ]
 
   const cardAt = Math.round(1.5 * fps)
@@ -1662,7 +1982,7 @@ const EubankCards: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthP
     const first = words[0] ?? ''
     const rest = words.slice(1).join(' ')
     return (
-      <div key={i} style={{ position: 'absolute', width: '60%', ...SPOTS[i], opacity: o, translate: `0px ${rise}px` }}>
+      <div key={i} style={{ position: 'absolute', ...SPOTS[i], opacity: o, translate: `0px ${rise}px` }}>
         <div
           style={{
             fontFamily: EUBANK_LIGHT,
@@ -2027,6 +2347,8 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
   grade,
   hookSpotlight,
   handheld,
+  splits = [],
+  faceArea,
   sfx = [],
   width = 1080,
 }) => {
@@ -2053,26 +2375,28 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
-      {segments.map((seg, i) => {
-        const durationInFrames = Math.max(1, Math.round(seg.duration * fps))
-        return (
-          <Sequence key={i} from={offsets[i]} durationInFrames={durationInFrames}>
-            <SegmentClip
-              videoFile={videoFile}
-              seg={seg}
-              durationInFrames={durationInFrames}
-              viral={viral}
-              koe={koe}
-              eubank={eubank}
-              handheld={handheld}
-              grade={grade}
-              widthPx={width}
-              matte={i === 0 ? matte : undefined}
-              behindPages={i === 0 ? behindPages : []}
-            />
-          </Sequence>
-        )
-      })}
+      <FootageStage splits={splits} faceArea={faceArea}>
+        {segments.map((seg, i) => {
+          const durationInFrames = Math.max(1, Math.round(seg.duration * fps))
+          return (
+            <Sequence key={i} from={offsets[i]} durationInFrames={durationInFrames}>
+              <SegmentClip
+                videoFile={videoFile}
+                seg={seg}
+                durationInFrames={durationInFrames}
+                viral={viral}
+                koe={koe}
+                eubank={eubank}
+                handheld={handheld}
+                grade={grade}
+                widthPx={width}
+                matte={i === 0 ? matte : undefined}
+                behindPages={i === 0 ? behindPages : []}
+              />
+            </Sequence>
+          )
+        })}
+      </FootageStage>
 
       {hookSpotlight ? (
         <Sequence from={0} durationInFrames={Math.round(2.4 * fps)}>
@@ -2107,6 +2431,7 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
           : g.kind === 'equation' ? EubankEquation
           : g.kind === 'crossout' ? EubankMethodScene
           : g.kind === 'cards' ? EubankCards
+          : g.kind === 'hook' ? EubankHook
           : EubankKeyword
         return (
           <Sequence key={`gfx-${i}`} from={from} durationInFrames={durationInFrames}>

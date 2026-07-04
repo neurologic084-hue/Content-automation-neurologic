@@ -18,7 +18,7 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
 import { planEubankGraphics, planEubankSfxCues, type EubankGraphic } from './eubank-graphics'
@@ -1051,7 +1051,11 @@ async function renderRemotionEdit(
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
-        const graphicWindows = graphics.map(g => ({ start: g.start, duration: g.duration }))
+        // The hook is a top-band overlay — B-roll can run under it, so it
+        // never claims timeline from the cutaway planner.
+        const graphicWindows = graphics
+          .filter(g => g.kind !== 'hook')
+          .map(g => ({ start: g.start, duration: g.duration }))
         const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, graphicWindows)
         broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
         if (viral) {
@@ -1059,25 +1063,77 @@ async function renderRemotionEdit(
           // are dropped (the card carries its own headline).
           plan.pages = applyViralCoverTreatment(plan.pages, broll)
         } else {
-          // Eubank: the reference anchors captions in the UPPER third whenever
-          // full-screen B-roll owns the frame ("Top-Third Hook Captions"), and
-          // every cover carries its OWN transition — the combo rotation that
-          // keeps consecutive cutaways from repeating the same move.
+          // Eubank layout system (the "One Shot" reference): B-roll slots
+          // rotate through three treatments — full-screen cover (with its own
+          // transition from the combo rotation), the SPLIT (footage slides to
+          // the top 55%, media fills the bottom, captions ride the seam), and
+          // the translucent PANEL over the speaker. Captions elsewhere hold
+          // the chest band; only split windows move them (to the seam) and
+          // covers lift them to the top third.
           if (kit.captionStyle === 'eubank') {
-            for (const p of plan.pages) {
-              if (broll.some(b => b.layout === 'cover' && p.start < b.start + b.duration && p.end > b.start)) {
-                p.position = 'high'
-              }
-            }
+            const LAYOUTS: Array<'cover' | 'split' | 'panel'> = ['split', 'cover', 'panel', 'cover', 'split', 'panel']
             const COMBO: TransitionStyle[] = ['zoom', 'flash', 'whip', 'slide', 'blur']
             let combo = kit.variation
-            for (const b of broll) {
-              if (b.layout === 'cover') b.transition = COMBO[combo++ % COMBO.length]
+            // A single opaque-ish panel slides in on the side the face ISN'T.
+            // A centered face has no safe side — but the CAROUSEL treatment
+            // (2-3 translucent panels across the top, the reference's "bunch
+            // of B-roll" moment) reads fine over anyone, so panel beats try to
+            // become carousels first and only then fall back to covers.
+            const panelSide: 'left' | 'right' | null =
+              profile?.faceFraming === 'tight' ? null
+              : profile?.faceSide === 'left' ? 'right'
+              : profile?.faceSide === 'right' ? 'left'
+              : null
+            for (let bi = 0; bi < broll.length; bi++) {
+              const b = broll[bi]
+              if (b.layout !== 'cover') continue
+              let pick = LAYOUTS[(bi + kit.variation) % LAYOUTS.length]
+              if (pick === 'panel') {
+                const extras = await resolveExtraImages(
+                  b.query ?? 'city skyline golden hour',
+                  path.join(REMOTION_DIR, 'public', brollPrefix),
+                  brollPrefix,
+                  `carousel-${bi}`,
+                  2,
+                  kit.variation,
+                ).catch(() => [] as string[])
+                if (extras.length >= 1) {
+                  b.extraFiles = extras
+                  b.from = 'top'
+                  if (b.duration < 2.8) b.duration = 3.0
+                } else if (panelSide) {
+                  b.from = panelSide
+                } else {
+                  pick = 'cover'
+                }
+              }
+              b.layout = pick
+              if (pick === 'cover') b.transition = COMBO[combo++ % COMBO.length]
+              // Splits hold longer than a flash cover — give them room.
+              if (pick === 'split' && b.duration < 3) b.duration = Math.min(3.4, b.duration + 0.8)
+            }
+            // The split is the signature layout move — with 2+ cutaways, at
+            // least one must be a split even when the rotation misses it.
+            if (broll.length >= 1 && !broll.some(b => b.layout === 'split')) {
+              const last = [...broll].reverse().find(b => b.layout === 'cover') ?? broll[broll.length - 1]
+              last.layout = 'split'
+              delete last.transition
+              if (last.duration < 3) last.duration = Math.min(3.4, last.duration + 0.8)
+            }
+            for (const p of plan.pages) {
+              if (broll.some(b => b.layout === 'split' && p.start < b.start + b.duration && p.end > b.start)) {
+                p.position = 'mid'   // the seam
+              } else if (broll.some(b => b.layout === 'cover' && p.start < b.start + b.duration && p.end > b.start)) {
+                p.position = 'high'
+              }
             }
           }
           avoidCaptionCollisions(plan.pages, broll)
         }
-        broll.forEach(b => { if (b.file) staged.push(path.join(REMOTION_DIR, 'public', b.file)) })
+        broll.forEach(b => {
+          if (b.file) staged.push(path.join(REMOTION_DIR, 'public', b.file))
+          for (const f of b.extraFiles ?? []) staged.push(path.join(REMOTION_DIR, 'public', f))
+        })
       } catch (e) {
         console.warn('[motion-renderer] B-roll pass failed, rendering without it:', (e as Error).message)
       }
@@ -1173,6 +1229,8 @@ async function renderRemotionEdit(
       grade: kit.grade,
       hookSpotlight: kit.hookSpotlight,
       handheld: kit.handheld,
+      splits: broll.filter(b => b.layout === 'split').map(b => ({ start: b.start, end: b.start + b.duration })),
+      faceArea: profile?.faceArea,
       sfx,
     }))
     staged.push(propsPath)

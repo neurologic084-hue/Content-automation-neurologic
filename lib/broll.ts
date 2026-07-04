@@ -24,10 +24,22 @@ export interface BrollItem {
   duration: number
   file: string       // filename relative to remotion/public/
   kind: 'video' | 'image'
-  layout: 'card' | 'cover'
+  // split: footage slides to the top ~55%, media fills the bottom, captions
+  // ride the seam. panel: translucent rounded panel over the speaker. Both
+  // are assigned pipeline-side (eubank layout rotation) — the planner itself
+  // only emits card/cover.
+  layout: 'card' | 'cover' | 'split' | 'panel'
   // Per-cover transition override (eubank combo rotation): each cover carries
   // its own move instead of the render's single global style.
   transition?: TransitionStyle
+  // panel: which edge it slides in from.
+  from?: 'left' | 'right' | 'top'
+  // panel carousel (the reference's "bunch of B-roll" moment): 1-2 extra
+  // stills rendered as additional translucent panels around the main media.
+  extraFiles?: string[]
+  // The stock query that resolved this item — kept so downstream treatments
+  // (carousel extras) can fetch more media for the same moment.
+  query?: string
   // Viral (v5) designed cover: instead of raw footage, the renderer builds an
   // animated editorial poster around this media — warm gradient canvas, the
   // image in a floating mask, and this text as the card's own headline.
@@ -226,8 +238,8 @@ export async function planBrollSlots(
     let cursor = 3.0
     let filled = 0
     while (slots.length < targetCount && qi < pool.length && cursor + FILL_DUR <= duration - 1.5) {
-      const hit = busy.find(b => cursor < b.end + 1.2 && cursor + FILL_DUR > b.start - 1.2)
-      if (hit) { cursor = hit.end + 1.2; continue }
+      const hit = busy.find(b => cursor < b.end + 0.6 && cursor + FILL_DUR > b.start - 0.6)
+      if (hit) { cursor = hit.end + 0.6; continue }
       const layout: PlannedSlot['layout'] =
         (media === 'viral' || media === 'video') && coversUsed < maxCovers ? 'cover' : 'card'
       if (layout === 'cover') coversUsed++
@@ -368,14 +380,14 @@ export async function resolveBrollMedia(
       if (wantsVideo) {
         const videoDest = path.join(stageDir, `broll-${i}.mp4`)
         if (await fetchPexelsVideo(query, videoDest, variation)) {
-          items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.mp4`, kind: 'video', layout: slot.layout, design: slot.design })
+          items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.mp4`, kind: 'video', layout: slot.layout, design: slot.design, query: slot.query })
           resolved = true
           break
         }
       }
       const photoDest = path.join(stageDir, `broll-${i}.jpg`)
       if (await fetchPexelsPhoto(query, photoDest, variation) || await fetchOpenverseImage(query, photoDest, variation)) {
-        items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.jpg`, kind: 'image', layout: slot.layout, design: slot.design })
+        items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.jpg`, kind: 'image', layout: slot.layout, design: slot.design, query: slot.query })
         resolved = true
         break
       }
@@ -393,6 +405,29 @@ export async function resolveBrollMedia(
   }
   console.log(`[broll] resolved ${items.length}/${slots.length} slot(s) (${media})`)
   return items
+}
+
+// Fetch up to `count` EXTRA stills for a query — distinct results via rotation
+// offsets — for the eubank carousel moment (2-3 translucent panels at once).
+// Best-effort: whatever resolves comes back; an empty array degrades the beat
+// to a single panel or cover.
+export async function resolveExtraImages(
+  query: string,
+  stageDir: string,
+  publicPrefix: string,
+  baseName: string,
+  count: number,
+  variation = 0,
+): Promise<string[]> {
+  fs.mkdirSync(stageDir, { recursive: true })
+  const out: string[] = []
+  for (let k = 0; k < count; k++) {
+    const dest = path.join(stageDir, `${baseName}-x${k}.jpg`)
+    if (await fetchPexelsPhoto(query, dest, variation + k + 1) || await fetchOpenverseImage(query, dest, variation + k + 1)) {
+      out.push(`${publicPrefix}/${baseName}-x${k}.jpg`)
+    }
+  }
+  return out
 }
 
 // Viral pages sitting over a full-screen cover get the reference's poster
