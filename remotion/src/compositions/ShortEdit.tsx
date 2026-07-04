@@ -61,6 +61,12 @@ loadFont({ family: KOE_MONO_BOLD, url: staticFile('fonts/SpaceMono-Bold.ttf') })
 // Julie (v4) accent: heavy italic geometric sans for the two-tone keywords.
 const JULIE_ACCENT = 'EditJulieAccent'
 loadFont({ family: JULIE_ACCENT, url: staticFile('fonts/Poppins-BoldItalic.ttf') }).catch(() => undefined)
+// Eubank (v4) extras: calligraphic script for the gold method titles (the
+// "Picasso Method" look), light geometric sans for thin quote/label text.
+const EUBANK_SCRIPT = 'EditEubankScript'
+const EUBANK_LIGHT = 'EditEubankLight'
+loadFont({ family: EUBANK_SCRIPT, url: staticFile('fonts/GreatVibes-Regular.ttf') }).catch(() => undefined)
+loadFont({ family: EUBANK_LIGHT, url: staticFile('fonts/Poppins-Light.ttf') }).catch(() => undefined)
 
 const KOE_RED = '#F03A32'
 
@@ -75,13 +81,15 @@ export type ShortEditPage = {
   start: number                  // edited-timeline seconds
   end: number
   position: 'low' | 'mid' | 'high'
-  words: { t: string; accent: boolean }[]
+  // tone: eubank's semantic accent color (good=green, bad=red, gold=neutral).
+  words: { t: string; accent: boolean; tone?: 'good' | 'bad' | 'gold' }[]
   // Viral two-tier grammar (see lib/edit-plan.ts). Inclusive word-index range.
   accentRange?: [number, number]
   accentFont?: 'serif' | 'block'
   accentColor?: 'gold' | 'copper' | 'orange' | 'purple' | 'gradient'
-  big?: boolean                  // poster treatment over a full-screen cover
+  big?: boolean                  // poster treatment over a cover / eubank punch page
   behind?: boolean               // hook page rendered behind the subject matte
+  align?: 'left' | 'center'      // eubank: occasional left-aligned editorial block
 }
 
 export type ShortEditBroll = {
@@ -90,6 +98,8 @@ export type ShortEditBroll = {
   file: string                   // filename inside remotion/public/
   kind: 'video' | 'image'
   layout: 'card' | 'cover'
+  // Per-cover transition (eubank combo rotation) — overrides transitionStyle.
+  transition?: 'blur' | 'flash' | 'punch' | 'slide' | 'zoom' | 'whip'
   // Designed poster card (viral): media floats on a gradient canvas with this
   // copy as the card's own headline. file may be '' — the poster then renders
   // as a typography-only animation. Palette rotates per card.
@@ -111,25 +121,33 @@ export type ShortEditProps = {
   // are always silent hard cuts — transitions only happen where they mean
   // something (entering/leaving a cover). 'slide' is the viral push.
   transitionStyle?: 'blur' | 'flash' | 'punch' | 'slide'
-  captionStyle?: 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie'
+  captionStyle?: 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
   // Transparent-webm foreground of the speaker for the first seconds; lets the
   // hook caption render behind them (best-effort, staged pipeline-side).
   matte?: { file: string; durationSec: number }
   // Optional guest credit, bottom-left over the early footage (viral style).
   credit?: { name: string; title: string }
-  // Koe (v6) context-driven graphics, planned pipeline-side (lib/koe-graphics.ts).
+  // Context-driven graphics, planned pipeline-side: Koe kinds (title/list/venn,
+  // lib/koe-graphics.ts) and Eubank kinds (notes/equation/crossout/cards/keyword,
+  // lib/eubank-graphics.ts) share this one prop.
   graphics?: Array<{
     start: number
     duration: number
-    kind: 'title' | 'list' | 'venn'
+    kind: 'title' | 'list' | 'venn' | 'notes' | 'equation' | 'crossout' | 'cards' | 'keyword'
     placement?: 'top' | 'bottom'   // face-aware: text goes where the face isn't
-    title?: string
+    title?: string                 // koe title / notes header / keyword text / cards verdict
     subtitleBase?: string
     subtitleWords?: string[]
-    items?: string[]
+    items?: string[]               // koe list / notes items / cards labels
     itemAt?: number[]              // per-item reveal times (s, relative), spoken-synced
     left?: { label: string; items: string[] }
     right?: { label: string; items: string[] }
+    eq?: { left: string; right: string }         // eubank equation ("left > right")
+    strike?: { wrong: string; right: string }    // eubank cross-out
+    icon?: string                                // eubank method scene: icon key
+    // eubank quote panel: words to emphasize inside `title`, with their tone
+    emphasis?: Array<{ word: string; tone?: 'good' | 'bad' | 'gold' }>
+    stat?: string                                // eubank cards: grounded stat ("1M views")
   }>
   // Koe red-line tag (name or CTA), mono type with a drawn red vertical rule.
   tag?: { line1: string; line2?: string; start: number; durationSec: number }
@@ -137,6 +155,9 @@ export type ShortEditProps = {
   grade?: 'cinematic'
   // Julie's opening focus effect: edges darken, subject stays bright (~2.4s).
   hookSpotlight?: boolean
+  // Eubank: tiny organic position/rotation drift on every shot — the reference
+  // never lets a frame sit perfectly still.
+  handheld?: boolean
   // Event-driven audio cues, fully planned and peak-aligned pipeline-side
   // (lib/render-kit.ts + lib/sfx-stage.ts). durationSec is the real file
   // length so long sounds (risers) never get clipped mid-build.
@@ -164,18 +185,23 @@ const SegmentClip: React.FC<{
   durationInFrames: number
   viral: boolean
   koe?: boolean
+  eubank?: boolean
+  handheld?: boolean
   grade?: 'cinematic'
   widthPx: number
   matte?: { file: string; durationSec: number }
   behindPages?: ShortEditPage[]
-}> = ({ videoFile, seg, durationInFrames, viral, koe, grade, widthPx, matte, behindPages = [] }) => {
+}> = ({ videoFile, seg, durationInFrames, viral, koe, eubank, handheld, grade, widthPx, matte, behindPages = [] }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
 
-  // Viral: punched-in bases with a whisper of drift (the cut itself is the
-  // "zoom"); koe: the same alternating-framing idea but gentler, always
-  // drifting IN like the reference; others: the original slow creep.
-  const zoomRange: [number, number] = viral
+  // Eubank: the reference jumps 1.15-1.25x between "shots" — the strongest
+  // punched framing of the set. Viral: punched-in bases with a whisper of
+  // drift (the cut itself is the "zoom"); koe: the same alternating-framing
+  // idea but gentler, always drifting IN; others: the original slow creep.
+  const zoomRange: [number, number] = eubank
+    ? seg.zoom === 'in' ? [1.18, 1.225] : seg.zoom === 'out' ? [1.0, 1.035] : [1.08, 1.105]
+    : viral
     ? seg.zoom === 'in' ? [1.13, 1.17] : seg.zoom === 'out' ? [1.0, 1.025] : [1.055, 1.08]
     : koe
     ? seg.zoom === 'in' ? [1.09, 1.125] : seg.zoom === 'out' ? [1.0, 1.03] : [1.045, 1.075]
@@ -193,8 +219,27 @@ const SegmentClip: React.FC<{
     : 1
   const scale = drift * punch
 
+  // Handheld drift (eubank): two slow incommensurate sines per axis plus a hair
+  // of rotation — organic, deterministic, and small enough to never crop badly
+  // (the punched zoom base always covers the excursion). Seeded per segment so
+  // consecutive cuts don't share a phase.
+  const hh = handheld
+    ? {
+        x: Math.sin(frame * 0.041 + seg.srcStart * 7.3) * 3.2 + Math.sin(frame * 0.013 + seg.srcStart * 3.1) * 2.2,
+        y: Math.cos(frame * 0.033 + seg.srcStart * 5.7) * 2.6 + Math.sin(frame * 0.017 + seg.srcStart * 2.3) * 1.8,
+        r: Math.sin(frame * 0.021 + seg.srcStart * 4.9) * 0.14,
+      }
+    : { x: 0, y: 0, r: 0 }
+
   const inner = (
-    <AbsoluteFill style={{ scale: String(scale), transformOrigin: '50% 32%' }}>
+    <AbsoluteFill
+      style={{
+        scale: String(scale),
+        transformOrigin: '50% 32%',
+        translate: hh.x || hh.y ? `${hh.x.toFixed(2)}px ${hh.y.toFixed(2)}px` : undefined,
+        rotate: hh.r ? `${hh.r.toFixed(3)}deg` : undefined,
+      }}
+    >
       <OffthreadVideo
         src={staticFile(videoFile)}
         startFrom={Math.round(seg.srcStart * fps)}
@@ -500,11 +545,13 @@ const DesignedCover: React.FC<{
 const BrollClip: React.FC<{
   item: ShortEditBroll
   durationInFrames: number
-  transitionStyle: 'blur' | 'flash' | 'punch' | 'slide'
+  transitionStyle: 'blur' | 'flash' | 'punch' | 'slide' | 'zoom' | 'whip'
   widthPx: number
-}> = ({ item, durationInFrames, transitionStyle, widthPx }) => {
+}> = ({ item, durationInFrames, transitionStyle: globalStyle, widthPx }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
+  // Per-cover transition (eubank combos) beats the render's global style.
+  const transitionStyle = item.transition ?? globalStyle
   const appear = interpolate(frame, [0, 4], [0, 1], { extrapolateRight: 'clamp' })
   const kenBurns = interpolate(frame, [0, durationInFrames], [1.0, 1.06], {
     extrapolateRight: 'clamp',
@@ -526,6 +573,48 @@ const BrollClip: React.FC<{
           <AbsoluteFill style={{ scale: String(kenBurns) }}>{media}</AbsoluteFill>
         </AbsoluteFill>
       )
+
+    // Zoom-through: rush in from deep scale with motion blur, rush out deeper —
+    // the reference's "high-speed zoom with heavy motion blur" structural move.
+    if (transitionStyle === 'zoom') {
+      const zIn = interpolate(frame, [0, 8], [1.6, 1], {
+        extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic),
+      })
+      const zOut = interpolate(frame, [outStart, durationInFrames], [1, 1.5], {
+        extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.in(Easing.cubic),
+      })
+      const zBlur = interpolate(frame, [0, 7, outStart, durationInFrames], [16, 0, 0, 13], {
+        extrapolateLeft: 'clamp', extrapolateRight: 'clamp',
+      })
+      const zFade = interpolate(frame, [durationInFrames - 3, durationInFrames], [1, 0], {
+        extrapolateLeft: 'clamp', extrapolateRight: 'clamp',
+      })
+      return (
+        <AbsoluteFill style={{ opacity: Math.min(appear, zFade), backgroundColor: '#000' }}>
+          <AbsoluteFill style={{ scale: String(zIn * zOut), filter: zBlur > 0.2 ? `blur(${zBlur.toFixed(1)}px)` : undefined }}>
+            {content}
+          </AbsoluteFill>
+        </AbsoluteFill>
+      )
+    }
+
+    // Whip-pan: rip in from the right and out to the left with a blur streak —
+    // faster and harder than the viral slide.
+    if (transitionStyle === 'whip') {
+      const x = interpolate(frame, [0, 5, outStart, durationInFrames], [130, 0, 0, -130], {
+        extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.bezier(0.2, 0.9, 0.3, 1),
+      })
+      const wBlur = interpolate(frame, [0, 5, outStart, durationInFrames], [14, 0, 0, 14], {
+        extrapolateLeft: 'clamp', extrapolateRight: 'clamp',
+      })
+      return (
+        <AbsoluteFill style={{ translate: `${x}% 0%`, backgroundColor: '#000' }}>
+          <AbsoluteFill style={{ filter: wBlur > 0.2 ? `blur(${wBlur.toFixed(1)}px)` : undefined }}>
+            {content}
+          </AbsoluteFill>
+        </AbsoluteFill>
+      )
+    }
 
     if (transitionStyle === 'slide') {
       // The viral push: shove in from the right, shove out to the left.
@@ -932,8 +1021,8 @@ const CreditTag: React.FC<{ credit: { name: string; title: string }; widthPx: nu
 }
 
 // Caption identities. serif/editorial/impact share the original page system;
-// viral and koe have dedicated renderers.
-type CaptionStyleName = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie'
+// viral, koe, julie, and eubank have dedicated renderers.
+type CaptionStyleName = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
 
 // Koe captions: tiny bold sentence-case sans, centered just below the chest —
 // deliberately quiet so the graphics and footage carry the frame.
@@ -1050,6 +1139,709 @@ const JulieCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ 
   )
 }
 
+// ── Eubank (v4) captions + concept graphics ───────────────────────────────────
+// Modeled on "Alex Eubank Sample.mp4" (lib/V4-EUBANK-PLAN.md): clean Inter
+// sentence-case captions whose emphasis words are bold and color-coded by
+// MEANING (green = positive, red = negative, gold = neutral emphasis), big
+// centered punchline pages, and concept graphics that visualize the speech.
+
+const EUBANK_TONES = {
+  good: { color: '#4ADE80', glow: 'rgba(74, 222, 128, 0.45)' },
+  bad: { color: '#F87171', glow: 'rgba(248, 113, 113, 0.45)' },
+  gold: { color: '#FFD84D', glow: 'rgba(255, 216, 77, 0.4)' },
+} as const
+const EUBANK_INK = '#1C1E24'
+
+const EubankCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ page, widthPx }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const h = Math.abs(Math.floor(page.start * 977))
+
+  // Punch page: the whole phrase lands at once, big and centered, with a
+  // spring pop — the reference's "every single time." beat.
+  if (page.big) {
+    const pop = spring({ frame, fps, config: { damping: 13, stiffness: 210, mass: 0.7 } })
+    return (
+      <AbsoluteFill style={{ pointerEvents: 'none' }}>
+        <div
+          style={{
+            position: 'absolute',
+            left: '6%',
+            width: '88%',
+            top: '42%',
+            textAlign: 'center',
+            opacity: Math.min(1, pop * 1.4),
+            scale: String(0.78 + 0.22 * pop),
+            lineHeight: 1.16,
+          }}
+        >
+          {page.words.map((w, i) => {
+            const tone = w.accent ? EUBANK_TONES[w.tone ?? 'gold'] : null
+            return (
+              <span
+                key={i}
+                style={{
+                  fontFamily: KOE_SANS,
+                  fontSize: widthPx * 0.072,
+                  color: tone ? tone.color : '#FFFFFF',
+                  padding: '0 0.08em',
+                  textShadow: tone
+                    ? `0 0 26px ${tone.glow}, 0 3px 14px rgba(0, 0, 0, 0.55)`
+                    : '0 3px 14px rgba(0, 0, 0, 0.55)',
+                }}
+              >
+                {w.t}{' '}
+              </span>
+            )
+          })}
+        </div>
+      </AbsoluteFill>
+    )
+  }
+
+  // Regular page: words build one by one; accent words land bold, colored, and
+  // with a small scale pop. Entrances AND sizes rotate per page — the reference
+  // mixes caption scale constantly, so no two consecutive pages read identical —
+  // but the POSITION holds one band (movement was churn, per feedback).
+  const entrance = h % 3
+  const sizeStep = [0.047, 0.053, 0.059][Math.floor(h / 3) % 3]
+  const pageIn = interpolate(frame, [0, 4], [0, 1], { extrapolateRight: 'clamp' })
+  const rise = entrance === 1
+    ? interpolate(frame, [0, 5], [12, 0], { extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    : 0
+  const scaleIn = entrance === 2
+    ? interpolate(frame, [0, 5], [1.06, 1], { extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    : 1
+
+  // low sits a touch higher than the other styles' floor — the reference's
+  // captions ride just under the chest line, clear of platform UI.
+  const positionStyle: React.CSSProperties =
+    page.position === 'low' ? { bottom: '22%' }
+    : page.position === 'mid' ? { top: '44%' }
+    : { top: '13%' }
+  const left = page.align === 'left'
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none' }}>
+      <div
+        style={{
+          position: 'absolute',
+          left: left ? '9%' : '6%',
+          width: left ? '74%' : '88%',
+          textAlign: left ? 'left' : 'center',
+          opacity: pageIn,
+          translate: `0px ${rise}px`,
+          scale: String(scaleIn),
+          lineHeight: 1.24,
+          ...positionStyle,
+        }}
+      >
+        {page.words.map((w, i) => {
+          const at = i * 2
+          const wo = interpolate(frame, [at, at + 3], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+          const tone = w.accent ? EUBANK_TONES[w.tone ?? 'gold'] : null
+          const wpop = tone
+            ? interpolate(frame, [at, at + 6], [1.14, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+            : 1
+          // The reference's weight contrast: Medium base so the Bold colored
+          // emphasis visibly jumps out, and accents run a step larger.
+          return (
+            <span
+              key={i}
+              style={{
+                display: 'inline-block',
+                fontFamily: tone ? KOE_SANS : VIRAL_SANS_STRONG,
+                fontSize: widthPx * (tone ? sizeStep * 1.16 : sizeStep),
+                color: tone ? tone.color : '#F5F5F2',
+                opacity: wo,
+                scale: String(wpop),
+                padding: '0 0.075em',
+                textShadow: tone
+                  ? `0 0 22px ${tone.glow}, 0 2px 10px rgba(0, 0, 0, 0.5)`
+                  : '0 2px 10px rgba(0, 0, 0, 0.5)',
+              }}
+            >
+              {w.t}
+            </span>
+          )
+        })}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// Shared dimming layer for the Eubank text graphics; optional backdrop blur for
+// the cards moment (the reference blurs the speaker hard behind its framework).
+const EubankDim: React.FC<{ durationInFrames: number; amount?: number; blur?: number }> = ({ durationInFrames, amount = 0.5, blur = 0 }) => {
+  const frame = useCurrentFrame()
+  const o = interpolate(frame, [0, 6, durationInFrames - 6, durationInFrames], [0, 1, 1, 0], {
+    extrapolateLeft: 'clamp', extrapolateRight: 'clamp',
+  })
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: `rgba(6, 8, 12, ${(amount * o).toFixed(3)})`,
+        backdropFilter: blur > 0 ? `blur(${(blur * o).toFixed(1)}px)` : undefined,
+      }}
+    />
+  )
+}
+
+type EubankGraphicProps = { g: NonNullable<ShortEditProps['graphics']>[number]; durationInFrames: number; widthPx: number }
+
+// Notes-app checklist: a white rounded card springs up in the face-free band;
+// items reveal AT THE MOMENT THEY'RE SPOKEN (itemAt), each with a yellow
+// checkmark circle popping in.
+const EubankNotes: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const items = g.items ?? []
+  const atFrames = items.map((_, i) => Math.round((g.itemAt?.[i] ?? i * 0.9) * fps))
+  const cardIn = spring({ frame, fps, config: { damping: 14, stiffness: 160, mass: 0.8 } })
+  const out = interpolate(frame, [durationInFrames - 7, durationInFrames], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const fromBottom = g.placement === 'bottom'
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none' }}>
+      <div
+        style={{
+          position: 'absolute',
+          left: '10%',
+          width: '80%',
+          top: fromBottom ? undefined : '9%',
+          bottom: fromBottom ? '12%' : undefined,
+          opacity: Math.min(cardIn * 1.3, out),
+          translate: `0px ${(1 - cardIn) * (fromBottom ? 46 : -46)}px`,
+          scale: String(0.92 + 0.08 * cardIn),
+          borderRadius: widthPx * 0.024,
+          background: 'rgba(252, 251, 248, 0.96)',
+          boxShadow: '0 24px 70px rgba(0, 0, 0, 0.45)',
+          padding: `${widthPx * 0.028}px ${widthPx * 0.036}px`,
+        }}
+      >
+        <div style={{ fontFamily: VIRAL_SANS, fontSize: widthPx * 0.017, color: '#9A968E', marginBottom: '0.35em' }}>
+          Notes
+        </div>
+        <div style={{ fontFamily: KOE_SANS, fontSize: widthPx * 0.032, color: EUBANK_INK, marginBottom: '0.55em' }}>
+          {g.title}
+        </div>
+        {items.map((item, i) => {
+          const at = atFrames[i]
+          const o = interpolate(frame, [at, at + 4], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+          const slide = interpolate(frame, [at, at + 6], [10, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+          const check = frame >= at
+            ? spring({ frame: frame - at, fps, config: { damping: 11, stiffness: 240, mass: 0.6 } })
+            : 0
+          return (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: widthPx * 0.016, opacity: o, translate: `${slide}px 0px`, marginBottom: '0.42em' }}>
+              <div
+                style={{
+                  width: widthPx * 0.03,
+                  height: widthPx * 0.03,
+                  borderRadius: '50%',
+                  background: '#F5C518',
+                  scale: String(0.4 + 0.6 * check),
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                }}
+              >
+                <svg width={widthPx * 0.016} height={widthPx * 0.016} viewBox="0 0 16 16">
+                  <path d="M3 8.5 L6.5 12 L13 4.5" fill="none" stroke="#FFFFFF" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div style={{ fontFamily: VIRAL_SANS_STRONG, fontSize: widthPx * 0.026, color: EUBANK_INK }}>
+                {item}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// Conceptual equation: "LEFT > RIGHT" centered over the dimmed frame — the ">"
+// lands with a pop as the claim is made.
+const EubankEquation: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const leftIn = interpolate(frame, [2, 8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const gtAt = 15
+  const gtPop = frame >= gtAt ? spring({ frame: frame - gtAt, fps, config: { damping: 11, stiffness: 230, mass: 0.6 } }) : 0
+  const rightIn = interpolate(frame, [gtAt + 5, gtAt + 11], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const band = g.placement === 'bottom' ? { top: '60%' } : { top: '22%' }
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none' }}>
+      <EubankDim durationInFrames={durationInFrames} amount={0.52} />
+      <div
+        style={{
+          position: 'absolute',
+          left: '5%',
+          width: '90%',
+          textAlign: 'center',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: widthPx * 0.022,
+          ...band,
+        }}
+      >
+        <span style={{ fontFamily: KOE_SANS, fontSize: widthPx * 0.055, color: '#FFFFFF', opacity: leftIn, textShadow: '0 0 24px rgba(255,255,255,0.35), 0 2px 12px rgba(0,0,0,0.5)' }}>
+          {g.eq?.left}
+        </span>
+        <span
+          style={{
+            fontFamily: KOE_SANS,
+            fontSize: widthPx * 0.064,
+            color: EUBANK_TONES.gold.color,
+            opacity: Math.min(1, gtPop * 1.3),
+            scale: String(0.6 + 0.4 * gtPop),
+            textShadow: `0 0 28px ${EUBANK_TONES.gold.glow}, 0 2px 12px rgba(0,0,0,0.5)`,
+          }}
+        >
+          {'>'}
+        </span>
+        <span style={{ fontFamily: VIRAL_SANS_STRONG, fontSize: widthPx * 0.055, color: 'rgba(255,255,255,0.82)', opacity: rightIn, textShadow: '0 2px 12px rgba(0,0,0,0.5)' }}>
+          {g.eq?.right}
+        </span>
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// Minimal stroke icon set for the method scene — the planner picks the key
+// that matches what the speaker is talking about. Drawn dark on the light
+// canvas with long soft diagonal shadows, like the reference's paintbrush.
+const EUBANK_ICONS: Record<string, React.ReactNode> = {
+  brush: (
+    <>
+      <path d="M46 8 L30 30" strokeWidth={5} />
+      <path d="M28 32 l5 5" strokeWidth={7} />
+      <path d="M26 38 c-3 6 -8 9 -13 10 c6 3 13 1 16 -4 z" fill="currentColor" strokeWidth={2} />
+    </>
+  ),
+  bulb: (
+    <>
+      <path d="M32 10 a13 13 0 0 1 7 24 c-2 2 -2 4 -2 7 h-10 c0 -3 0 -5 -2 -7 a13 13 0 0 1 7 -24 z" />
+      <path d="M27 47 h10 M28 52 h8" />
+    </>
+  ),
+  target: (
+    <>
+      <circle cx={32} cy={32} r={20} />
+      <circle cx={32} cy={32} r={11} />
+      <circle cx={32} cy={32} r={3} fill="currentColor" />
+    </>
+  ),
+  chart: (
+    <>
+      <path d="M12 12 v40 h40" />
+      <path d="M22 44 v-12 M32 44 v-20 M42 44 v-27" strokeWidth={5} />
+    </>
+  ),
+  pen: (
+    <>
+      <path d="M40 10 l10 10 -26 26 -13 3 3 -13 z" />
+      <path d="M36 14 l10 10" />
+    </>
+  ),
+  flame: (
+    <path d="M32 8 c2 8 10 12 10 22 a10 10 0 0 1 -20 0 c0 -6 3 -8 4 -12 c3 3 5 4 6 -10 z" />
+  ),
+  dumbbell: (
+    <>
+      <path d="M20 32 h24" strokeWidth={5} />
+      <path d="M16 22 v20 M22 25 v14 M48 22 v20 M42 25 v14" strokeWidth={5} />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx={32} cy={32} r={20} />
+      <path d="M32 20 v12 l8 6" />
+    </>
+  ),
+  money: (
+    <>
+      <circle cx={32} cy={32} r={20} />
+      <path d="M38 24 c-2 -3 -10 -3 -11 1 c-1 5 12 4 11 9 c-1 4 -9 4 -12 1 M32 19 v26" />
+    </>
+  ),
+  rocket: (
+    <>
+      <path d="M32 8 c8 6 10 18 6 30 h-12 c-4 -12 -2 -24 6 -30 z" />
+      <path d="M26 38 l-8 8 M38 38 l8 8 M32 42 v10" />
+      <circle cx={32} cy={24} r={4} />
+    </>
+  ),
+}
+
+// Method scene (upgraded cross-out): a full light "blueprint" canvas cut in
+// through a white flash — grid paper, a context-picked icon with long soft
+// shadows, the method name in gold script, then the wrong option struck
+// through and REPLACED by the right one with its changed words in mint green.
+// Modeled directly on the reference's "Picasso Method / Copy Structure" scene.
+const EubankMethodScene: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const flash = interpolate(frame, [0, 6], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const canvasIn = interpolate(frame, [0, 3], [0, 1], { extrapolateRight: 'clamp' })
+  const out = interpolate(frame, [durationInFrames - 6, durationInFrames], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+
+  const iconIn = interpolate(frame, [3, 12], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+  const iconSettle = interpolate(frame, [3, 14], [-7, -3], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+  const titleIn = interpolate(frame, [8, 16], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const titleBlur = interpolate(frame, [8, 17], [6, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+
+  // Phase A: wrong option + strike. Phase B: swap to the right option.
+  const wrongIn = interpolate(frame, [12, 18], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const strikeAt = Math.round(durationInFrames * 0.32)
+  const strike = interpolate(frame, [strikeAt, strikeAt + 7], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.bezier(0.6, 0, 0.3, 1) })
+  const swapAt = Math.round(durationInFrames * 0.55)
+  const wrongOut = interpolate(frame, [swapAt, swapAt + 5], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const rightIn = interpolate(frame, [swapAt + 3, swapAt + 9], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const rightRise = interpolate(frame, [swapAt + 3, swapAt + 10], [18, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+
+  // Words in the right option that don't appear in the wrong one go mint —
+  // "Copy [Structure]" — so the CHANGE is what carries the color.
+  const wrongWords = new Set((g.strike?.wrong ?? '').toLowerCase().split(/\s+/))
+  const rightWords = (g.strike?.right ?? '').split(/\s+/).filter(Boolean)
+  const icon = EUBANK_ICONS[g.icon ?? ''] ?? EUBANK_ICONS.bulb
+  const iconSize = widthPx * 0.2
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none', opacity: out }}>
+      {/* light blueprint canvas with a faint grid */}
+      <AbsoluteFill
+        style={{
+          opacity: canvasIn,
+          background: 'linear-gradient(168deg, #F2F1EE 0%, #EAE9E5 60%, #E2E1DC 100%)',
+        }}
+      >
+        <AbsoluteFill
+          style={{
+            backgroundImage:
+              'linear-gradient(rgba(40,42,48,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(40,42,48,0.045) 1px, transparent 1px)',
+            backgroundSize: `${widthPx * 0.09}px ${widthPx * 0.09}px`,
+          }}
+        />
+      </AbsoluteFill>
+
+      {/* icon with the reference's long diagonal soft shadows */}
+      <div
+        style={{
+          position: 'absolute',
+          left: '50%',
+          top: '17%',
+          translate: `-50% 0px`,
+          opacity: iconIn,
+          rotate: `${iconSettle}deg`,
+          filter: 'drop-shadow(22px 30px 16px rgba(45,47,52,0.20)) drop-shadow(48px 66px 38px rgba(45,47,52,0.12))',
+        }}
+      >
+        <svg
+          width={iconSize}
+          height={iconSize}
+          viewBox="0 0 64 64"
+          style={{ color: '#3A3E45' }}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={3.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {icon}
+        </svg>
+      </div>
+
+      {/* method name in gold script, glowing */}
+      {g.title ? (
+        <div
+          style={{
+            position: 'absolute',
+            left: '5%',
+            width: '90%',
+            top: '34%',
+            textAlign: 'center',
+            opacity: titleIn,
+            filter: `blur(${titleBlur.toFixed(1)}px) drop-shadow(0 0 18px rgba(226, 178, 74, 0.55)) drop-shadow(0 3px 10px rgba(120, 90, 20, 0.25))`,
+            fontFamily: EUBANK_SCRIPT,
+            fontSize: widthPx * 0.085,
+            backgroundImage: 'linear-gradient(175deg, #F4D98A 10%, #E2A93C 48%, #C98F1E 78%, #F0CE7E 100%)',
+            WebkitBackgroundClip: 'text',
+            backgroundClip: 'text',
+            color: 'transparent',
+          }}
+        >
+          {g.title}
+        </div>
+      ) : null}
+
+      {/* cross-out → replacement */}
+      <div style={{ position: 'absolute', left: '6%', width: '88%', top: g.title ? '47%' : '42%', textAlign: 'center' }}>
+        {wrongOut > 0.01 ? (
+          <div style={{ position: 'relative', display: 'inline-block', opacity: wrongIn * wrongOut }}>
+            <span style={{ fontFamily: EUBANK_LIGHT, fontSize: widthPx * 0.062, color: '#3B3E44', letterSpacing: '0.01em' }}>
+              {g.strike?.wrong}
+            </span>
+            <div
+              style={{
+                position: 'absolute',
+                left: '-2%',
+                top: '54%',
+                width: '104%',
+                height: widthPx * 0.007,
+                background: '#3B3E44',
+                borderRadius: 4,
+                transformOrigin: 'left center',
+                scale: `${strike} 1`,
+                rotate: '-1.6deg',
+              }}
+            />
+          </div>
+        ) : null}
+        {rightIn > 0.01 ? (
+          <div style={{ position: 'absolute', left: 0, width: '100%', top: 0, opacity: rightIn, translate: `0px ${rightRise}px` }}>
+            {rightWords.map((w, i) => {
+              const changed = !wrongWords.has(w.toLowerCase())
+              return (
+                <span
+                  key={i}
+                  style={{
+                    fontFamily: changed ? BOLD_FONT : EUBANK_LIGHT,
+                    fontSize: widthPx * 0.072,
+                    color: changed ? '#7ED99A' : '#3B3E44',
+                    padding: '0 0.09em',
+                    ...(changed ? { filter: 'drop-shadow(0 0 14px rgba(126, 217, 154, 0.65))' } : {}),
+                  }}
+                >
+                  {w}
+                </span>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+
+      {/* white flash cut-in */}
+      {flash > 0.01 ? <AbsoluteFill style={{ backgroundColor: '#FFFFFF', opacity: flash }} /> : null}
+    </AbsoluteFill>
+  )
+}
+
+// Framework scene: big glowing labels cascade diagonally across the heavily
+// blurred speaker (thin first word, bold rest — the reference's "Effective /
+// Concept" type), thin connector lines draw an L-path between them, and a
+// frosted-glass card with a giant checkmark lands in the middle carrying the
+// verdict ("[ Winner ]") and an optional grounded stat.
+const EubankCards: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const items = (g.items ?? []).slice(0, 3)
+  const out = interpolate(frame, [durationInFrames - 7, durationInFrames], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+
+  // Diagonal cascade positions (2 labels: TL + BR like the reference; a third
+  // slots mid-right).
+  const SPOTS: Array<React.CSSProperties> = [
+    { left: '9%', top: '13%', textAlign: 'left' },
+    { right: '9%', top: '68%', textAlign: 'right' },
+    { right: '9%', top: '36%', textAlign: 'right' },
+  ]
+
+  const cardAt = Math.round(1.5 * fps)
+  const cardIn = frame >= cardAt ? spring({ frame: frame - cardAt, fps, config: { damping: 13, stiffness: 165, mass: 0.8 } }) : 0
+  const statIn = interpolate(frame, [cardAt + 10, cardAt + 16], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+
+  const label = (item: string, i: number) => {
+    const at = Math.round((0.25 + i * 0.75) * fps)
+    const o = interpolate(frame, [at, at + 7], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const glow = interpolate(frame, [at, at + 12], [0.2, 0.65], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const rise = interpolate(frame, [at, at + 8], [14, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    const words = item.split(/\s+/)
+    const first = words[0] ?? ''
+    const rest = words.slice(1).join(' ')
+    return (
+      <div key={i} style={{ position: 'absolute', width: '60%', ...SPOTS[i], opacity: o, translate: `0px ${rise}px` }}>
+        <div
+          style={{
+            fontFamily: EUBANK_LIGHT,
+            fontSize: widthPx * 0.055,
+            lineHeight: 1.05,
+            color: '#FFFFFF',
+            textShadow: `0 0 30px rgba(255,255,255,${glow.toFixed(2)}), 0 2px 14px rgba(0,0,0,0.45)`,
+          }}
+        >
+          {first}
+        </div>
+        {rest ? (
+          <div
+            style={{
+              fontFamily: KOE_SANS,
+              fontSize: widthPx * 0.063,
+              lineHeight: 1.05,
+              color: '#FFFFFF',
+              textShadow: `0 0 34px rgba(255,255,255,${glow.toFixed(2)}), 0 2px 14px rgba(0,0,0,0.45)`,
+            }}
+          >
+            {rest}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  // Thin L-path connectors: TL label down → into the card; card out → down to
+  // the BR label. Drawn with scale transforms, staggered after the labels.
+  const lineA = interpolate(frame, [Math.round(0.7 * fps), Math.round(1.3 * fps)], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const lineB = interpolate(frame, [Math.round(1.2 * fps), Math.round(1.8 * fps)], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+  const LINE = 'rgba(255, 255, 255, 0.55)'
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none', opacity: out }}>
+      <EubankDim durationInFrames={durationInFrames} amount={0.6} blur={14} />
+
+      {items.map((item, i) => label(item, i))}
+
+      {/* connector L-paths */}
+      <div style={{ position: 'absolute', left: '13%', top: '25%', width: 1.5, height: '22%', background: LINE, transformOrigin: 'top', scale: `1 ${lineA}` }} />
+      <div style={{ position: 'absolute', left: '13%', top: '47%', width: '22%', height: 1.5, background: LINE, transformOrigin: 'left', scale: `${lineA} 1`, opacity: lineA > 0.95 ? 1 : 0 }} />
+      <div style={{ position: 'absolute', right: '13%', top: '52%', width: '22%', height: 1.5, background: LINE, transformOrigin: 'right', scale: `${lineB} 1` }} />
+      <div style={{ position: 'absolute', right: '13%', top: '52%', width: 1.5, height: '14%', background: LINE, transformOrigin: 'top', scale: `1 ${lineB}`, opacity: lineB > 0.95 ? 1 : 0 }} />
+
+      {/* frosted winner card with the giant checkmark */}
+      <div
+        style={{
+          position: 'absolute',
+          left: '33%',
+          top: '38%',
+          width: '34%',
+          height: '25%',
+          opacity: Math.min(1, cardIn * 1.3),
+          scale: String(0.85 + 0.15 * cardIn),
+          borderRadius: widthPx * 0.03,
+          border: '1px solid rgba(255, 255, 255, 0.4)',
+          background: 'rgba(235, 235, 238, 0.3)',
+          backdropFilter: 'blur(16px) saturate(1.15)',
+          boxShadow: '0 24px 70px rgba(0, 0, 0, 0.35)',
+          overflow: 'hidden',
+        }}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          style={{ position: 'absolute', left: '12%', top: '4%', width: '80%', height: '92%', opacity: 0.4 }}
+        >
+          <path d="M3 8.5 L6.5 12 L13 4.5" fill="none" stroke="#33373D" strokeWidth={3.4} strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            width: '100%',
+            top: '44%',
+            textAlign: 'center',
+            fontFamily: VIRAL_SANS,
+            // Longer verdicts shrink to stay on one line inside the card —
+            // "[ Creator Approach ]" must never wrap its bracket.
+            fontSize: widthPx * Math.min(0.033, 0.44 / ((g.title ?? 'Winner').length + 4)),
+            letterSpacing: '0.04em',
+            whiteSpace: 'nowrap',
+            color: '#FFFFFF',
+            textShadow: '0 1px 10px rgba(0,0,0,0.35)',
+          }}
+        >
+          [ {g.title} ]
+        </div>
+        {g.stat ? (
+          <div
+            style={{
+              position: 'absolute',
+              left: '9%',
+              bottom: '7%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: widthPx * 0.008,
+              opacity: statIn,
+              fontFamily: VIRAL_SANS_STRONG,
+              fontSize: widthPx * 0.022,
+              color: '#FFFFFF',
+              textShadow: '0 1px 8px rgba(0,0,0,0.35)',
+            }}
+          >
+            <svg width={widthPx * 0.022} height={widthPx * 0.022} viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" strokeWidth={2}>
+              <path d="M2 12 c3 -5 7 -7 10 -7 s7 2 10 7 c-3 5 -7 7 -10 7 s-7 -2 -10 -7 z" />
+              <circle cx={12} cy={12} r={3} />
+            </svg>
+            {g.stat}
+          </div>
+        ) : null}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// Quote panel: the spoken sentence composed as a multi-line typographic block
+// over the dimmed, blurred frame — thin light base words, BOLD white emphasis,
+// and semantic green/red words with glow (the reference's "a mediocre idea,
+// but in a proven format will out-perform..." panel). Words build in as they
+// would be spoken.
+const EubankKeyword: React.FC<EubankGraphicProps> = ({ g, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const o = interpolate(frame, [0, 5, durationInFrames - 6, durationInFrames], [0, 1, 1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
+  const emphasis = new Map((g.emphasis ?? []).map(e => [norm(e.word), e.tone ?? 'gold'] as const))
+  const words = (g.title ?? '').split(/\s+/).filter(Boolean)
+
+  // Wrap into lines of ~4 words so the block reads as composed typography,
+  // not a runaway single line.
+  const perLine = words.length <= 6 ? 3 : 4
+  const lines: string[][] = []
+  for (let i = 0; i < words.length; i += perLine) lines.push(words.slice(i, i + perLine))
+
+  const top = g.placement === 'bottom' ? '56%' : '38%'
+  let order = 0
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none' }}>
+      <EubankDim durationInFrames={durationInFrames} amount={0.62} blur={9} />
+      <div style={{ position: 'absolute', left: '10%', width: '80%', top, opacity: o, textAlign: 'left', lineHeight: 1.45 }}>
+        {lines.map((line, li) => (
+          <div key={li}>
+            {line.map((w, wi) => {
+              const at = 3 + order++ * 2.2
+              const wo = interpolate(frame, [at, at + 4], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+              const tone = emphasis.get(norm(w))
+              const toneColor = tone === 'good' ? EUBANK_TONES.good : tone === 'bad' ? EUBANK_TONES.bad : null
+              const strong = tone !== undefined
+              return (
+                <span
+                  key={wi}
+                  style={{
+                    display: 'inline-block',
+                    fontFamily: strong ? KOE_SANS : EUBANK_LIGHT,
+                    fontSize: widthPx * 0.046,
+                    color: toneColor ? toneColor.color : strong ? '#FFFFFF' : 'rgba(244, 244, 242, 0.9)',
+                    opacity: wo,
+                    paddingRight: '0.32em',
+                    textShadow: toneColor
+                      ? `0 0 24px ${toneColor.glow}, 0 2px 10px rgba(0,0,0,0.5)`
+                      : strong
+                      ? '0 0 22px rgba(255,255,255,0.45), 0 2px 10px rgba(0,0,0,0.5)'
+                      : '0 0 14px rgba(255,255,255,0.18), 0 2px 10px rgba(0,0,0,0.5)',
+                  }}
+                >
+                  {w}
+                </span>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
 // Julie's opening focus: the frame edges darken while the subject stays bright,
 // easing away after a couple of seconds — the reference's spotlight hook.
 const HookSpotlight: React.FC<{ durationInFrames: number }> = ({ durationInFrames }) => {
@@ -1067,7 +1859,7 @@ const HookSpotlight: React.FC<{ durationInFrames: number }> = ({ durationInFrame
   )
 }
 
-function wordStyle(style: Exclude<CaptionStyleName, 'viral' | 'koe' | 'julie'>, accent: boolean, baseSize: number): React.CSSProperties {
+function wordStyle(style: Exclude<CaptionStyleName, 'viral' | 'koe' | 'julie' | 'eubank'>, accent: boolean, baseSize: number): React.CSSProperties {
   if (style === 'impact') {
     return {
       fontFamily: IMPACT_FONT,
@@ -1157,6 +1949,7 @@ const CaptionPage: React.FC<{ page: ShortEditPage; widthPx: number; style: Capti
   if (style === 'viral') return <ViralCaptionPage page={page} widthPx={widthPx} />
   if (style === 'koe') return <KoeCaptionPage page={page} widthPx={widthPx} />
   if (style === 'julie') return <JulieCaptionPage page={page} widthPx={widthPx} />
+  if (style === 'eubank') return <EubankCaptionPage page={page} widthPx={widthPx} />
 
   const opacity = interpolate(frame, [0, 3], [0, 1], { extrapolateRight: 'clamp' })
   const rise = interpolate(frame, [0, 4], [14, 0], {
@@ -1233,12 +2026,15 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
   tag,
   grade,
   hookSpotlight,
+  handheld,
   sfx = [],
   width = 1080,
 }) => {
   const { fps } = useVideoConfig()
-  const viral = captionStyle === 'viral'
-  // koe and julie share the gentle punched-framing zoom grammar.
+  // eubank gets the strongest punched framings (the reference jumps 1.15-1.25x
+  // between "shots"); viral is a notch gentler; koe and julie gentler still.
+  const eubank = captionStyle === 'eubank'
+  const viral = captionStyle === 'viral' || eubank
   const koe = captionStyle === 'koe' || captionStyle === 'julie'
 
   // Cumulative frame offsets for each segment on the edited timeline.
@@ -1267,6 +2063,8 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
               durationInFrames={durationInFrames}
               viral={viral}
               koe={koe}
+              eubank={eubank}
+              handheld={handheld}
               grade={grade}
               widthPx={width}
               matte={i === 0 ? matte : undefined}
@@ -1301,7 +2099,15 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
       {graphics.map((g, i) => {
         const from = Math.round(g.start * fps)
         const durationInFrames = Math.max(6, Math.round(g.duration * fps))
-        const C = g.kind === 'title' ? KoeTitle : g.kind === 'list' ? KoeList : KoeVenn
+        const C =
+          g.kind === 'title' ? KoeTitle
+          : g.kind === 'list' ? KoeList
+          : g.kind === 'venn' ? KoeVenn
+          : g.kind === 'notes' ? EubankNotes
+          : g.kind === 'equation' ? EubankEquation
+          : g.kind === 'crossout' ? EubankMethodScene
+          : g.kind === 'cards' ? EubankCards
+          : EubankKeyword
         return (
           <Sequence key={`gfx-${i}`} from={from} durationInFrames={durationInFrames}>
             <C g={g} durationInFrames={durationInFrames} widthPx={width} />

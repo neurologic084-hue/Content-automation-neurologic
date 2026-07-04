@@ -34,6 +34,10 @@ export interface EditedWord {
 export interface CaptionWord {
   t: string
   accent: boolean
+  // Eubank (v4) semantic accent color: the reference color-codes emphasis by
+  // MEANING — green for wins/positives, red for warnings/negatives, gold for
+  // neutral emphasis. Only set when accent is true; absent for other styles.
+  tone?: 'good' | 'bad' | 'gold'
 }
 
 // Accent treatments for the viral caption system (v5). Font: 'serif' is the
@@ -57,10 +61,14 @@ export interface CaptionPage {
   accentFont?: ViralAccentFont
   accentColor?: ViralAccentColor
   // Poster treatment: page sits over a full-screen B-roll cover, so it renders
-  // bigger and centered (the "If your bed time is 10PM" look).
+  // bigger and centered (the "If your bed time is 10PM" look). Eubank reuses it
+  // for big centered punchline pages ("every single time.").
   big?: boolean
   // Hook page rendered behind the speaker (needs the subject matte staged).
   behind?: boolean
+  // Eubank (v4) horizontal variety: the reference occasionally left-aligns a
+  // caption block. Default (absent) is centered.
+  align?: 'left' | 'center'
 }
 
 export interface SegmentPlan {
@@ -279,18 +287,18 @@ export async function planKeepSegments(
   return final.length ? final : [{ start: 0, end: sourceDuration }]
 }
 
-// Viral pace: the reference punches the framing every ~3 seconds even while
+// Viral pace: the references punch the framing every ~2-2.5 seconds even while
 // the speech runs continuously. Long keep-segments get split into sub-segments
 // (pure source-time arithmetic — the edited timeline is unchanged) so every
 // join becomes a silent hard cut where the zoom level jumps, reading as a
 // multi-angle edit. Chunk lengths rotate so the rhythm never turns metronomic.
 export function splitSegmentsForPunch(segments: KeepSegment[], variation = 0): KeepSegment[] {
-  const CHUNKS = [3.0, 2.4, 3.6]
+  const CHUNKS = [2.4, 1.9, 2.9]
   const out: KeepSegment[] = []
   let beat = variation
   for (const seg of segments) {
     let cursor = seg.start
-    while (seg.end - cursor > 4.4) {
+    while (seg.end - cursor > 3.6) {
       const len = CHUNKS[beat++ % CHUNKS.length]
       out.push({ start: cursor, end: cursor + len })
       cursor += len
@@ -431,11 +439,13 @@ export function planZooms(
     )
     let zoom: SegmentPlan['zoom'] = 'none'
     if (zoomsAllowed && duration >= 1.2) {
-      // Emphasis pulls a punch-in; otherwise gently alternate so consecutive
-      // segments feel like different "shots" (the multi-angle stand-in). The
-      // variation seed shifts the pattern so versions move differently.
+      // Emphasis pulls a punch-in; otherwise alternate so consecutive segments
+      // feel like different "shots" (the multi-angle stand-in). EVERY segment
+      // moves — a static beat between two zooms reads as a dropped frame, and
+      // the references never hold a dead framing. The variation seed shifts
+      // the pattern so versions move differently.
       const beat = (i + variation) % 3
-      zoom = hasEmphasis ? 'in' : (beat === 1 ? 'out' : beat === 2 ? 'in' : 'none')
+      zoom = hasEmphasis ? 'in' : (beat === 1 ? 'out' : 'in')
     }
     offset += duration
     return { srcStart: seg.start, duration, zoom }
@@ -582,6 +592,105 @@ export async function planViralCaptions(
   }
 }
 
+// ── Eubank caption planning (v4) ──────────────────────────────────────────────
+// The reference's caption grammar (see lib/V4-EUBANK-PLAN.md): clean sentence-
+// case pages whose emphasis words are BOLD and color-coded by MEANING — green
+// for wins/positives, red for warnings/negatives, gold for neutral emphasis.
+// Short punchlines render big and centered. An LLM makes the semantic calls
+// (which words, which tone, which pages punch); the code validates everything
+// and owns position/alignment, so a failed call still yields styled captions.
+
+export async function planEubankCaptions(
+  pages: CaptionPage[],
+  profile: ContentProfile | null,
+  variation = 0,
+): Promise<void> {
+  if (!pages.length) return
+
+  const numbered = pages
+    .map((p, i) => `${i}: ${p.words.map(w => w.t).join(' | ')}`)
+    .join('\n')
+  let applied = 0
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      temperature: 0.2,
+      max_tokens: 3000,
+      json: true,
+      messages: [{
+        role: 'user',
+        content: [
+          'You are styling captions for a premium fitness-creator edit. Each numbered line below',
+          'is one caption page; words are separated by " | " (word indices start at 0).',
+          'For each page pick the ONE contiguous phrase (1-3 words) that deserves emphasis — the',
+          'concrete noun, number, or payoff the sentence is about — plus its semantic tone:',
+          '- "good": wins, growth, positives ("outperform", "winners", "$5,000")',
+          '- "bad": failures, warnings, negatives ("mediocre", "burnt out", "worst mistake")',
+          '- "gold": neutral emphasis — key concepts that are neither win nor warning',
+          'Filler-only pages get no pick. Most pages SHOULD get a pick.',
+          'Additionally flag up to 3 pages total as "punch": short punchline pages (<=3 words,',
+          'a payoff or verdict like "every single time.") that should render big and centered.',
+          '',
+          numbered,
+          '',
+          'Return JSON only:',
+          '{"picks":[{"p":pageIndex,"a":firstWordIndex,"b":lastWordIndex,"tone":"good|bad|gold","punch":false},...]}',
+        ].join('\n'),
+      }],
+    })
+    const parsed = parseJsonLoose<{ picks?: Array<{ p?: number; a?: number; b?: number; tone?: string; punch?: boolean }> }>(raw)
+    let punches = 0
+    for (const pick of parsed.picks ?? []) {
+      const { p, a, b } = pick
+      if (!Number.isInteger(p) || !Number.isInteger(a) || !Number.isInteger(b)) continue
+      const page = pages[p as number]
+      if (!page) continue
+      if ((a as number) < 0 || (b as number) >= page.words.length || (b as number) < (a as number)) continue
+      if ((b as number) - (a as number) > 2) continue
+      const tone: CaptionWord['tone'] = pick.tone === 'good' || pick.tone === 'bad' ? pick.tone : 'gold'
+      for (let i = a as number; i <= (b as number); i++) {
+        page.words[i].accent = true
+        page.words[i].tone = tone
+      }
+      // Punch pages: only genuinely short pages, capped, never the very first
+      // page (the hook caption should read before the style starts shouting).
+      if (pick.punch && punches < 3 && (p as number) > 0 && page.words.length <= 3) {
+        page.big = true
+        punches++
+      }
+      applied++
+    }
+  } catch (e) {
+    console.warn('[edit-plan] eubank caption planning failed, using emphasis heuristic:', (e as Error).message)
+  }
+
+  // Heuristic top-up: pages the model skipped still get the profile's emphasis
+  // tokens (gold) so the identity holds without the LLM.
+  if (applied < pages.length * 0.4) {
+    const accents = accentTokens(profile)
+    for (const page of pages) {
+      if (page.words.some(w => w.accent)) continue
+      for (const w of page.words) {
+        const clean = w.t.toLowerCase().replace(/[^a-z0-9$%.]/gi, '')
+        if (accents.has(clean) || /\d/.test(clean)) {
+          w.accent = true
+          w.tone = 'gold'
+        }
+      }
+    }
+  }
+
+  // Position is deliberately STABLE (feedback: per-page position churn read as
+  // messy). Regular pages hold ONE flattering band — low-center, or high when
+  // the face sits low in frame — punch pages pop center, and the pipeline
+  // moves pages to the upper third only while full-screen B-roll owns the
+  // frame. Movement is the exception, never the rhythm.
+  const home: CaptionPage['position'] = profile?.faceArea === 'lower' ? 'high' : 'low'
+  pages.forEach(page => {
+    page.position = page.big ? 'mid' : home
+  })
+}
+
 // Pick which talking-head segments shrink into the white inset card. The
 // reference does this on conversational asides (~every 10-12s, 1.5-3.5s long).
 // Deterministic: no LLM, seeded by the variation.
@@ -591,7 +700,7 @@ export function planInsetSegments(
   editedDuration: number,
   variation = 0,
 ): void {
-  const maxInsets = editedDuration > 22 ? 2 : 1
+  const maxInsets = editedDuration > 30 ? 3 : editedDuration > 18 ? 2 : 1
   let placed = 0
   let lastInsetEnd = -Infinity
   let offset = 0
@@ -605,7 +714,7 @@ export function planInsetSegments(
     if (!seg || seg.frame) continue
     if (seg.duration < 1.5 || seg.duration > 4.5) continue
     const segStart = offsets[i]
-    if (segStart < 6 || segStart - lastInsetEnd < 8) continue
+    if (segStart < 6 || segStart - lastInsetEnd < 6) continue
     // Don't fight a B-roll cover for the same moment.
     const overlaps = broll.some(b => segStart < b.start + b.duration && segStart + seg.duration > b.start)
     if (overlaps) continue

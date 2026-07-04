@@ -24,7 +24,7 @@ export type SfxCategory =
   | 'whoosh' | 'impact' | 'ding' | 'riser' | 'shutter'
   | 'whoosh-snap' | 'flash-pop' | 'shutter-soft' | 'pop'
   | 'whoosh-airy' | 'whoosh-deep' | 'boom-soft' | 'click-digital'
-  | 'boom-808' | 'glitch' | 'tape-stop'
+  | 'boom-808' | 'glitch' | 'tape-stop' | 'shing'
 
 const SFX_DEFS: Record<SfxCategory, SfxDef> = {
   // Trending short-form grammar: the tight whip-whoosh every viral editor cuts
@@ -109,6 +109,13 @@ const SFX_DEFS: Record<SfxCategory, SfxDef> = {
     prompt: 'soft cinematic boom hit sound effect, muffled low thump with a quick decay, subtle and modern, no music, no voice, no long rumble tail',
     durationSeconds: 1,
   },
+  // Eubank cross-out: the sharp metallic slice that lands as a line strikes
+  // through the "wrong" option — the reference pairs every cross-out with it.
+  shing: {
+    name: 'metal-shing',
+    prompt: 'sharp quick metallic slice shing sound effect, like a blade swipe crossing something out, bright fast transient with a very short tail, modern viral edit style, no music, no voice, no long ring',
+    durationSeconds: 1,
+  },
   // Textured layer (stage two of the sound-design system): a tiny UI tap that
   // rides on accent-word pops and blends the riser's landing on the poster
   // card. Directs attention without ever reading as a "sound effect".
@@ -148,14 +155,17 @@ async function normalizeSfx(filePath: string): Promise<void> {
   } catch { /* keep the raw file */ }
 }
 
-async function generateSfx(def: SfxDef): Promise<string> {
-  const cachePath = path.join(CACHE_DIR, `${def.name}.v${SFX_CACHE_VERSION}.mp3`)
+async function generateSfx(def: SfxDef, take = 0): Promise<string> {
+  // take 0 keeps the original cache name so existing files stay warm; takes
+  // 1+ are fresh generations of the same prompt — ElevenLabs is nondeterministic,
+  // so each take is a genuinely different-sounding version of the category.
+  const cachePath = path.join(CACHE_DIR, `${def.name}.v${SFX_CACHE_VERSION}${take > 0 ? `.t${take}` : ''}.mp3`)
   if (fs.existsSync(cachePath)) return cachePath
 
   const key = process.env.ELEVENLABS_API_KEY
   if (!key) throw new Error('ELEVENLABS_API_KEY not set — cannot generate sound effects')
 
-  console.log(`[sound-effects] generating "${def.name}"...`)
+  console.log(`[sound-effects] generating "${def.name}" (take ${take})...`)
   const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
     method: 'POST',
     headers: { 'xi-api-key': key, 'Content-Type': 'application/json' },
@@ -217,20 +227,23 @@ export function probeSfxTiming(filePath: string): Promise<SfxTiming> {
   return cached
 }
 
-const sfxAttempts = new Map<SfxCategory, Promise<string | null>>()
+const sfxAttempts = new Map<string, Promise<string | null>>()
 
 // Returns a local file path, or null if generation isn't possible (missing
 // key, API error) — callers should fall back to a silent (visual-only)
-// moment rather than failing the whole render.
-export async function getSfx(category: SfxCategory): Promise<string | null> {
-  let attempt = sfxAttempts.get(category)
+// moment rather than failing the whole render. `take` selects one of several
+// generated versions of the category (variety rule: no single file should
+// play more than twice in one video — the staging allocator enforces it).
+export async function getSfx(category: SfxCategory, take = 0): Promise<string | null> {
+  const key = `${category}:${take}`
+  let attempt = sfxAttempts.get(key)
   if (!attempt) {
-    attempt = generateSfx(SFX_DEFS[category]).catch((e) => {
-      console.warn(`[sound-effects] "${category}" generation failed, that moment will be silent:`, (e as Error).message)
-      sfxAttempts.delete(category) // allow retry on a future render
+    attempt = generateSfx(SFX_DEFS[category], take).catch((e) => {
+      console.warn(`[sound-effects] "${category}" (take ${take}) generation failed, that moment will be silent:`, (e as Error).message)
+      sfxAttempts.delete(key) // allow retry on a future render
       return null
     })
-    sfxAttempts.set(category, attempt)
+    sfxAttempts.set(key, attempt)
   }
   return attempt
 }
@@ -245,9 +258,11 @@ export async function getShutterSfx(): Promise<string | null> {
 }
 
 // 'slide' is the viral-podcast push (v5's locked style): covers shove in from
-// the right and shove back out. It stays out of TRANSITION_STYLES so the seeded
-// rotation used by v4/v6 harness runs keeps its original three-style cycle.
-export type TransitionStyle = 'blur' | 'flash' | 'punch' | 'slide'
+// the right and shove back out. 'zoom' (zoom-through with motion blur) and
+// 'whip' (whip-pan) are per-cover styles for the eubank combo rotation. All
+// three stay out of TRANSITION_STYLES so the seeded rotation used by harness
+// runs keeps its original three-style cycle.
+export type TransitionStyle = 'blur' | 'flash' | 'punch' | 'slide' | 'zoom' | 'whip'
 
 export const TRANSITION_STYLES: TransitionStyle[] = ['blur', 'flash', 'punch']
 

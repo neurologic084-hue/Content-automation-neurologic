@@ -17,6 +17,7 @@ import { chatCompletion, MODELS } from './openrouter'
 import { parseJsonLoose } from './json-loose'
 import type { ContentProfile } from './video-analysis'
 import type { CaptionPage, EditedWord } from './edit-plan'
+import type { TransitionStyle } from './sound-effects'
 
 export interface BrollItem {
   start: number      // edited-timeline seconds
@@ -24,6 +25,9 @@ export interface BrollItem {
   file: string       // filename relative to remotion/public/
   kind: 'video' | 'image'
   layout: 'card' | 'cover'
+  // Per-cover transition override (eubank combo rotation): each cover carries
+  // its own move instead of the render's single global style.
+  transition?: TransitionStyle
   // Viral (v5) designed cover: instead of raw footage, the renderer builds an
   // animated editorial poster around this media — warm gradient canvas, the
   // image in a floating mask, and this text as the card's own headline.
@@ -71,15 +75,18 @@ export async function planBrollSlots(
   if (media === 'none' || duration < 8 || editedWords.length < 10) return []
   // Adaptive cadence for EVERY flavor, driven by the Gemini profile's read of
   // the footage: rich content gets a cutaway every ~6.5s (≈ the reference
-  // edits' density), a plain talking head still gets one every ~12s.
-  const CADENCE: Record<ContentProfile['brollableRichness'], number> = { none: 12, some: 8.5, rich: 6.5 }
+  // edits' density), a plain talking head still gets one every ~12s. The
+  // viral flavor runs MUCH denser — its references cut away every few seconds
+  // even over a static talking head (tuned up on feedback: more action).
+  const CADENCE: Record<ContentProfile['brollableRichness'], number> =
+    media === 'viral' ? { none: 7, some: 5.5, rich: 4.5 } : { none: 12, some: 8.5, rich: 6.5 }
   const targetCount = Math.min(
-    media === 'viral' ? 8 : 6,
+    media === 'viral' ? 10 : 6,
     Math.max(2, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
   )
   // Video-flavored variants can carry more full-screen moments; they're the
   // main place transitions (and their sounds) live.
-  const maxCovers = media === 'video' ? 3 : media === 'viral' ? 8 : media === 'mixed' ? 2 : 1
+  const maxCovers = media === 'video' ? 3 : media === 'viral' ? 10 : media === 'mixed' ? 2 : 1
   // Longer viral videos earn a second designed Remotion poster card.
   const maxDesigns = media !== 'viral' || !designs ? 0 : duration > 45 ? 2 : 1
   const coverRule = media === 'video'
@@ -124,7 +131,7 @@ export async function planBrollSlots(
           'Rules:',
           '- Each cutaway illustrates a concrete, visual phrase — start at that phrase\'s time.',
           '- duration: 1.8 to 3.2 seconds. Never start before 2.5s, never end within the last 1.5s.',
-          '- At least 2.5 seconds of talking-head between cutaways. No overlaps.',
+          '- At least 2 seconds of talking-head between cutaways. No overlaps.',
           '- query: a 2-4 word STOCK-SEARCH query naming something FILMABLE — a person doing a',
           '  specific action, a physical object, or a place ("woman eating dinner", "hands',
           '  scrolling phone", "airport security line"). Stock libraries cannot match abstract',
@@ -162,7 +169,7 @@ export async function planBrollSlots(
   for (const c of candidates
     .filter(c => typeof c.start === 'number' && typeof c.duration === 'number' && typeof c.query === 'string' && c.query.trim())
     .sort((a, b) => (a.start as number) - (b.start as number))) {
-    const start = Math.max(2.5, Math.max(lastEnd + 2.5, c.start as number))
+    const start = Math.max(2.5, Math.max(lastEnd + 2.0, c.start as number))
     const dur = Math.min(maxDur, Math.max(1.8, c.duration as number))
     if (start + dur > duration - 1.5) continue
     if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
@@ -192,6 +199,49 @@ export async function planBrollSlots(
     slots.push(slot)
     lastEnd = start + slot.duration
     if (slots.length >= targetCount) break
+  }
+
+  // Deterministic gap-fill: on plain footage the model under-delivers against
+  // the target and the edit reads static (one lonely cutaway in 37s). Fill the
+  // free timeline with neutral creator-lifestyle queries at the same cadence —
+  // generic stock beats a bare talking head, and the variation seed still
+  // rotates which clips get pulled.
+  if (slots.length < targetCount) {
+    const FALLBACK_QUERIES: Record<string, string[]> = {
+      story: ['man walking city street', 'podcast studio microphone closeup', 'city skyline golden hour', 'hands typing laptop', 'person looking out window', 'sunrise over rooftops'],
+      educational: ['person writing notebook', 'hands typing laptop', 'library bookshelf', 'whiteboard marker writing', 'coffee cup on desk', 'person reading book closeup'],
+      list: ['hands typing laptop', 'person writing notebook', 'busy city crosswalk', 'modern desk setup', 'sticky notes wall', 'person checking phone'],
+      sales: ['business handshake meeting', 'person smiling at phone', 'city skyline golden hour', 'counting cash hands', 'signing contract closeup', 'storefront open sign'],
+    }
+    const pool = rotated(FALLBACK_QUERIES[profile?.format ?? 'story'] ?? FALLBACK_QUERIES.story, variation)
+    const busy = [
+      ...slots.map(s => ({ start: s.start, end: s.start + s.duration })),
+      ...avoid.map(a => ({ start: a.start - 0.6, end: a.start + a.duration + 0.6 })),
+    ].sort((a, b) => a.start - b.start)
+    // Tight spacing on purpose: the reference runs a cutaway or graphic every
+    // few seconds — 1.2s clearance from graphics and ~3.5s of talking head
+    // between fillers is already MORE air than it gives.
+    const FILL_DUR = 2.6
+    let qi = 0
+    let cursor = 3.0
+    let filled = 0
+    while (slots.length < targetCount && qi < pool.length && cursor + FILL_DUR <= duration - 1.5) {
+      const hit = busy.find(b => cursor < b.end + 1.2 && cursor + FILL_DUR > b.start - 1.2)
+      if (hit) { cursor = hit.end + 1.2; continue }
+      const layout: PlannedSlot['layout'] =
+        (media === 'viral' || media === 'video') && coversUsed < maxCovers ? 'cover' : 'card'
+      if (layout === 'cover') coversUsed++
+      const slot: PlannedSlot = { start: Number(cursor.toFixed(2)), duration: FILL_DUR, query: pool[qi++], layout }
+      slots.push(slot)
+      busy.push({ start: slot.start, end: slot.start + FILL_DUR })
+      busy.sort((a, b) => a.start - b.start)
+      filled++
+      cursor = slot.start + FILL_DUR + 2.5  // breathe before the next filler
+    }
+    if (filled) {
+      console.log(`[broll] gap-filled ${filled} slot(s) — planner delivered ${slots.length - filled}/${targetCount}`)
+      slots.sort((a, b) => a.start - b.start)
+    }
   }
   return slots
 }

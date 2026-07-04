@@ -13,14 +13,15 @@ import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
-import { buildEditPlan, planViralCaptions, planInsetSegments } from './edit-plan'
+import { buildEditPlan, planViralCaptions, planEubankCaptions, planInsetSegments } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
-import { getSfx, probeSfxTiming } from './sound-effects'
+import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
 import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
+import { planEubankGraphics, planEubankSfxCues, type EubankGraphic } from './eubank-graphics'
 
 // Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
 // explicitly (not a bare side-effect import) so the bundler can't drop it.
@@ -608,20 +609,36 @@ async function mixTransitionSfx(videoPath: string): Promise<void> {
     return
   }
 
-  const sfxPath = await getSfx('whoosh')
-  if (!sfxPath) return
-  const timing = await probeSfxTiming(sfxPath)
+  // Variety rule: no single sound file plays more than twice per video. Build
+  // a pool of five distinct whoosh files (two takes of two categories plus an
+  // airy one) and rotate cuts through it — 10 cuts = each file at most twice,
+  // and neighboring cuts never share a sound.
+  const POOL_DEFS: Array<[SfxCategory, number]> = [
+    ['whoosh', 0], ['whoosh', 1], ['whoosh-snap', 0], ['whoosh-snap', 1], ['whoosh-airy', 0],
+  ]
+  const pool: Array<{ path: string; peakSec: number }> = []
+  for (const [cat, take] of POOL_DEFS) {
+    const p = await getSfx(cat, take)
+    if (!p) continue
+    try { pool.push({ path: p, peakSec: (await probeSfxTiming(p)).peakSec }) } catch { /* skip */ }
+  }
+  if (!pool.length) return
 
-  // Back-time each cue so the whoosh PEAK lands on the cut, then delay-mix all
-  // instances over the existing audio. normalize=0 keeps the voice/music level.
-  const delays = cuts.map(t => Math.max(0, Math.round((t - timing.peakSec) * 1000)))
-  const chains = delays.map((ms, i) => `[1:a]adelay=${ms}|${ms},volume=0.35[s${i}]`).join(';')
-  const mixIn = delays.map((_, i) => `[s${i}]`).join('')
+  // Back-time each cue so its file's PEAK lands on the cut, then delay-mix all
+  // instances over the existing audio. Each cut gets its own input (the files
+  // are ~1s mp3s, so repeated inputs are cheap and keep the filter graph
+  // simple). normalize=0 keeps the voice/music level.
+  const inputs = cuts.map((_, i) => `-i "${pool[i % pool.length].path}"`).join(' ')
+  const chains = cuts.map((t, i) => {
+    const ms = Math.max(0, Math.round((t - pool[i % pool.length].peakSec) * 1000))
+    return `[${i + 1}:a]adelay=${ms}|${ms},volume=0.35[s${i}]`
+  }).join(';')
+  const mixIn = cuts.map((_, i) => `[s${i}]`).join('')
   const tmp = videoPath + '_sfx.mp4'
 
   await run(
-    `ffmpeg -y -i "${videoPath}" -i "${sfxPath}" ` +
-    `-filter_complex "${chains};[0:a]${mixIn}amix=inputs=${delays.length + 1}:duration=first:normalize=0[out]" ` +
+    `ffmpeg -y -i "${videoPath}" ${inputs} ` +
+    `-filter_complex "${chains};[0:a]${mixIn}amix=inputs=${cuts.length + 1}:duration=first:normalize=0[out]" ` +
     `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
     300_000
   )
@@ -985,6 +1002,11 @@ async function renderRemotionEdit(
       silences,
     })
     if (viral) await planViralCaptions(plan.pages, profile, kit.variation)
+    // Eubank (v4): semantic tone accents (green/red/gold), punch pages, and
+    // face-aware position/alignment runs — see lib/V4-EUBANK-PLAN.md.
+    if (kit.captionStyle === 'eubank') {
+      await planEubankCaptions(plan.pages, profile, kit.variation)
+    }
     // Julie reuses the same LLM accent picker, mapped onto plain word flags:
     // the reference accents a keyword on nearly every page, far denser than
     // the profile-emphasis heuristic alone provides.
@@ -1005,14 +1027,21 @@ async function renderRemotionEdit(
     // B-roll: plan slots against the EDITED timeline, then source real media
     // (Pexels when a key is set, keyless CC0 images otherwise). Best-effort —
     // zero resolved slots just means an uninterrupted talking head.
-    // Koe graphics plan FIRST — they're the template's signature, so stock
+    // Template graphics plan FIRST — they're the template's signature, so stock
     // B-roll steers around them, never the other way around.
-    let graphics: KoeGraphic[] = []
+    let graphics: Array<KoeGraphic | EubankGraphic> = []
     if (kit.graphics === 'koe') {
       try {
         graphics = await planKoeGraphics(plan.editedWords, plan.editedDuration, profile)
       } catch (e) {
         console.warn('[motion-renderer] Koe graphics pass failed, rendering without them:', (e as Error).message)
+      }
+    }
+    if (kit.graphics === 'eubank') {
+      try {
+        graphics = await planEubankGraphics(plan.editedWords, plan.editedDuration, profile)
+      } catch (e) {
+        console.warn('[motion-renderer] Eubank graphics pass failed, rendering without them:', (e as Error).message)
       }
     }
 
@@ -1030,6 +1059,22 @@ async function renderRemotionEdit(
           // are dropped (the card carries its own headline).
           plan.pages = applyViralCoverTreatment(plan.pages, broll)
         } else {
+          // Eubank: the reference anchors captions in the UPPER third whenever
+          // full-screen B-roll owns the frame ("Top-Third Hook Captions"), and
+          // every cover carries its OWN transition — the combo rotation that
+          // keeps consecutive cutaways from repeating the same move.
+          if (kit.captionStyle === 'eubank') {
+            for (const p of plan.pages) {
+              if (broll.some(b => b.layout === 'cover' && p.start < b.start + b.duration && p.end > b.start)) {
+                p.position = 'high'
+              }
+            }
+            const COMBO: TransitionStyle[] = ['zoom', 'flash', 'whip', 'slide', 'blur']
+            let combo = kit.variation
+            for (const b of broll) {
+              if (b.layout === 'cover') b.transition = COMBO[combo++ % COMBO.length]
+            }
+          }
           avoidCaptionCollisions(plan.pages, broll)
         }
         broll.forEach(b => { if (b.file) staged.push(path.join(REMOTION_DIR, 'public', b.file)) })
@@ -1038,16 +1083,14 @@ async function renderRemotionEdit(
       }
     }
 
-    // Koe (v6): context-driven glowing graphics instead of stock footage —
-    // hook title, enumeration list, contrast venn — planned from the edited
-    // transcript. Caption pages under a graphic are dropped (the graphic
-    // carries the words for that beat, like the reference).
-    // Captions drop only under the text-carrying graphics (list/venn) — rings
-    // are ambient and the title has its own subtitle, so speech captions
-    // continue under both.
+    // Caption pages under a TEXT-CARRYING graphic are dropped — the graphic
+    // carries the words for that beat, like the references. Koe's title keeps
+    // captions running (it has its own subtitle); every Eubank kind carries
+    // text, so they all clear the band.
+    const TEXT_GRAPHICS = new Set(['list', 'venn', 'notes', 'equation', 'crossout', 'cards', 'keyword'])
     if (graphics.length) {
       plan.pages = plan.pages.filter(p =>
-        !graphics.some(g => (g.kind === 'list' || g.kind === 'venn') && p.start < g.start + g.duration && p.end > g.start)
+        !graphics.some(g => TEXT_GRAPHICS.has(g.kind) && p.start < g.start + g.duration && p.end > g.start)
       )
     }
 
@@ -1096,7 +1139,8 @@ async function renderRemotionEdit(
     // can't generate simply drops out.
     const cues = [
       ...planSfxCues(broll, plan.pages, kit.transitionStyle, kit.variation, insetTimes, viral ? 'viral' : 'standard'),
-      ...planKoeSfxCues(graphics),
+      ...(kit.graphics === 'koe' ? planKoeSfxCues(graphics as KoeGraphic[]) : []),
+      ...(kit.graphics === 'eubank' ? planEubankSfxCues(graphics as EubankGraphic[]) : []),
     ].sort((a, b) => a.start - b.start)
     const sfx = await stageSfxCues(cues, path.join(REMOTION_DIR, 'public'))
     console.log(`[motion-renderer] ${sfx.length} SFX cue(s): ${cues.map(c => `${c.category}@${(c.peakAt ?? c.start).toFixed(1)}s`).join(', ') || 'none'}`)
@@ -1128,6 +1172,7 @@ async function renderRemotionEdit(
       tag,
       grade: kit.grade,
       hookSpotlight: kit.hookSpotlight,
+      handheld: kit.handheld,
       sfx,
     }))
     staged.push(propsPath)

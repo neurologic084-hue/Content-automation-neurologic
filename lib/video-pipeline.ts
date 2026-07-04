@@ -104,8 +104,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   // sound kits are smart-randomized per render so reruns give fresh takes.
   {
     id: 'our-v4',
-    name: 'Bold & Bright',
-    description: 'Bold two-tone captions, photo-card B-roll, multi-shot punch-ins, and an opening spotlight on you.',
+    name: 'Concept Pro',
+    description: 'Premium concept-driven edit: color-coded captions, on-screen checklists and frameworks that visualize your points, punch-in cuts, and tactile sound design.',
     tool: 'edit',
     order: 4,
     autoStart: false,

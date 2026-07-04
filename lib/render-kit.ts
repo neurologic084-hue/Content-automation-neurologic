@@ -19,7 +19,7 @@ import { transitionStyleFor, type SfxCategory, type TransitionStyle } from './so
 import type { BrollItem } from './broll'
 import type { CaptionPage } from './edit-plan'
 
-export type CaptionStyle = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie'
+export type CaptionStyle = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
 export type BrollMedia = 'image' | 'video' | 'mixed' | 'viral' | 'none'
 
 // Per-variant TEMPLATE: every Remotion variant shares the same editing engine
@@ -39,22 +39,27 @@ export interface RemotionVariantIdentity {
   insets: boolean                 // white inset-card beats (the Ryan grammar)
   textBehindHook: boolean         // subject matte behind the hook caption
   designedCards: boolean          // Ryan's poster-card covers (viral B-roll only)
-  graphics?: 'koe'                // context-driven Remotion animation pack
+  graphics?: 'koe' | 'eubank'     // context-driven Remotion animation pack
   grade?: 'cinematic'             // subtle segment-level color grade
   hookSpotlight?: boolean         // Julie's opening focus: dark edges, bright subject
+  handheld?: boolean              // organic position/rotation drift on every shot
 }
 
 export const REMOTION_IDENTITIES: Record<string, RemotionVariantIdentity> = {
-  // JULIE — UGC product (modeled on "Multiple Shots, Voice Isolation, No
-  // Music, Photo B Roll.mp4"): white bold sans captions with heavy ITALIC
-  // periwinkle/navy two-tone accents, mixed sizes and positions, rotating
-  // entrances (fade/zoom/slide), multi-shot punch-ins, photo-card B-roll at
-  // adaptive density, and the opening spotlight focus on the subject.
+  // EUBANK — premium concept-driven edit (modeled on "Alex Eubank Sample.mp4",
+  // see lib/V4-EUBANK-PLAN.md): clean Inter sentence-case captions with
+  // SEMANTIC color accents (green = positive, red = negative, gold = neutral
+  // emphasis) building word by word, big centered punchline pages, concept
+  // graphics that visualize what's said (Notes-app checklist, on-screen
+  // equation, cross-out, framework cards, quote panels), the viral full-screen
+  // video B-roll system (same density/transitions as v5/v6, minus the poster
+  // cards), ~3s punch-in framing jumps, constant handheld drift, and tactile
+  // per-event SFX (pop/ding/shing/boom). Hard cuts between talking segments.
   'our-v4': {
-    captionStyle: 'julie', brollMedia: 'image',
-    pace: 'punchy', maxPageWords: 4, captionCase: 'title',
+    captionStyle: 'eubank', brollMedia: 'viral',
+    pace: 'punchy', maxPageWords: 5, captionCase: 'sentence',
     insets: false, textBehindHook: false, designedCards: false,
-    hookSpotlight: true, grade: 'cinematic',
+    graphics: 'eubank', grade: 'cinematic', handheld: true,
   },
   // RYAN — viral podcast (modeled on "NEWEST viral editing style"): two-tier
   // captions (white sans + big gold italic serif / heavy block numbers),
@@ -165,6 +170,8 @@ const COVER_IN: Record<TransitionStyle, SfxCategory[]> = {
   blur: ['whoosh-airy', 'whoosh'],
   punch: ['whoosh-snap', 'whoosh-deep'],
   slide: ['whoosh-snap', 'whoosh'],  // the viral push wants a tight whip swish
+  zoom: ['whoosh-deep', 'whoosh'],   // zoom-through: deep sub-heavy rush
+  whip: ['whoosh-snap', 'whoosh'],   // whip-pan: the tightest whip swish
 }
 const COVER_OUT: SfxCategory[] = ['whoosh-airy', 'whoosh']
 const CARD_IN: SfxCategory[] = ['shutter', 'shutter-soft', 'pop']
@@ -178,6 +185,8 @@ const COVER_IN_PEAK: Record<TransitionStyle, number> = {
   flash: 0.03,
   blur: 0.05,
   punch: 0.05,
+  zoom: 0.06,
+  whip: 0.04,
 }
 const COVER_OUT_FRAMES = 7 / 30   // exit animation length in ShortEdit
 const INSET_PEAK = 0.15           // 9-frame ease-in-out: max velocity mid-way
@@ -194,9 +203,12 @@ export function planSfxCues(
   const rnd = mulberry32(seed)
   const pick = (arr: SfxCategory[]) => arr[Math.floor(rnd() * arr.length)]
   const cues: SfxCue[] = []
-  const inPeak = COVER_IN_PEAK[transitionStyle]
 
   for (const b of broll) {
+    // Per-cover transition (the eubank combo rotation) overrides the render's
+    // global style — the sound must match the move the viewer actually sees.
+    const style = b.transition ?? transitionStyle
+    const inPeak = COVER_IN_PEAK[style]
     if (b.layout === 'cover') {
       const end = b.start + b.duration
       if (b.design) {
@@ -207,7 +219,7 @@ export function planSfxCues(
         cues.push({ start: Math.max(0, b.start - 0.05), peakAt: b.start + 0.05, category: 'boom-soft', volume: 0.32 })
         cues.push({ start: b.start, peakAt: b.start + 0.03, category: 'click-digital', volume: 0.18 })
       } else {
-        cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + inPeak, category: pick(COVER_IN[transitionStyle]), volume: 0.3 })
+        cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + inPeak, category: pick(COVER_IN[style]), volume: 0.3 })
       }
       cues.push({ start: end - 0.3, peakAt: end - COVER_OUT_FRAMES + inPeak, category: pick(COVER_OUT), volume: 0.2 })
     } else {
@@ -232,7 +244,7 @@ export function planSfxCues(
     let lastClick = -Infinity
     let clicks = 0
     for (const p of beatPages) {
-      if (clicks >= 6) break
+      if (clicks >= 8) break
       const accentAt = p.start + (p.accentRange![0] * 2) / 30
       if (accentAt - lastClick < 1.2) continue
       if (cues.some(c => Math.abs((c.peakAt ?? c.start) - accentAt) < 0.4)) continue
@@ -242,9 +254,9 @@ export function planSfxCues(
     }
   } else {
     // Standard emphasis pops: ONLY pages whose accent words carry real numbers
-    // (the stats that deserve a beat), capped at two per video.
+    // (the stats that deserve a beat), capped at three per video.
     const numberPages = pages.filter(p => p.words.some(w => w.accent && /\d/.test(w.t)))
-    for (const p of numberPages.slice(0, 2)) {
+    for (const p of numberPages.slice(0, 3)) {
       cues.push({ start: p.start, category: pick(EMPHASIS), volume: 0.12 })
     }
   }
