@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { PLATFORM_INSTRUCTIONS, PLATFORM_CAPS, enforceYouTubeLimits } from '@/lib/caption-platforms'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { stripDashesDeep, buildHumanizerInstruction } from '@/lib/humanizer'
 
 export async function POST(req: NextRequest) {
   const { hook, body, cta, platforms } = await req.json() as {
@@ -40,11 +41,12 @@ ${platformBlocks}
 
 UNIVERSAL RULES:
 - Plain text. No markdown, no asterisks, no bold.
-- No em dashes. No en dashes. Use a comma or a period instead.
 - Do not label sections (no "Hook:", "CTA:", etc.).
 - Do not summarize or describe the video. The viewer is watching it.
 - One clear CTA maximum per caption. Never more than one.
 - Sound like a real person, not an AI assistant.
+
+${buildHumanizerInstruction()}
 
 For YouTube, the JSON value must be: "TITLE | description" where TITLE is strictly under 60 characters. No hashtags.
 
@@ -68,7 +70,7 @@ Example: {"instagram":"caption here","tiktok":"caption here"}`
         json: true,
       })
 
-      const rawCaptions = parseJsonLoose<Record<string, string>>(raw)
+      const rawCaptions = stripDashesDeep(parseJsonLoose<Record<string, string>>(raw))
       const lowerCased = Object.fromEntries(
         Object.entries(rawCaptions).map(([k, v]) => [k.toLowerCase().trim(), v])
       )

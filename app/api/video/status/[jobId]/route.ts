@@ -1,9 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { pollSubmagicJob } from '@/lib/video-pipeline'
+import { pollSubmagicJob, VARIANT_DEFINITIONS } from '@/lib/video-pipeline'
 import type { VideoVariant } from '@/lib/video-pipeline'
+import { releaseJobSource } from '@/lib/motion-renderer'
 import fs from 'fs'
 import path from 'path'
+
+// Jobs snapshot the variant definitions (name/description/flags) at creation
+// time, so old jobs keep showing stale labels after a template is renamed or
+// redesigned. Overlay the CURRENT definitions for display — render state
+// (status/urls/progress) stays from the stored row. Display-only: never
+// written back to the DB.
+function withCurrentDefinitions(variants: VideoVariant[]): VideoVariant[] {
+  return variants.map(v => {
+    const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
+    return def ? { ...v, ...def } : v
+  })
+}
 
 export async function GET(
   _req: NextRequest,
@@ -23,7 +36,7 @@ export async function GET(
   }
 
   if (job.status === 'complete') {
-    return NextResponse.json(job)
+    return NextResponse.json({ ...job, variants: withCurrentDefinitions(job.variants ?? []) })
   }
 
   const variants: VideoVariant[] = job.variants ?? []
@@ -87,5 +100,12 @@ export async function GET(
       .eq('id', jobId)
   }
 
-  return NextResponse.json({ ...job, status: newStatus, variants })
+  if (allDone) {
+    // Job just finished — the compressed source in R2 has served its purpose.
+    // Fire-and-forget; deleting an already-deleted key is a no-op, so
+    // concurrent polls racing here are harmless.
+    void releaseJobSource(jobId)
+  }
+
+  return NextResponse.json({ ...job, status: newStatus, variants: withCurrentDefinitions(variants) })
 }

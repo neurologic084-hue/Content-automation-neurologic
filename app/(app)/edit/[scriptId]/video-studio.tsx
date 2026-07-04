@@ -144,7 +144,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     await supabase.from('video_jobs').update({ selected_variant: variantId }).eq('id', jobId)
     setSelectedVariant(variantId)
     setSaving(false)
-    router.push(`/publish?jobId=${jobId}`)
+    router.push(`/publish?jobId=${jobId}&variantId=${variantId}`)
   }
 
   async function handleStartVariant(variantId: string) {
@@ -167,10 +167,16 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
   async function handleReset() {
     if (pollRef.current) clearInterval(pollRef.current)
-    // Delete the job from Supabase so old variants don't reappear
+    // Delete the job server-side so its R2/local files go with it — a bare
+    // row delete here used to leave every rendered video orphaned in storage.
     if (jobId) {
-      const supabase = createClient()
-      await supabase.from('video_jobs').delete().eq('id', jobId)
+      try {
+        await fetch('/api/video/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobId }),
+        })
+      } catch { /* reset the UI regardless */ }
     }
     setJobId(null)
     setStatus('idle')
@@ -524,8 +530,8 @@ export function VideoStudio({ script, existingJobId }: Props) {
                         )}
                       </div>
                       {v?.download_url && !v.download_url.startsWith('placeholder') && (
-                        <Link
-                          href={`/publish?url=${encodeURIComponent(v.download_url)}&caption=${encodeURIComponent(script.hook)}`}
+                        <button
+                          onClick={() => handleSelectVariant(v.id)}
                           className="flex items-center justify-center gap-1.5 w-full h-9 rounded-xl text-xs font-semibold transition-all"
                           style={{ background: '#F0FDF4', color: '#16A34A', border: '1px solid #BBF7D0' }}
                         >
@@ -534,7 +540,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                             <polygon points="22 2 15 22 11 13 2 9 22 2" />
                           </svg>
                           Publish this
-                        </Link>
+                        </button>
                       )}
                     </div>
                   ) : (

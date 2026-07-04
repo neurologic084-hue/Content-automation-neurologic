@@ -67,9 +67,9 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     id: 'our-v1',
     name: 'Calm & Clean',
     captionLane: 'minimal',
-    locked: { magicZooms: false, hookTitle: false, basePace: 'natural' },
-    adaptive: { brollCeiling: { none: 6, some: 16, rich: 24 } },
-    useMusic: false,
+    locked: { magicZooms: true, hookTitle: false, basePace: 'natural' },
+    adaptive: { brollCeiling: { none: 10, some: 22, rich: 30 } },
+    useMusic: true,
   },
   // UGC Aesthetic — modeled on the reference edit ("Multiple Shots, Voice
   // Isolation, No Music, Photo B Roll"): small elegant captions with italic
@@ -82,25 +82,19 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     captionLane: 'clean',
     templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 20, some: 30, rich: 40 } },
+    adaptive: { brollCeiling: { none: 25, some: 38, rich: 48 } },
     useMusic: true,
   },
-  // UGC Reference — the closest Submagic-path match to the V1 reference edit
-  // ("Multiple Shots, Voice Isolation, No Music, Photo B Roll"). Captions come
-  // from the account's custom "Kelly 3" theme (built in the Submagic editor to
-  // match the reference's italic blue/silver style); punch-in zooms stand in
-  // for its multi-angle cuts, stock cutaways at the same coverage. Music stays
-  // on (deliberate departure from the reference). NOTE: while userThemeId is
-  // set the templatePool below is ignored — remove the userThemeId line to fall
-  // back to the built-in aesthetic templates.
+  // Creator Classic — simple clean captions from the built-in template pool
+  // (no custom theme), punch-in zooms standing in for multi-angle cuts, stock
+  // cutaways at the same coverage, music on.
   'our-v3': {
     id: 'our-v3',
-    name: 'UGC Reference',
+    name: 'Creator Classic',
     captionLane: 'clean',
-    userThemeId: '12e601c8-eb43-4af5-937f-9086b0a9da4d', // "Kelly 3" custom theme
     templatePool: ['Gstaad', 'Malta', 'Nema', 'Umi'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 20, some: 30, rich: 40 } },
+    adaptive: { brollCeiling: { none: 25, some: 38, rich: 48 } },
     useMusic: true,
   },
   // v4/v5: the Remotion overlay carries the visual interest, so their Submagic
@@ -109,8 +103,8 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     id: 'our-v4',
     name: 'Premium + Motion Graphics A',
     captionLane: 'minimal',
-    locked: { magicZooms: false, hookTitle: false, basePace: 'natural' },
-    adaptive: { brollCeiling: { none: 8, some: 18, rich: 28 } },
+    locked: { magicZooms: true, hookTitle: false, basePace: 'natural' },
+    adaptive: { brollCeiling: { none: 12, some: 24, rich: 34 } },
     useMusic: true,
   },
   'our-v5': {
@@ -118,7 +112,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     name: 'Premium + Motion Graphics B',
     captionLane: 'bold',
     locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 12, some: 26, rich: 38 } },
+    adaptive: { brollCeiling: { none: 16, some: 32, rich: 44 } },
     useMusic: true,
   },
 }

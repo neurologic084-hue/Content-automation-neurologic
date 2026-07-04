@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3'
 import fs from 'fs'
 
 const BUCKET = process.env.R2_BUCKET!
@@ -54,5 +54,98 @@ export async function tryUploadToStorage(localPath: string, fileName: string, jo
   } catch (e) {
     console.warn(`[storage] upload skipped/failed for ${jobId}/${fileName}: ${(e as Error).message}`)
     return null
+  }
+}
+
+async function listAllKeys(client: S3Client, prefix: string): Promise<{ key: string; lastModified?: Date }[]> {
+  const keys: { key: string; lastModified?: Date }[] = []
+  let token: string | undefined
+  do {
+    const res = await client.send(new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: prefix,
+      ContinuationToken: token,
+    }))
+    for (const o of res.Contents ?? []) {
+      if (o.Key) keys.push({ key: o.Key, lastModified: o.LastModified })
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined
+  } while (token)
+  return keys
+}
+
+async function deleteKeys(client: S3Client, keys: string[]): Promise<number> {
+  let deleted = 0
+  // DeleteObjects accepts at most 1000 keys per call
+  for (let i = 0; i < keys.length; i += 1000) {
+    const batch = keys.slice(i, i + 1000)
+    await client.send(new DeleteObjectsCommand({
+      Bucket: BUCKET,
+      Delete: { Objects: batch.map((Key) => ({ Key })), Quiet: true },
+    }))
+    deleted += batch.length
+  }
+  return deleted
+}
+
+/** Best-effort: delete every object under the given prefixes. Never throws —
+ *  storage cleanup must not break the operation that triggered it. */
+export async function deleteStoragePrefixes(prefixes: string[]): Promise<number> {
+  try {
+    const client = r2Client()
+    const keys: string[] = []
+    for (const prefix of prefixes) {
+      // Refuse empty/blank prefixes — an empty prefix would list the whole bucket.
+      if (!prefix || prefix === '/') continue
+      keys.push(...(await listAllKeys(client, prefix)).map((k) => k.key))
+    }
+    if (keys.length === 0) return 0
+    const deleted = await deleteKeys(client, keys)
+    console.log(`[storage] deleted ${deleted} object(s) under ${prefixes.join(', ')}`)
+    return deleted
+  } catch (e) {
+    console.warn(`[storage] cleanup failed for ${prefixes.join(', ')}: ${(e as Error).message}`)
+    return 0
+  }
+}
+
+/** Best-effort: delete a single object by key. Never throws. */
+export async function deleteStorageKey(key: string): Promise<void> {
+  try {
+    if (!key) return
+    const client = r2Client()
+    await deleteKeys(client, [key])
+    console.log(`[storage] deleted ${key}`)
+  } catch (e) {
+    console.warn(`[storage] delete failed for ${key}: ${(e as Error).message}`)
+  }
+}
+
+/** Everything R2 holds for a video job: finished renders under
+ *  finished/{jobId}/ plus working files (compressed source, publish
+ *  fallback uploads) under {jobId}/. */
+export async function deleteJobStorage(jobId: string): Promise<number> {
+  if (!jobId || !/^[a-zA-Z0-9-]+$/.test(jobId)) return 0
+  return deleteStoragePrefixes([`finished/${jobId}/`, `${jobId}/`])
+}
+
+/** Best-effort: delete objects under a prefix older than maxAgeHours.
+ *  Used to sweep one-shot outputs (audio-clean) that are only needed
+ *  briefly but were previously kept forever. Never throws. */
+export async function sweepStoragePrefix(prefix: string, maxAgeHours: number): Promise<number> {
+  try {
+    if (!prefix || prefix === '/') return 0
+    const client = r2Client()
+    const cutoff = Date.now() - maxAgeHours * 3600_000
+    const stale = (await listAllKeys(client, prefix))
+      .filter((k) => k.lastModified && k.lastModified.getTime() < cutoff)
+      .map((k) => k.key)
+    if (stale.length === 0) return 0
+    const deleted = await deleteKeys(client, stale)
+    console.log(`[storage] swept ${deleted} stale object(s) under ${prefix}`)
+    return deleted
+  } catch (e) {
+    console.warn(`[storage] sweep failed for ${prefix}: ${(e as Error).message}`)
+    return 0
   }
 }

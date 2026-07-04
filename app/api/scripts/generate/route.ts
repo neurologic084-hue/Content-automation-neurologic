@@ -4,6 +4,7 @@ import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildScriptGenerationMessages } from '@/lib/prompts'
 import { searchWebEnhanced, formatSearchContext } from '@/lib/tavily'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { stripDashesDeep, buildHumanizerInstruction } from '@/lib/humanizer'
 import { getLearningContext, formatLearningSections } from '@/lib/learning'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
@@ -72,7 +73,11 @@ export async function POST(req: NextRequest) {
     messages = [
       {
         role: 'system',
-        content: `You are an expert short-form video scriptwriter. Write compelling, direct scripts for social media (60-90 seconds when spoken aloud). Return ONLY valid JSON matching this schema exactly — no markdown, no extra keys:
+        content: `You are an expert short-form video scriptwriter. Write compelling, direct scripts for social media (60-90 seconds when spoken aloud).
+
+${buildHumanizerInstruction()}
+
+Return ONLY valid JSON matching this schema exactly, no markdown, no extra keys:
 {
   "hook": "opening line that grabs attention in under 3 seconds",
   "body": "main content — value-dense, conversational, no fluff",
@@ -106,7 +111,8 @@ export async function POST(req: NextRequest) {
 
   let generated: GeneratedScript
   try {
-    generated = parseJsonLoose<GeneratedScript>(raw)
+    // Deep dash-strip: no em/en dash can survive into any generated field.
+    generated = stripDashesDeep(parseJsonLoose<GeneratedScript>(raw))
   } catch {
     await supabase.from('ideas').update({ status: 'pending_lane_confirm' }).eq('id', idea_id)
     return NextResponse.json({ error: 'Failed to parse generated script' }, { status: 500 })

@@ -28,6 +28,9 @@ export interface BlatoPostOptions {
   youtubeTitle?: string
   // Facebook-specific: the connected Page's ID
   pageId?: string
+  // TikTok-specific: visibility override (defaults to public). SELF_ONLY is
+  // useful for end-to-end tests — the post is visible only to the account owner.
+  tiktokPrivacy?: 'PUBLIC_TO_EVERYONE' | 'MUTUAL_FOLLOW_FRIENDS' | 'FOLLOWER_OF_CREATOR' | 'SELF_ONLY'
 }
 
 export interface BlatoPostResult {
@@ -73,6 +76,21 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
       title,
       privacyStatus: 'public',
       shouldNotifySubscribers: false,
+    }
+  } else if (platform === 'tiktok') {
+    // TikTok requires ALL of these fields — omitting any of them makes Blotato
+    // reject the post. Values follow TikTok's content-posting API rules:
+    // the creator publishes real talking-head footage, so no branded-content,
+    // brand-organic, or AI-generated flags apply.
+    target = {
+      targetType: 'tiktok',
+      privacyLevel: opts.tiktokPrivacy ?? 'PUBLIC_TO_EVERYONE',
+      disabledComments: false,
+      disabledDuet: false,
+      disabledStitch: false,
+      isBrandedContent: false,
+      isYourBrand: false,
+      isAiGenerated: false,
     }
   } else {
     target = { targetType: opts.platform }
@@ -133,10 +151,13 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
   return { postId: postSubmissionId, status: 'published' }
 }
 
+// TikTok is the slowest platform to confirm (~30s observed end-to-end), so the
+// poll budget is ~36s. Anything still in-progress after that is reported as
+// published — Blotato almost always resolves it moments later.
 async function pollPostStatus(
   postSubmissionId: string,
-  maxAttempts = 8,
-  intervalMs = 2000
+  maxAttempts = 12,
+  intervalMs = 3000
 ): Promise<{ status: 'published' | 'failed' | 'in-progress'; error?: string }> {
   for (let i = 0; i < maxAttempts; i++) {
     try {

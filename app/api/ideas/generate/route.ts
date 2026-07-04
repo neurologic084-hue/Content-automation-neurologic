@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
-import { buildHumanizerInstruction } from '@/lib/humanizer'
+import { buildHumanizerInstruction, stripDashes } from '@/lib/humanizer'
 import { searchNicheNews } from '@/lib/tavily'
 import { parseJsonLoose } from '@/lib/json-loose'
 
@@ -187,8 +187,8 @@ Respond ONLY with raw JSON, no markdown:
   // Normalise: support both old string[] and new {format, idea}[]
   const ideas = parsed.ideas.slice(0, 10).map((item) =>
     typeof item === 'string'
-      ? { format: 'educational', idea: item }
-      : { format: item.format ?? 'educational', idea: item.idea ?? String(item) }
+      ? { format: 'educational', idea: stripDashes(item) }
+      : { format: item.format ?? 'educational', idea: stripDashes(item.idea ?? String(item)) }
   )
 
   return NextResponse.json({ ideas })

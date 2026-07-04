@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildRevisionMessages } from '@/lib/prompts'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { stripDashesDeep } from '@/lib/humanizer'
 import { getLearningContext, formatLearningSections } from '@/lib/learning'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
 
@@ -61,7 +62,8 @@ export async function POST(req: NextRequest) {
 
   let generated: GeneratedScript
   try {
-    generated = parseJsonLoose<GeneratedScript>(raw)
+    // Deep dash-strip: no em/en dash can survive into any revised field.
+    generated = stripDashesDeep(parseJsonLoose<GeneratedScript>(raw))
   } catch {
     return NextResponse.json({ error: 'Failed to parse revised script' }, { status: 500 })
   }

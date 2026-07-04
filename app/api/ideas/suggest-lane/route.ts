@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildLaneSuggestionPrompt } from '@/lib/prompts'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { stripDashesDeep } from '@/lib/humanizer'
 import type { LaneSuggestion } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
@@ -27,7 +28,7 @@ export async function POST(req: NextRequest) {
 
   let suggestion: LaneSuggestion
   try {
-    suggestion = parseJsonLoose<LaneSuggestion>(raw)
+    suggestion = stripDashesDeep(parseJsonLoose<LaneSuggestion>(raw))
   } catch {
     return NextResponse.json({ error: 'Failed to parse AI response' }, { status: 500 })
   }

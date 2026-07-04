@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, verifyDriveFile } from '@/lib/video-pipeline'
 import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 import { prepareJobSource } from '@/lib/motion-renderer'
+import { deleteJobStorage } from '@/lib/storage'
 
 const MUSIC_MODES: MusicMode[] = ['smart', 'off']
 
@@ -31,8 +34,16 @@ export async function POST(req: NextRequest) {
 
   const supabase = await createClient()
 
-  // Delete any existing job for this script
+  // Delete any existing job for this script — including its files in R2 and
+  // on local disk, which otherwise linger as unreachable orphans.
+  const { data: oldJobs } = await supabase.from('video_jobs').select('id').eq('script_id', scriptId)
   await supabase.from('video_jobs').delete().eq('script_id', scriptId)
+  for (const old of oldJobs ?? []) {
+    void deleteJobStorage(old.id)
+    try {
+      fs.rmSync(path.join(process.cwd(), 'public', 'renders', old.id), { recursive: true, force: true })
+    } catch { /* best-effort */ }
+  }
 
   const variants = VARIANT_DEFINITIONS.map((def) => ({
     ...def,

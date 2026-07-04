@@ -4,7 +4,7 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import { createClient } from '@supabase/supabase-js'
-import { uploadToStorage } from './storage'
+import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
 import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
@@ -13,11 +13,14 @@ import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
-import { buildEditPlan } from './edit-plan'
-import { isolateVoiceInPlace } from './voice-isolation'
+import { buildEditPlan, planViralCaptions, planInsetSegments } from './edit-plan'
+import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues } from './render-kit'
-import { getSfx } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions } from './broll'
+import { stageSfxCues } from './sfx-stage'
+import { getSfx, probeSfxTiming } from './sound-effects'
+import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
+import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
+import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
 
 // Patch PATH to the bundled ffmpeg/ffprobe before any exec runs. Called
 // explicitly (not a bare side-effect import) so the bundler can't drop it.
@@ -327,6 +330,17 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   }
 }
 
+// The compressed source in R2 is only needed while variants render (Submagic
+// downloads it from there). Once every started variant is done, drop it to
+// free storage. The in-memory cache must be cleared alongside, otherwise a
+// later re-render would reuse the now-deleted URL instead of re-uploading.
+// Re-renders recover via getLocalCompressedSource: local disk copy first,
+// then the original Drive link.
+export async function releaseJobSource(jobId: string): Promise<void> {
+  submagicSourceCache.delete(jobId)
+  await deleteStorageKey(`${jobId}/source-compressed.mp4`)
+}
+
 const contentProfileCache = new Map<string, Promise<ContentProfile>>()
 
 // One Gemini read of the footage per job, cached on the job row and shared by
@@ -470,14 +484,31 @@ async function finishVariant(
   variantId: string,
   localPath: string
 ) {
-  // Push the finished render to R2 finished/ folder so it survives server
-  // restarts and is always available for publishing without needing local disk.
   const fileName = path.basename(localPath)
   const r2Url = await uploadToStorage(localPath, fileName, jobId, 'finished').catch((e) => {
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
-  const url = versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
+
+  let url: string
+  if (r2Url) {
+    url = versioned(r2Url)
+  } else {
+    // R2 failed — copy the file into public/renders/ so the /renders/ URL is
+    // actually reachable. If this copy also fails, mark the variant failed rather
+    // than storing a dead path that will ENOENT at publish time.
+    const pubDir = path.join(process.cwd(), 'public', 'renders', jobId)
+    const pubPath = path.join(pubDir, fileName)
+    try {
+      fs.mkdirSync(pubDir, { recursive: true })
+      if (localPath !== pubPath) fs.copyFileSync(localPath, pubPath)
+      url = versioned(`/renders/${jobId}/${fileName}`)
+    } catch (copyErr) {
+      await markVariant(jobId, variantId, 'failed', null, `Storage upload failed and local fallback failed: ${(copyErr as Error).message}`)
+      return
+    }
+  }
+
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
@@ -507,6 +538,15 @@ export async function retrieveAndStoreSubmagicResult(
     }
   }
 
+  // Transition whooshes on Submagic's own cuts. Submagic has no SFX API, so the
+  // cuts are recovered from the finished file via scene detection and a whoosh
+  // is peak-aligned onto each one — same sound grammar as the Remotion variants.
+  try {
+    await mixTransitionSfx(localPath)
+  } catch (e) {
+    console.warn('[motion-renderer] transition SFX pass failed, keeping video without it:', (e as Error).message)
+  }
+
   // Push finished Submagic result to R2 finished/ folder so it's always
   // available for publishing even if local disk is wiped.
   const fileName = path.basename(localPath)
@@ -521,6 +561,75 @@ function cleanTempFiles(outDir: string, variantId: string): void {
   for (const suffix of ['.mp4', '_captions.ass', '_mx.mp4', '_broll.mp4', '_mg.mp4']) {
     const p = path.join(outDir, `${variantId}${suffix}`)
     try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch { /* best-effort */ }
+  }
+}
+
+// ── Transition SFX on detected cuts (Submagic path) ──────────────────────────
+// The Submagic variants are edited inside Submagic, so we never see their cut
+// list. Recover it from the finished video with ffmpeg scene detection, then
+// mix a whip-whoosh whose loudest instant lands exactly on each cut — the same
+// peak-alignment trick the Remotion variants use (lib/sfx-stage.ts).
+
+async function detectSceneCuts(videoPath: string): Promise<number[]> {
+  const stderr = await new Promise<string>((resolve, reject) => {
+    let buf = ''
+    const proc = exec(
+      `ffmpeg -i "${videoPath}" -vf "select='gt(scene,0.30)',showinfo" -f null -`,
+      { timeout: 180_000, maxBuffer: 256 * 1024 * 1024 },
+      (err) => (err ? reject(new Error(buf.slice(-400) || err.message)) : resolve(buf)),
+    )
+    proc.stderr?.on('data', (d) => { buf += String(d) })
+  })
+  const times: number[] = []
+  for (const m of stderr.matchAll(/pts_time:([\d.]+)/g)) {
+    const t = parseFloat(m[1])
+    if (Number.isFinite(t)) times.push(t)
+  }
+  return times
+}
+
+async function mixTransitionSfx(videoPath: string): Promise<void> {
+  const duration = await getVideoDuration(videoPath)
+
+  // Keep cuts away from the edges and at least 1.5s apart; cap the count so a
+  // jump-cut-heavy edit doesn't turn into a whoosh barrage.
+  const MIN_GAP = 1.5
+  const MAX_CUTS = 10
+  const raw = await detectSceneCuts(videoPath)
+  const cuts: number[] = []
+  for (const t of raw) {
+    if (t < 1 || t > duration - 1) continue
+    if (cuts.length && t - cuts[cuts.length - 1] < MIN_GAP) continue
+    cuts.push(t)
+    if (cuts.length >= MAX_CUTS) break
+  }
+  if (!cuts.length) {
+    console.log('[motion-renderer] no scene cuts detected — skipping transition SFX')
+    return
+  }
+
+  const sfxPath = await getSfx('whoosh')
+  if (!sfxPath) return
+  const timing = await probeSfxTiming(sfxPath)
+
+  // Back-time each cue so the whoosh PEAK lands on the cut, then delay-mix all
+  // instances over the existing audio. normalize=0 keeps the voice/music level.
+  const delays = cuts.map(t => Math.max(0, Math.round((t - timing.peakSec) * 1000)))
+  const chains = delays.map((ms, i) => `[1:a]adelay=${ms}|${ms},volume=0.35[s${i}]`).join(';')
+  const mixIn = delays.map((_, i) => `[s${i}]`).join('')
+  const tmp = videoPath + '_sfx.mp4'
+
+  await run(
+    `ffmpeg -y -i "${videoPath}" -i "${sfxPath}" ` +
+    `-filter_complex "${chains};[0:a]${mixIn}amix=inputs=${delays.length + 1}:duration=first:normalize=0[out]" ` +
+    `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
+    300_000
+  )
+  if (fs.existsSync(tmp) && fs.statSync(tmp).size > 1000) {
+    fs.renameSync(tmp, videoPath)
+    console.log(`[motion-renderer] transition SFX on ${cuts.length} cut${cuts.length === 1 ? '' : 's'} (${cuts.map(t => t.toFixed(1)).join(', ')}s)`)
+  } else {
+    try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
   }
 }
 
@@ -565,16 +674,18 @@ export async function mixBackgroundMusic(
 
   try {
     // loop → fade in/out → EQ-carve the vocal presence band (-5dB ~2.5kHz so
-    // music never masks speech) → present level (0.22) → light sidechain duck
-    // (ratio 4) so music stays audible under continuous speech → master to
-    // -13 LUFS / -1.5 dBTP.
+    // music never masks speech) → quiet bed level (0.13) → DEEP, SMOOTH sidechain
+    // duck (ratio 6, slow 700ms release) so music sits well under the voice and
+    // stays down through a phrase instead of "pumping" back up in every micro-gap
+    // → master to -14 LUFS / -1.5 dBTP. Tuned down from 0.18/ratio-4/-13 after a
+    // strict audit called the music too loud and pumpy against the cleaned voice.
     await run(
       `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
       `-filter_complex ` +
       `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
-      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.22[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.04:ratio=4:attack=5:release=300[ducked];` +
-      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-13:TP=-1.5:LRA=11[out]" ` +
+      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.13[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=0.035:ratio=6:attack=15:release=700[ducked];` +
+      `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
     )
@@ -806,11 +917,23 @@ async function renderMotionGraphicsTestOnly(
   }
 }
 
-// ── Remotion-only full edit (v6) ──────────────────────────────────────────────
+// ── Remotion-only full edit (v4/v5/v6) ────────────────────────────────────────
 // No Submagic anywhere: voice isolation (ElevenLabs), silence/retake cutting
-// (edit-plan), reference-style captions, subtle zooms, blur joins, and whoosh
-// SFX all render as ONE Remotion composition (ShortEdit). Music then mixes on
-// top through the same library system every other variant uses.
+// (edit-plan), captions, zooms, transitions, B-roll, event-driven SFX all
+// render as ONE Remotion composition (ShortEdit). Music then mixes on top
+// through the same library system every other variant uses.
+
+// A Remotion render spawns a bundler + headless Chrome + compositor. Running
+// several at once starves the machine — fonts hit their delayRender timeout
+// and the compositor drops connections (ECONNRESET). So when multiple variants
+// are started together, planning/B-roll/music still run in parallel but the
+// render step itself goes through this queue, one at a time.
+let remotionRenderQueue: Promise<unknown> = Promise.resolve()
+function enqueueRemotionRender<T>(fn: () => Promise<T>): Promise<T> {
+  const p = remotionRenderQueue.then(fn, fn)
+  remotionRenderQueue = p.catch(() => undefined)
+  return p
+}
 async function renderRemotionEdit(
   jobId: string,
   variantId: string,
@@ -833,8 +956,8 @@ async function renderRemotionEdit(
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
-    await setVariantProgress(jobId, variantId, 2, STEPS, 'Isolating voice')
-    await isolateVoiceInPlace(workPath)
+    await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
+    await cleanAudioInPlace(workPath)
 
     // The render kit: the variant's FIXED identity (caption style, B-roll
     // flavor) plus smart-randomized style (transition weighted by footage
@@ -843,27 +966,106 @@ async function renderRemotionEdit(
     const kit = buildRenderKit(variantId, profile)
     console.log(`[motion-renderer] kit for ${variantId}: captions=${kit.captionStyle} broll=${kit.brollMedia} transition=${kit.transitionStyle} seed=${kit.variation}`)
 
-    // Transcribe AFTER isolation — cleaner audio, better word timings.
+    // Transcribe AFTER cleaning — better audio, better word timings. Energy-
+    // detected silences ride along as the second cut signal (word timings can
+    // stretch across real pauses and hide them from gap-based cutting).
     await setVariantProgress(jobId, variantId, 3, STEPS, 'Planning cuts and captions')
     const words = await transcribeLocalFile(workPath)
+    const silences = await detectSilences(workPath)
     const duration = await getVideoDuration(workPath)
     const dimensions = await probeVideoDimensions(workPath)
-    const plan = await buildEditPlan(words, duration, profile, kit.variation)
+
+    // Pace, page length, and casing all come from the variant's template —
+    // every variant shares this same engine underneath.
+    const viral = kit.captionStyle === 'viral'
+    const plan = await buildEditPlan(words, duration, profile, kit.variation, {
+      pace: kit.pace,
+      maxPageWords: kit.maxPageWords,
+      caseStyle: kit.captionCase,
+      silences,
+    })
+    if (viral) await planViralCaptions(plan.pages, profile, kit.variation)
+    // Julie reuses the same LLM accent picker, mapped onto plain word flags:
+    // the reference accents a keyword on nearly every page, far denser than
+    // the profile-emphasis heuristic alone provides.
+    if (kit.captionStyle === 'julie') {
+      await planViralCaptions(plan.pages, profile, kit.variation)
+      for (const page of plan.pages) {
+        if (page.accentRange) {
+          for (let i = page.accentRange[0]; i <= page.accentRange[1]; i++) page.words[i].accent = true
+        }
+        // Strip the viral-only styling fields so the page renders as julie.
+        delete page.accentRange
+        delete page.accentFont
+        delete page.accentColor
+        delete page.behind
+      }
+    }
 
     // B-roll: plan slots against the EDITED timeline, then source real media
     // (Pexels when a key is set, keyless CC0 images otherwise). Best-effort —
     // zero resolved slots just means an uninterrupted talking head.
+    // Koe graphics plan FIRST — they're the template's signature, so stock
+    // B-roll steers around them, never the other way around.
+    let graphics: KoeGraphic[] = []
+    if (kit.graphics === 'koe') {
+      try {
+        graphics = await planKoeGraphics(plan.editedWords, plan.editedDuration, profile)
+      } catch (e) {
+        console.warn('[motion-renderer] Koe graphics pass failed, rendering without them:', (e as Error).message)
+      }
+    }
+
     await setVariantProgress(jobId, variantId, 4, STEPS, 'Finding B-roll')
     const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
     const brollPrefix = `edit-cache/${variantId}-${jobId.slice(0, 8)}-broll`
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
-    try {
-      const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia)
-      broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
-      avoidCaptionCollisions(plan.pages, broll)
-      broll.forEach(b => staged.push(path.join(REMOTION_DIR, 'public', b.file)))
-    } catch (e) {
-      console.warn('[motion-renderer] B-roll pass failed, rendering without it:', (e as Error).message)
+    if (kit.brollMedia !== 'none') {
+      try {
+        const graphicWindows = graphics.map(g => ({ start: g.start, duration: g.duration }))
+        const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, graphicWindows)
+        broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
+        if (viral) {
+          // Pages over covers go big/centered; pages under the designed poster
+          // are dropped (the card carries its own headline).
+          plan.pages = applyViralCoverTreatment(plan.pages, broll)
+        } else {
+          avoidCaptionCollisions(plan.pages, broll)
+        }
+        broll.forEach(b => { if (b.file) staged.push(path.join(REMOTION_DIR, 'public', b.file)) })
+      } catch (e) {
+        console.warn('[motion-renderer] B-roll pass failed, rendering without it:', (e as Error).message)
+      }
+    }
+
+    // Koe (v6): context-driven glowing graphics instead of stock footage —
+    // hook title, enumeration list, contrast venn — planned from the edited
+    // transcript. Caption pages under a graphic are dropped (the graphic
+    // carries the words for that beat, like the reference).
+    // Captions drop only under the text-carrying graphics (list/venn) — rings
+    // are ambient and the title has its own subtitle, so speech captions
+    // continue under both.
+    if (graphics.length) {
+      plan.pages = plan.pages.filter(p =>
+        !graphics.some(g => (g.kind === 'list' || g.kind === 'venn') && p.start < g.start + g.duration && p.end > g.start)
+      )
+    }
+
+    // Inset-card beats (template-gated): center any caption that plays during
+    // one so it sits on the shrunken footage, not the margin.
+    const insetTimes: Array<{ start: number; end: number }> = []
+    if (kit.insets) {
+      planInsetSegments(plan.segments, broll, plan.editedDuration, kit.variation)
+      let offset = 0
+      for (const seg of plan.segments) {
+        const segStart = offset
+        offset += seg.duration
+        if (seg.frame !== 'inset') continue
+        insetTimes.push({ start: segStart, end: segStart + seg.duration })
+        for (const p of plan.pages) {
+          if (p.start < segStart + seg.duration && p.end > segStart && !p.big) p.position = 'mid'
+        }
+      }
     }
 
     // Stage assets into remotion/public so staticFile() can reach them.
@@ -873,25 +1075,42 @@ async function renderRemotionEdit(
     fs.copyFileSync(workPath, stagedVideoPath)
     staged.push(stagedVideoPath)
 
-    // Event-driven audio: plan the cues (cover in/out, card entrances, number
-    // emphasis), then stage one file per distinct sound used. Best-effort — a
-    // cue whose sound can't generate simply drops out.
-    const cues = planSfxCues(broll, plan.pages, kit.transitionStyle, kit.variation)
-    const catFiles = new Map<string, string>()
-    for (const category of new Set(cues.map(c => c.category))) {
-      try {
-        const src = await getSfx(category)
-        if (src) {
-          const rel = `edit-cache/sfx-${category}.mp3`
-          fs.copyFileSync(src, path.join(REMOTION_DIR, 'public', rel))
-          catFiles.set(category, rel)
-        }
-      } catch { /* that sound stays silent */ }
+    // Hook matte (template-gated): lets the opening caption sit behind the
+    // speaker. Best-effort — null just means the caption stays in front.
+    let matte: SubjectMatte | null = null
+    if (kit.textBehindHook && plan.pages.some(p => p.behind) && plan.segments.length) {
+      matte = await buildSubjectMatte({
+        sourcePath: workPath,
+        srcStart: plan.segments[0].srcStart,
+        durationSec: Math.min(2.8, plan.segments[0].duration),
+        stageDir: cacheDir,
+        publicPrefix: 'edit-cache',
+        name: `${variantId}-${jobId.slice(0, 8)}-matte`,
+      })
+      if (matte) staged.push(path.join(REMOTION_DIR, 'public', matte.file))
     }
-    const sfx = cues
-      .filter(c => catFiles.has(c.category))
-      .map(c => ({ file: catFiles.get(c.category)!, start: c.start, volume: c.volume }))
-    console.log(`[motion-renderer] ${sfx.length} SFX cue(s): ${cues.map(c => `${c.category}@${c.start.toFixed(1)}s`).join(', ') || 'none'}`)
+
+    // Event-driven audio: plan the cues (motion whooshes, texture clicks, the
+    // riser+hit build into the designed card), then stage the files and
+    // peak-align every cue (lib/sfx-stage.ts). Best-effort — a cue whose sound
+    // can't generate simply drops out.
+    const cues = [
+      ...planSfxCues(broll, plan.pages, kit.transitionStyle, kit.variation, insetTimes, viral ? 'viral' : 'standard'),
+      ...planKoeSfxCues(graphics),
+    ].sort((a, b) => a.start - b.start)
+    const sfx = await stageSfxCues(cues, path.join(REMOTION_DIR, 'public'))
+    console.log(`[motion-renderer] ${sfx.length} SFX cue(s): ${cues.map(c => `${c.category}@${(c.peakAt ?? c.start).toFixed(1)}s`).join(', ') || 'none'}`)
+
+    // Koe red-line tag: carries the CTA when it's short enough to read as a
+    // tag (the reference's 'COMMENT "KOE"'), in the video's second half.
+    const cta = opts.cta?.trim()
+    const tag = kit.graphics === 'koe' && cta && cta.length <= 30 && plan.editedDuration > 14
+      ? {
+          line1: cta.toUpperCase(),
+          start: Number((plan.editedDuration * 0.55).toFixed(2)),
+          durationSec: Math.min(5, plan.editedDuration * 0.25),
+        }
+      : undefined
 
     const propsPath = path.join(outDir, `${variantId}_edit.json`)
     fs.writeFileSync(propsPath, JSON.stringify({
@@ -904,16 +1123,27 @@ async function renderRemotionEdit(
       broll,
       transitionStyle: kit.transitionStyle,
       captionStyle: kit.captionStyle,
+      matte: matte ?? undefined,
+      graphics: graphics.length ? graphics : undefined,
+      tag,
+      grade: kit.grade,
+      hookSpotlight: kit.hookSpotlight,
       sfx,
     }))
     staged.push(propsPath)
 
-    await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
-    await run(
-      `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-      `--props="${propsPath}" --codec=h264 --crf=19`,
-      900_000,
-    )
+    await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
+    await enqueueRemotionRender(async () => {
+      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
+      await run(
+        // 240s delayRender timeout: on a busy machine (user apps + dev server),
+        // headless-Chrome startup + font loads can crawl past 120s and fail
+        // renders that would otherwise succeed.
+        `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=240000`,
+        900_000,
+      )
+    })
     if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
 
     if (MUSIC_ENABLED && musicMode !== 'off') {

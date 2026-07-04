@@ -59,9 +59,9 @@ export default async function DashboardPage() {
     : pendingReview > 0
     ? { label: `Review ${pendingReview} waiting script${pendingReview === 1 ? '' : 's'}`, sublabel: 'Approving trains your voice — every approval makes the next script better.', href: '/review', color: '#6366F1', bg: '#EEF2FF' }
     : variantsReady > 0
-    ? { label: `Pick a winner — ${variantsReady} video${variantsReady === 1 ? ' has' : 's have'} variants ready`, sublabel: 'Choose the best edit and send it to Publish.', href: '/library', color: '#FF4F17', bg: '#FFF3EF' }
+    ? { label: `Pick a winner — ${variantsReady} video${variantsReady === 1 ? ' has' : 's have'} variants ready`, sublabel: 'Choose the best edit and send it to Publish.', href: '/edit', color: '#FF4F17', bg: '#FFF3EF' }
     : approvedNoFootage > 0
-    ? { label: `${approvedNoFootage} approved script${approvedNoFootage === 1 ? '' : 's'} need${approvedNoFootage === 1 ? 's' : ''} footage`, sublabel: 'Film the script, upload to Drive, and the studio edits it for you.', href: '/library', color: '#F59E0B', bg: '#FEF3C7' }
+    ? { label: `${approvedNoFootage} approved script${approvedNoFootage === 1 ? '' : 's'} need${approvedNoFootage === 1 ? 's' : ''} footage`, sublabel: 'Film the script, upload to Drive, and the studio edits it for you.', href: '/edit', color: '#F59E0B', bg: '#FEF3C7' }
     : { label: 'Generate fresh ideas', sublabel: 'The pipeline is clear — feed it 10 new AI ideas from your brand.', href: '/ideas/new', color: '#16A34A', bg: '#DCFCE7' }
 
   const { data: recentScripts } = await supabase
@@ -535,9 +535,9 @@ export default async function DashboardPage() {
         <p className="text-xs font-bold text-[#A1A1AA] uppercase tracking-widest mb-3">Your full workflow</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
 
-          {/* Scripts hub */}
+          {/* Video Studio */}
           <Link
-            href="/library"
+            href="/edit"
             className="bg-white border border-[#E4E4E0] rounded-2xl p-5 hover:border-[#6366F1] hover:shadow-sm transition-all duration-150 group hover-lift"
           >
             <div className="flex items-start gap-3 mb-4">
@@ -549,10 +549,10 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1">
                 <p className="font-bold text-sm text-[#18181B] mb-1" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                  Scripts &amp; Studio
+                  Video Studio
                 </p>
                 <ul className="space-y-0.5">
-                  {['All approved scripts, organized by stage', 'Add footage — AI cuts, captions & music', 'Pick the best variant and publish'].map((f) => (
+                  {['Add footage to approved scripts', 'AI cuts, captions & music automatically', 'Pick the best variant and publish'].map((f) => (
                     <li key={f} className="text-xs text-[#71717A] flex items-center gap-1.5">
                       <span className="w-1 h-1 rounded-full bg-[#C4C4C0] flex-shrink-0" />
                       {f}
@@ -562,7 +562,7 @@ export default async function DashboardPage() {
               </div>
             </div>
             <div className="flex items-center gap-1.5 text-xs font-semibold text-[#6366F1] group-hover:gap-2.5 transition-all">
-              Open Scripts
+              Open Video Studio
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M9 18l6-6-6-6" />
               </svg>

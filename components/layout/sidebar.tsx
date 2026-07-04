@@ -42,11 +42,21 @@ const NAV = [
   },
   {
     href: '/library',
-    label: 'Scripts',
+    label: 'Library',
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
         <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+      </svg>
+    ),
+  },
+  {
+    href: '/edit',
+    label: 'Edit',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3L14.5 4z" />
+        <circle cx="12" cy="13" r="3" />
       </svg>
     ),
   },
@@ -101,7 +111,7 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
         supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']).gte('created_at', weekAgo).eq('profile_slot', slot),
       ])
       if (!cancelled) {
-        setBadges({ '/review': pending.count ?? 0, '/library': ready.count ?? 0 })
+        setBadges({ '/review': pending.count ?? 0, '/edit': ready.count ?? 0 })
         setWeek({ approved: wApproved.count ?? 0, published: wPublished.count ?? 0 })
         setPipeline({ ideas: ideas.count ?? 0, review: pending.count ?? 0, studio: approved.count ?? 0, published: published.count ?? 0 })
       }
@@ -223,7 +233,7 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
               {[
                 { label: 'Ideas', count: pipeline.ideas, color: '#FF4F17', href: '/ideas/new' },
                 { label: 'In review', count: pipeline.review, color: '#6366F1', href: '/review' },
-                { label: 'In studio', count: pipeline.studio, color: '#F59E0B', href: '/library' },
+                { label: 'In studio', count: pipeline.studio, color: '#F59E0B', href: '/edit' },
                 { label: 'Published', count: pipeline.published, color: '#16A34A', href: '/publish' },
               ].map((stage, i, arr) => (
                 <div key={stage.label}>

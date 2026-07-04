@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs'
 import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { publishPost } from '@/lib/blotato'
@@ -8,18 +9,47 @@ import { uploadToStorage } from '@/lib/storage'
 /** If the URL is a local /renders/... path, upload it to R2 Storage
  *  and return the public URL. Otherwise return as-is. */
 async function resolveMediaUrl(url: string): Promise<string> {
-  if (!url.startsWith('/renders/')) return url
+  // Strip cache-bust query string added by versioned() before testing the path —
+  // the ?v=... suffix would fail the SAFE_SEGMENT check and slip through as-is.
+  const baseUrl = url.split('?')[0]
+  if (!baseUrl.startsWith('/renders/')) return url
 
   // /renders/<jobId>/<fileName> — both segments must be plain names so the
   // resolved path can never escape public/renders/ (e.g. jobId of "..").
   const SAFE_SEGMENT = /^[a-zA-Z0-9_.-]+$/
-  const parts = url.replace(/^\/renders\//, '').split('/')
+  const parts = baseUrl.replace(/^\/renders\//, '').split('/')
   const jobId = parts[0]
   const fileName = parts[1]
   if (!jobId || !fileName || jobId.startsWith('.') || fileName.startsWith('.')) return url
   if (!SAFE_SEGMENT.test(jobId) || !SAFE_SEGMENT.test(fileName)) return url
 
   const localPath = path.join(process.cwd(), 'public', 'renders', jobId, fileName)
+
+  if (!fs.existsSync(localPath)) {
+    // Local file is gone (server restart, disk cleanup, etc.).
+    // Before giving up, check whether R2 already has this file — finishVariant
+    // uploads to finished/{jobId}/{fileName}. The upload may have actually
+    // succeeded even if the code fell back to the local path.
+    const r2PublicUrl = process.env.R2_PUBLIC_URL
+    if (r2PublicUrl) {
+      const candidateR2Url = `${r2PublicUrl}/finished/${jobId}/${fileName}`
+      try {
+        const head = await fetch(candidateR2Url, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
+        if (head.ok) {
+          console.log(`[publish] local file gone but found in R2: ${candidateR2Url}`)
+          return candidateR2Url
+        }
+      } catch {
+        // HEAD failed — R2 unreachable or file not there; fall through to error
+      }
+    }
+
+    throw new Error(
+      `The rendered video for "${fileName}" is no longer available. ` +
+      `Re-render this variant, then publish again.`
+    )
+  }
+
   return uploadToStorage(localPath, fileName, jobId)
 }
 

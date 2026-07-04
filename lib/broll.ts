@@ -24,6 +24,12 @@ export interface BrollItem {
   file: string       // filename relative to remotion/public/
   kind: 'video' | 'image'
   layout: 'card' | 'cover'
+  // Viral (v5) designed cover: instead of raw footage, the renderer builds an
+  // animated editorial poster around this media — warm gradient canvas, the
+  // image in a floating mask, and this text as the card's own headline.
+  // Palette rotates per card so two posters in one video read differently.
+  // file may be '' for a designed card: the poster renders typography-only.
+  design?: { kicker: string; headline: string; palette?: 'champagne' | 'dusk' | 'blush' }
 }
 
 interface PlannedSlot {
@@ -31,7 +37,11 @@ interface PlannedSlot {
   duration: number
   query: string
   layout: 'card' | 'cover'
+  design?: { kicker: string; headline: string; palette?: 'champagne' | 'dusk' | 'blush' }
 }
+
+// 'none' = the variant carries no stock footage at all (Koe: graphics only).
+export type BrollFlavor = 'image' | 'video' | 'mixed' | 'viral' | 'none'
 
 const COVERAGE: Record<ContentProfile['brollableRichness'], number> = { none: 30, some: 35, rich: 40 }
 
@@ -50,19 +60,51 @@ export async function planBrollSlots(
   duration: number,
   profile: ContentProfile | null,
   variation = 0,
-  media: 'image' | 'video' | 'mixed' = 'mixed',
+  media: BrollFlavor = 'mixed',
+  // Ryan's designed poster cards are a template choice (viral flavor only) —
+  // Koe uses the viral density/covers but carries its own graphics instead.
+  designs = true,
+  // Windows already claimed by template graphics (Koe title/list/venn/rings):
+  // graphics outrank stock footage, so B-roll steers around them.
+  avoid: Array<{ start: number; duration: number }> = [],
 ): Promise<PlannedSlot[]> {
-  if (duration < 8 || editedWords.length < 10) return []
-  const pct = COVERAGE[profile?.brollableRichness ?? 'some']
-  const targetCount = Math.min(6, Math.max(1, Math.round((duration * pct / 100) / 2.75)))
+  if (media === 'none' || duration < 8 || editedWords.length < 10) return []
+  // Adaptive cadence for EVERY flavor, driven by the Gemini profile's read of
+  // the footage: rich content gets a cutaway every ~6.5s (≈ the reference
+  // edits' density), a plain talking head still gets one every ~12s.
+  const CADENCE: Record<ContentProfile['brollableRichness'], number> = { none: 12, some: 8.5, rich: 6.5 }
+  const targetCount = Math.min(
+    media === 'viral' ? 8 : 6,
+    Math.max(2, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
+  )
   // Video-flavored variants can carry more full-screen moments; they're the
   // main place transitions (and their sounds) live.
-  const maxCovers = media === 'video' ? 2 : 1
+  const maxCovers = media === 'video' ? 3 : media === 'viral' ? 8 : media === 'mixed' ? 2 : 1
+  // Longer viral videos earn a second designed Remotion poster card.
+  const maxDesigns = media !== 'viral' || !designs ? 0 : duration > 45 ? 2 : 1
   const coverRule = media === 'video'
     ? '- Use "cover" (full-screen) for the one or two most visual moments; covers may run 2.2 to 3.8 seconds.'
+    : media === 'viral' && maxDesigns === 0
+    ? '- Everything is layout "cover" (full-screen stock video); covers run 2.0 to 3.8 seconds.'
+    : media === 'viral'
+    ? [
+        '- Everything is layout "cover" (full-screen stock video); covers run 2.0 to 3.8 seconds.',
+        `- Additionally, EXACTLY ${maxDesigns === 2 ? 'TWO cutaways are' : 'ONE cutaway is the'} DESIGNED poster card${maxDesigns === 2 ? 's' : ''}: the most`,
+        '  important claim(s) of the video. For each such item add "design": {"kicker", "headline"}:',
+        '  kicker = the 2-4 small lead-in words as spoken (e.g. "It\'s the"), headline = the',
+        '  2-4 word payoff as spoken (e.g. "Highest Value Biomarker"). Both must come from the',
+        '  transcript wording. Its "query" should describe a single bold OBJECT to illustrate',
+        '  the claim (e.g. "anatomical heart illustration", "alarm clock closeup").',
+      ].join('\n')
     : '- layout: "card" for most (photo card over the footage); at most one "cover" for the single most dramatic moment.'
 
   const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
+  // Ground the planner in what the footage actually IS (the Gemini profile
+  // watched the real video), not just the raw words.
+  const contextLines = profile ? [
+    `Video context: ${profile.format} content${profile.suggestedHookTitle ? ` — "${profile.suggestedHookTitle}"` : ''}.`,
+    profile.emphasisPhrases.length ? `Key moments the speaker stresses: ${profile.emphasisPhrases.join('; ')}.` : '',
+  ].filter(Boolean) : []
   let candidates: Partial<PlannedSlot>[] = []
   try {
     const raw = await chatCompletion({
@@ -75,6 +117,7 @@ export async function planBrollSlots(
         content: [
           'Place stock B-roll cutaways on a short-form talking-head video.',
           `Video duration: ${duration.toFixed(1)}s. Place exactly ${targetCount} cutaway(s).`,
+          ...contextLines,
           'Transcript with word start times:',
           timed,
           '',
@@ -82,10 +125,15 @@ export async function planBrollSlots(
           '- Each cutaway illustrates a concrete, visual phrase — start at that phrase\'s time.',
           '- duration: 1.8 to 3.2 seconds. Never start before 2.5s, never end within the last 1.5s.',
           '- At least 2.5 seconds of talking-head between cutaways. No overlaps.',
-          '- query: a 2-4 word STOCK-SEARCH query, generic and visual ("film production set", "team whiteboard meeting", "stacks of cash"). No names, no brands.',
+          '- query: a 2-4 word STOCK-SEARCH query naming something FILMABLE — a person doing a',
+          '  specific action, a physical object, or a place ("woman eating dinner", "hands',
+          '  scrolling phone", "airport security line"). Stock libraries cannot match abstract',
+          '  ideas: NEVER use words like "concept", "success", "quality", "strategy", "mindset".',
+          '  BAD: "quality over quantity concept". GOOD: "craftsman polishing watch".',
+          '- The query must fit what the SPEAKER MEANS at that moment in this specific video.',
           coverRule,
           VARIATION_NUDGE[variation % VARIATION_NUDGE.length],
-          '- Return JSON only: {"items":[{"start":number,"duration":number,"query":string,"layout":"card"|"cover"}]}',
+          '- Return JSON only: {"items":[{"start":number,"duration":number,"query":string,"layout":"card"|"cover","design":{"kicker":string,"headline":string} (optional)}]}',
         ].join('\n'),
       }],
     })
@@ -96,21 +144,53 @@ export async function planBrollSlots(
     return []
   }
 
-  // Hard validation: the model proposes, the code enforces.
+  // Hard validation: the model proposes, the code enforces. Abstract-noun
+  // queries can't match stock footage — scrub the tokens the prompt bans so a
+  // slip like "quality over quantity concept" degrades to searchable words.
+  const ABSTRACT_RE = /\b(concept|conceptual|abstract|metaphor|symbolic?|idea|mindset|strategy|success)\b/gi
+  for (const c of candidates) {
+    if (typeof c.query === 'string') {
+      const scrubbed = c.query.replace(ABSTRACT_RE, ' ').replace(/\s+/g, ' ').trim()
+      if (scrubbed) c.query = scrubbed
+    }
+  }
   const slots: PlannedSlot[] = []
   let lastEnd = 0
   let coversUsed = 0
-  const maxDur = media === 'video' ? 3.8 : 3.2
+  let designsUsed = 0
+  const maxDur = media === 'video' || media === 'viral' ? 3.8 : 3.2
   for (const c of candidates
     .filter(c => typeof c.start === 'number' && typeof c.duration === 'number' && typeof c.query === 'string' && c.query.trim())
     .sort((a, b) => (a.start as number) - (b.start as number))) {
     const start = Math.max(2.5, Math.max(lastEnd + 2.5, c.start as number))
     const dur = Math.min(maxDur, Math.max(1.8, c.duration as number))
     if (start + dur > duration - 1.5) continue
-    const layout: PlannedSlot['layout'] = c.layout === 'cover' && coversUsed < maxCovers ? 'cover' : 'card'
+    if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
+    // Viral cutaways are always full-screen — once the cover budget is spent,
+    // extra slots are dropped rather than demoted to floating cards (the
+    // reference has no card grammar at all).
+    const wantsCover = media === 'viral' || c.layout === 'cover'
+    if (media === 'viral' && coversUsed >= maxCovers) continue
+    const layout: PlannedSlot['layout'] = wantsCover && coversUsed < maxCovers ? 'cover' : 'card'
     if (layout === 'cover') coversUsed++
-    slots.push({ start: Number(start.toFixed(2)), duration: Number(dur.toFixed(2)), query: (c.query as string).trim().slice(0, 60), layout })
-    lastEnd = start + dur
+    const slot: PlannedSlot = { start: Number(start.toFixed(2)), duration: Number(dur.toFixed(2)), query: (c.query as string).trim().slice(0, 60), layout }
+    // Designed posters: viral flavor only, capped, and only with sane copy.
+    const d = c.design
+    if (media === 'viral' && layout === 'cover' && designsUsed < maxDesigns && d
+        && typeof d.kicker === 'string' && typeof d.headline === 'string'
+        && d.headline.trim() && d.headline.trim().split(/\s+/).length <= 5) {
+      const PALETTES = ['champagne', 'dusk', 'blush'] as const
+      slot.design = {
+        kicker: d.kicker.trim().slice(0, 40),
+        headline: d.headline.trim().slice(0, 48),
+        palette: PALETTES[(variation + designsUsed) % PALETTES.length],
+      }
+      // The designed card needs room for its text build.
+      slot.duration = Math.max(slot.duration, 3.0)
+      designsUsed++
+    }
+    slots.push(slot)
+    lastEnd = start + slot.duration
     if (slots.length >= targetCount) break
   }
   return slots
@@ -218,8 +298,10 @@ export async function resolveBrollMedia(
   variation = 0,
   // Per-variant B-roll flavor: 'image' = photo cards only (the reference look),
   // 'video' = motion clips wherever possible (cards can hold video too),
-  // 'mixed' = video for full-screen covers, photos for cards.
-  media: 'image' | 'video' | 'mixed' = 'mixed',
+  // 'mixed' = video for full-screen covers, photos for cards,
+  // 'viral' = full-screen video covers, except the designed poster card which
+  //           wants a PHOTO to float on its gradient canvas.
+  media: BrollFlavor = 'mixed',
 ): Promise<BrollItem[]> {
   fs.mkdirSync(stageDir, { recursive: true })
   const items: BrollItem[] = []
@@ -229,28 +311,54 @@ export async function resolveBrollMedia(
 
     for (const query of queryLadder(slot.query)) {
       // Mixed mode: covers are always video; cards flip a seeded coin so a
-      // healthy share of cards carry motion too.
-      const wantsVideo = media === 'video'
+      // healthy share of cards carry motion too. The viral designed card is the
+      // one viral slot that prefers a still (it drifts on the poster canvas).
+      const wantsVideo = ((media === 'video' || media === 'viral') && !slot.design)
         || (media === 'mixed' && (slot.layout === 'cover' || (variation + i) % 2 === 0))
       if (wantsVideo) {
         const videoDest = path.join(stageDir, `broll-${i}.mp4`)
         if (await fetchPexelsVideo(query, videoDest, variation)) {
-          items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.mp4`, kind: 'video', layout: slot.layout })
+          items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.mp4`, kind: 'video', layout: slot.layout, design: slot.design })
           resolved = true
           break
         }
       }
       const photoDest = path.join(stageDir, `broll-${i}.jpg`)
       if (await fetchPexelsPhoto(query, photoDest, variation) || await fetchOpenverseImage(query, photoDest, variation)) {
-        items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.jpg`, kind: 'image', layout: slot.layout })
+        items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.jpg`, kind: 'image', layout: slot.layout, design: slot.design })
         resolved = true
         break
       }
     }
-    if (!resolved) console.warn(`[broll] no media found for "${slot.query}" — slot dropped`)
+    if (!resolved) {
+      // A designed poster still works without media — it degrades to a
+      // typography-only animated card instead of silently vanishing.
+      if (slot.design) {
+        items.push({ start: slot.start, duration: slot.duration, file: '', kind: 'image', layout: slot.layout, design: slot.design })
+        console.warn(`[broll] no media for designed card "${slot.query}" — rendering typography-only poster`)
+      } else {
+        console.warn(`[broll] no media found for "${slot.query}" — slot dropped`)
+      }
+    }
   }
   console.log(`[broll] resolved ${items.length}/${slots.length} slot(s) (${media})`)
   return items
+}
+
+// Viral pages sitting over a full-screen cover get the reference's poster
+// treatment (big, centered); pages under the DESIGNED card are dropped outright
+// — that card carries its own headline, and the reference shows no captions
+// while it holds.
+export function applyViralCoverTreatment(pages: CaptionPage[], broll: BrollItem[]): CaptionPage[] {
+  const covers = broll.filter(b => b.layout === 'cover')
+  return pages.filter(page => {
+    const over = covers.find(b => page.start < b.start + b.duration && page.end > b.start)
+    if (!over) return true
+    if (over.design) return false
+    page.big = true
+    page.position = 'mid'
+    return true
+  })
 }
 
 // ── Caption interplay ─────────────────────────────────────────────────────────

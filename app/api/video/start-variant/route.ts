@@ -9,6 +9,7 @@ import {
   resolvePooledTemplate,
   submitSubmagicJob,
   pollSubmagicJob,
+  fetchSubmagicAudioTrack,
   transcribeVideo,
   VARIANT_DEFINITIONS,
   SUBMAGIC_ALWAYS_ON,
@@ -191,9 +192,6 @@ export async function POST(req: NextRequest) {
       // shares one compression + upload pass.
       const videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
       let projectId: string
-      // When set, our own library music is mixed onto the finished Submagic video
-      // in post (pollSubmagicUntilDone) — so v2/v3 share the v4/v5 music system.
-      let ourMusicCtx: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null
 
       if (preset.aiEditTemplate) {
         // Fully autonomous mode — Submagic controls everything itself, no
@@ -210,23 +208,20 @@ export async function POST(req: NextRequest) {
         // without a V2 spec.
         const spec = VARIANT_SPECS[variantId]
 
-        // Submagic renders WITHOUT its own music — we mix a mood-matched library
-        // track in post (pollSubmagicUntilDone), same system as v4/v5. Music is
-        // locked per variant (spec.useMusic); 'off' mode disables it everywhere.
+        // v1-v3 music comes from SUBMAGIC's own library, mixed by Submagic in
+        // the render itself — never our local library. Music is locked per
+        // variant (spec.useMusic); 'off' mode disables it everywhere.
         const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
         const wantsMusic = spec ? spec.useMusic : (variant.submagicProfile?.useMusic ?? true)
-        if (!musicOff && wantsMusic) {
-          ourMusicCtx = { hook: scriptRow?.hook ?? '', moodTag: scriptRow?.mood_tag ?? null, scriptFormat }
+        const musicTrackId = !musicOff && wantsMusic
+          ? await fetchSubmagicAudioTrack(scriptRow?.mood_tag ?? null) ?? undefined
+          : undefined
+        if (!musicOff && wantsMusic && !musicTrackId) {
+          console.warn('[start-variant] no Submagic audio track available — rendering without music')
         }
 
         if (spec) {
           const profile = await ensureContentProfile(jobId, job.source_drive_url as string)
-          // Give the post-Submagic music mix the same video understanding, so the
-          // track is matched to what the footage actually is, not just the mood tag.
-          if (ourMusicCtx) {
-            ourMusicCtx.profile = profile
-            ourMusicCtx.transcript = job.transcript as string | null
-          }
           // A custom theme (exact caption style) needs no template resolution at
           // all. Otherwise a pinned template pool (e.g. the UGC Aesthetic Umi
           // family) wins over the fuzzy caption-lane classifier, with lane
@@ -250,6 +245,7 @@ export async function POST(req: NextRequest) {
             magicZooms: resolved.magicZooms,
             hookTitle: resolved.hookTitle,
             removeSilencePace: resolved.removeSilencePace,
+            musicTrackId,
           })
         } else {
           // Legacy fallback: written script + directive, no video understanding.
@@ -284,6 +280,7 @@ export async function POST(req: NextRequest) {
             magicBrollsPercentage: smart.magicBrollsPercentage,
             hookTitle: smart.hookTitle,
             removeSilencePace: smart.removeSilencePace,
+            musicTrackId,
           })
         }
       }
@@ -295,8 +292,9 @@ export async function POST(req: NextRequest) {
         progress: { step: 2, total: 2, label: 'Processing in Submagic' },
       })
 
-      // Fire-and-forget poll loop (adds our library music in post when set)
-      pollSubmagicUntilDone(jobId, variantId, projectId, ourMusicCtx).catch(e =>
+      // Fire-and-forget poll loop. Music is Submagic's own (mixed in-render),
+      // so the post step only retrieves the file and lays transition SFX.
+      pollSubmagicUntilDone(jobId, variantId, projectId, null).catch(e =>
         console.error('[start-variant] Submagic poll error:', e)
       )
 

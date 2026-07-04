@@ -63,8 +63,8 @@ export interface VideoVariant extends VideoVariantDef {
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   {
     id: 'our-v1',
-    name: 'Submagic Calm & Clean',
-    description: 'Gentle pacing, light B-roll, no music — voice carries the video alone. Best for sensitive, personal, or educational content.',
+    name: 'Calm & Clean',
+    description: 'Soft pacing, minimal captions, gentle zooms. Your voice leads — ideal for sensitive or educational topics.',
     tool: 'submagic',
     order: 1,
     autoStart: false,
@@ -75,8 +75,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v2',
-    name: 'UGC Aesthetic',
-    description: 'Modeled on the UGC reference edit: elegant aesthetic captions (Umi family) with italic accent words, punch-in zooms, voice isolation, and stock B-roll cutaways. Library music mixes quietly under the voice in post.',
+    name: 'Aesthetic',
+    description: 'Elegant captions with italic accents, punch-in zooms, and B-roll cutaways. Music sits softly under the voice.',
     tool: 'submagic',
     order: 2,
     autoStart: false,
@@ -87,8 +87,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v3',
-    name: 'UGC Reference',
-    description: 'The closest match to the UGC reference edit: captions from the custom "Kelly 3" theme (italic blue/silver accent words), punch-in zooms standing in for multi-angle cuts, stock cutaways, and library music mixed quietly under the isolated voice.',
+    name: 'Creator Classic',
+    description: 'Clean minimal captions, multi-angle punch-ins, and B-roll that follows what you say — with music underneath.',
     tool: 'submagic',
     order: 3,
     autoStart: false,
@@ -104,8 +104,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   // sound kits are smart-randomized per render so reruns give fresh takes.
   {
     id: 'our-v4',
-    name: 'Remotion Editorial',
-    description: 'Remotion-only full edit with the calm editorial identity: clean Poppins captions anchored low with warm amber accent words, photo-card B-roll only, smart-randomized transitions and sound kit, library music. Zero render credits.',
+    name: 'Bold & Bright',
+    description: 'Bold two-tone captions, photo-card B-roll, multi-shot punch-ins, and an opening spotlight on you.',
     tool: 'edit',
     order: 4,
     autoStart: false,
@@ -113,8 +113,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v5',
-    name: 'Remotion Impact',
-    description: 'Remotion-only full edit with the bold impact identity: condensed ALL-CAPS captions with yellow accent words and a scale-pop entrance, video B-roll wherever possible, smart-randomized transitions and sound kit, library music. Zero render credits.',
+    name: 'Viral Energy',
+    description: 'High-energy edit: golden accent captions, full-screen B-roll pushes, designed stat cards, and framing jumps on every beat.',
     tool: 'edit',
     order: 5,
     autoStart: false,
@@ -122,8 +122,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v6',
-    name: 'Remotion UGC Serif',
-    description: 'Remotion-only full edit with the UGC reference identity: white captions with italic serif silver-blue gradient accents, mixed B-roll (photo cards + full-screen video covers), smart-randomized transitions and sound kit, library music. Zero render credits.',
+    name: 'Cinematic',
+    description: 'Dark moody grade, minimal captions, and glowing on-screen graphics that visualize your key points as you speak.',
     tool: 'edit',
     order: 6,
     autoStart: false,
@@ -488,9 +488,32 @@ export async function resolvePooledTemplate(pool: string[]): Promise<string | un
 
 // ── Submagic   Fetch first available audio track for music param ──────────────
 
-export async function fetchSubmagicAudioTrack(): Promise<string | null> {
+// The creator's library tracks seeded into Submagic user-media, keyed by the
+// library's mood categories (fileName is how the API identifies them). Music
+// is mixed BY SUBMAGIC in-render — our local library is never touched here.
+const SUBMAGIC_TRACKS_BY_MOOD: Record<string, string[]> = {
+  calm: ['aglow.mp3', 'dragonfly.mp3'],
+  curious: ['first-kiss.mp3', 'going-quietly.mp3'],
+  emotional: ['3-am-walk-slowed-reverb-version.mp3', '7-years-lukas-graham-slowed-chill-piano-version.mp3'],
+  funny: ['greedy.mp3'],
+  happy: ['cheri-cheri-lady.mp3', 'dip-dip.mp3'],
+  motivation: ['cocaina.mp3', 'gravitational-forces.mp3'],
+  sad: ['another-love-instrumental.mp3', 'freaks-guitar.mp3'],
+}
+
+// Script mood tags -> library mood categories.
+const MOOD_TAG_TO_CATEGORY: Record<string, string> = {
+  calm: 'calm',
+  energetic: 'motivation',
+  empathetic: 'emotional',
+  educational: 'curious',
+  bold: 'motivation',
+  'story-driven': 'emotional',
+}
+
+export async function fetchSubmagicAudioTrack(moodTag?: string | null): Promise<string | null> {
   try {
-    const res = await fetch('https://api.submagic.co/v1/user-media?type=AUDIO&limit=20', {
+    const res = await fetch('https://api.submagic.co/v1/user-media?type=AUDIO&limit=50', {
       headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
     })
     const text = await res.text()
@@ -499,12 +522,21 @@ export async function fetchSubmagicAudioTrack(): Promise<string | null> {
       return null
     }
     const data = JSON.parse(text)
-    const items = Array.isArray(data.items) ? data.items : []
-    const calm = items.find((item: { id?: string; name?: string; title?: string }) =>
-      /calm|soft|lofi|ambient|chill|minimal|subtle|warm/i.test(`${item.name ?? ''} ${item.title ?? ''}`)
-    )
-    const picked = calm ?? items[0]
-    if (picked?.id) console.log(`[submagic] selected audio media: ${picked.name ?? picked.title ?? picked.id}`)
+    const items: Array<{ id?: string; fileName?: string; name?: string; title?: string }> =
+      Array.isArray(data.data) ? data.data : Array.isArray(data.items) ? data.items : []
+    if (!items.length) return null
+
+    const nameOf = (item: (typeof items)[number]) => item.fileName ?? item.name ?? item.title ?? ''
+
+    // Mood-matched pick first, calm as the safe default, then anything.
+    const category = MOOD_TAG_TO_CATEGORY[moodTag ?? ''] ?? 'calm'
+    const wanted = SUBMAGIC_TRACKS_BY_MOOD[category] ?? []
+    const calmSet = SUBMAGIC_TRACKS_BY_MOOD.calm
+    const picked =
+      items.find(i => wanted.includes(nameOf(i)))
+      ?? items.find(i => calmSet.includes(nameOf(i)))
+      ?? items[0]
+    if (picked?.id) console.log(`[submagic] selected audio media: ${nameOf(picked) || picked.id} (mood: ${moodTag ?? 'none'} -> ${category})`)
     return picked?.id ?? null
   } catch {
     return null

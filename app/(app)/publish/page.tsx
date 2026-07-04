@@ -353,6 +353,7 @@ function PublishForm() {
   const searchParams = useSearchParams()
   const prefillUrl = searchParams.get('url') ?? ''
   const paramJobId = searchParams.get('jobId') ?? null
+  const paramVariantId = searchParams.get('variantId') ?? null
 
   // Accounts
   const [accounts, setAccounts] = useState<BlatoAccount[]>([])
@@ -379,6 +380,8 @@ function PublishForm() {
 
   // Track whether we've already auto-generated for the param job so it only fires once
   const autoGenFired = useRef(false)
+  // Track whether the ?jobId fallback fetch already ran (job missing from the filtered list)
+  const paramJobFetched = useRef(false)
 
   // Schedule
   const [scheduleMode, setScheduleMode] = useState<'now' | 'later'>('now')
@@ -435,10 +438,14 @@ function PublishForm() {
         .maybeSingle()
       const slot = activeBrand?.profile_slot ?? 1
       const [jobsRes, publishedRes] = await Promise.all([
+        // Include still-processing jobs too — a job counts as publishable as
+        // soon as its SELECTED variant is ready, even while sibling variants
+        // are still rendering. Filtering to status=complete hid exactly the
+        // job the user just clicked "Publish this" on.
         supabase
           .from('video_jobs')
           .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
-          .eq('status', 'complete')
+          .in('status', ['complete', 'processing'])
           .eq('profile_slot', slot)
           .not('selected_variant', 'is', null)
           .order('created_at', { ascending: false })
@@ -452,9 +459,15 @@ function PublishForm() {
 
       const publishedJobIds = new Set((publishedRes.data ?? []).map(r => r.video_job_id as string))
 
+      const variantReady = (row: Record<string, unknown>): boolean => {
+        const variants = (row.variants ?? []) as VideoVariant[]
+        const selected = variants.find(v => v.id === row.selected_variant)
+        return selected?.status === 'ready' && !!selected.download_url
+      }
+
       setJobs(
         (jobsRes.data ?? [])
-          .filter((row: Record<string, unknown>) => !publishedJobIds.has(row.id as string))
+          .filter((row: Record<string, unknown>) => !publishedJobIds.has(row.id as string) && variantReady(row))
           .map((row: Record<string, unknown>) => ({
             ...row,
             script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
@@ -470,13 +483,48 @@ function PublishForm() {
     loadJobs()
   }, [loadAccounts, loadJobs])
 
-  // Auto-select the job from ?jobId param once the list is ready
+  // Auto-select the job from ?jobId param once the list is ready.
+  // When ?variantId is also present use that specific variant's current
+  // download_url so stale URLs are never used.
+  // Falls back to a direct Supabase fetch if the job isn't in the filtered list
+  // (previously published jobs are excluded from loadJobs).
   useEffect(() => {
-    if (!paramJobId || loadingJobs || jobs.length === 0) return
-    const job = jobs.find(j => j.id === paramJobId)
-    if (job) pickJob(job)
+    if (!paramJobId || loadingJobs) return
+
+    const applyJob = (job: VideoJobRow) => {
+      setSelectedJobId(job.id)
+      setVideoSource('job')
+      const targetVariantId = paramVariantId ?? job.selected_variant
+      const variant = (job.variants ?? []).find((v: VideoVariant) => v.id === targetVariantId)
+      if (variant?.download_url) setVideoUrl(variant.download_url)
+    }
+
+    const jobInList = jobs.find(j => j.id === paramJobId)
+    if (jobInList) {
+      applyJob(jobInList)
+      return
+    }
+
+    // Job not in filtered list (e.g. already published) — fetch it directly and
+    // ADD it to the list so selectedJob resolves (captions, music credit, and
+    // the publish payload all read from jobs.find). Guarded so the fetch only
+    // fires once even as the jobs dep changes.
+    if (paramJobFetched.current) return
+    paramJobFetched.current = true
+    const supabase = createClient()
+    supabase
+      .from('video_jobs')
+      .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
+      .eq('id', paramJobId)
+      .single()
+      .then(({ data }) => {
+        if (!data) return
+        const row = { ...data, script: Array.isArray(data.scripts) ? data.scripts[0] : data.scripts } as VideoJobRow
+        setJobs(prev => prev.some(j => j.id === row.id) ? prev : [row, ...prev])
+        applyJob(row)
+      })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paramJobId, loadingJobs, jobs])
+  }, [paramJobId, paramVariantId, loadingJobs, jobs])
 
   // Auto-generate captions once the param job is selected and accounts are ready.
   // Uses accounts.length + loadingAccounts as deps (both state, defined above);
@@ -638,7 +686,7 @@ function PublishForm() {
       body: JSON.stringify({
         scriptId: selectedJob?.script_id ?? null,
         videoJobId: selectedJob?.id ?? null,
-        variantId: selectedJob?.selected_variant ?? null,
+        variantId: paramVariantId ?? selectedJob?.selected_variant ?? null,
         downloadUrl: videoUrl.trim(),
         captions,
         accounts: selectedAccounts.map(a => ({ id: a.id, platform: a.platform, pageId: a.pageId })),

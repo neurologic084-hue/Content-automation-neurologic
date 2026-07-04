@@ -54,6 +54,36 @@ export const BANNED_STRUCTURAL_PHRASES = [
   "there's more to unpack here",
 ]
 
+// Hard post-pass: prompts ban em/en dashes, but models still slip them in.
+// Every generated string runs through this before being saved or returned, so
+// a dash can never reach the UI, a script, a caption, or the DB.
+export function stripDashes(text: string): string {
+  return text
+    // numeric ranges keep a plain hyphen: "10–20" -> "10-20"
+    .replace(/(\d)\s*[—–]\s*(\d)/g, '$1-$2')
+    // any remaining em/en dash or double-hyphen becomes a comma splice
+    .replace(/\s*[—–]\s*/g, ', ')
+    .replace(/(\S)\s*--+\s*(\S)/g, '$1, $2')
+    // tidy the artifacts a blind replace can leave behind
+    .replace(/,\s*,+/g, ',')
+    .replace(/\(\s*,\s*/g, '(')
+    .replace(/,\s*([.!?;:)])/g, '$1')
+    .replace(/^\s*,\s*/gm, '')
+}
+
+// Recursively sanitize every string in a parsed LLM response (objects, arrays,
+// nested filming plans, alt hooks, delivery cues) in one call.
+export function stripDashesDeep<T>(value: T): T {
+  if (typeof value === 'string') return stripDashes(value) as T
+  if (Array.isArray(value)) return value.map(v => stripDashesDeep(v)) as T
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = stripDashesDeep(v)
+    return out as T
+  }
+  return value
+}
+
 export function buildHumanizerInstruction(): string {
   const allBanned = [...BANNED_VERBS, ...BANNED_INTENSIFIERS, ...BANNED_ABSTRACT]
 

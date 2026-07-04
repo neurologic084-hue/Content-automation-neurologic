@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { PLATFORM_INSTRUCTIONS, PLATFORM_CAPS, enforceYouTubeLimits } from '@/lib/caption-platforms'
+import { stripDashes } from '@/lib/humanizer'
 
 export async function POST(req: NextRequest) {
   const { platform, currentCaption, feedback, script } = await req.json() as {
@@ -54,9 +55,11 @@ Return ONLY the new caption text. No explanation, no intro sentence, no quotes a
       max_tokens: 350,
     })
 
-    let caption = raw.trim()
-      .replace(/^["']|["']$/g, '') // strip surrounding quotes if model added them
-      .trim()
+    let caption = stripDashes(
+      raw.trim()
+        .replace(/^["']|["']$/g, '') // strip surrounding quotes if model added them
+        .trim()
+    )
 
     // Enforce limits
     if (key === 'youtube') {
