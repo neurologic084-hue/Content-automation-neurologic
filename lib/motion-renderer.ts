@@ -31,7 +31,21 @@ const active = new Set<string>()
 
 const MUSIC_ENABLED = true
 
-const sourceFileCache = new Map<string, Promise<string>>()
+// ── Process-wide state, pinned on globalThis ─────────────────────────────────
+// In `next dev`, every hot reload creates a FRESH copy of this module — plain
+// module-level queues/locks/caches fork silently, so two renders started
+// across a reload stop being serialized against each other and dedup caches
+// stop deduping. globalThis survives reloads; module code does not.
+const g = globalThis as unknown as {
+  __olySourceFiles?: Map<string, Promise<string>>
+  __olySubmagicSources?: Map<string, Promise<string>>
+  __olyContentProfiles?: Map<string, Promise<ContentProfile>>
+  __olySubmagicFinalizes?: Set<string>
+  __olyAudioQueue?: Promise<unknown>
+  __olyRemotionQueue?: Promise<unknown>
+}
+
+const sourceFileCache = (g.__olySourceFiles ??= new Map<string, Promise<string>>())
 
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -305,7 +319,7 @@ async function getLocalCompressedSource(
   return result
 }
 
-const submagicSourceCache = new Map<string, Promise<string>>()
+const submagicSourceCache = (g.__olySubmagicSources ??= new Map<string, Promise<string>>())
 
 // Submagic-using variants (our-v1 through our-v5) always get the compressed,
 // normalized copy uploaded to Storage -- never the raw Drive file. Cached
@@ -342,7 +356,7 @@ export async function releaseJobSource(jobId: string): Promise<void> {
   await deleteStorageKey(`${jobId}/source-compressed.mp4`)
 }
 
-const contentProfileCache = new Map<string, Promise<ContentProfile>>()
+const contentProfileCache = (g.__olyContentProfiles ??= new Map<string, Promise<ContentProfile>>())
 
 // One Gemini read of the footage per job, cached on the job row and shared by
 // every variant (see lib/video-analysis.ts + lib/VARIANTS-V2-PLAN.md). Idempotent
@@ -558,7 +572,7 @@ async function libraryMusicContextFromDb(
 // the other is a no-op. Without this, the status route used to write
 // Submagic's EXPIRING hosted URL over the permanent R2 URL, which is why
 // finished previews sometimes went black hours later.
-const activeSubmagicFinalizes = new Set<string>()
+const activeSubmagicFinalizes = (g.__olySubmagicFinalizes ??= new Set<string>())
 
 export async function finalizeSubmagicVariant(
   jobId: string,
@@ -599,10 +613,10 @@ export async function finalizeSubmagicVariant(
 // ffmpeg passes in parallel — alongside a headless-Chrome Remotion render —
 // and the machine thrashes hard enough that renders die on delayRender
 // timeouts (fonts taking 4+ minutes to "load").
-let audioPostQueue: Promise<unknown> = Promise.resolve()
 function enqueueAudioPostSteps<T>(fn: () => Promise<T>): Promise<T> {
-  const p = audioPostQueue.then(fn, fn)
-  audioPostQueue = p.catch(() => undefined)
+  const prev = g.__olyAudioQueue ?? Promise.resolve()
+  const p = prev.then(fn, fn)
+  g.__olyAudioQueue = p.catch(() => undefined)
   return p
 }
 
@@ -1098,10 +1112,10 @@ async function renderMotionGraphicsTestOnly(
 // and the compositor drops connections (ECONNRESET). So when multiple variants
 // are started together, planning/B-roll/music still run in parallel but the
 // render step itself goes through this queue, one at a time.
-let remotionRenderQueue: Promise<unknown> = Promise.resolve()
 function enqueueRemotionRender<T>(fn: () => Promise<T>): Promise<T> {
-  const p = remotionRenderQueue.then(fn, fn)
-  remotionRenderQueue = p.catch(() => undefined)
+  const prev = g.__olyRemotionQueue ?? Promise.resolve()
+  const p = prev.then(fn, fn)
+  g.__olyRemotionQueue = p.catch(() => undefined)
   return p
 }
 async function renderRemotionEdit(
@@ -1405,7 +1419,12 @@ async function renderRemotionEdit(
 
     if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, 6, STEPS, 'Adding background music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      // Through the audio queue: this render finished, but the NEXT variant's
+      // render may have just started — its Chrome must not fight three
+      // loudness-measure/mix ffmpeg passes for the same cores.
+      await enqueueAudioPostSteps(() =>
+        mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      )
     }
 
     console.log('[motion-renderer] Remotion-only edit ready')
@@ -1530,7 +1549,9 @@ async function renderSmartCinematic(
 
     if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding background music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      await enqueueAudioPostSteps(() =>
+        mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      )
     }
 
     console.log('[motion-renderer] output ready')
