@@ -65,7 +65,7 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   {
     id: 'our-v1',
     name: 'Calm & Clean',
-    description: 'Soft pacing, elegant Umi captions, gentle zooms. Your voice leads — ideal for sensitive or educational topics.',
+    description: 'Elegant Umi captions, gentle zooms, tight pacing. Your voice leads — ideal for sensitive or educational topics.',
     tool: 'submagic',
     order: 1,
     autoStart: false,

@@ -63,15 +63,17 @@ export interface ResolvedSubmagicSettings {
 // v1-v5. v6 skips Submagic entirely, so it has no spec. v4/v5 reuse the same
 // resolver for their Submagic pass (their motion-graphics layer is separate).
 export const VARIANT_SPECS: Record<string, VariantSpec> = {
-  // Calm & Clean — Umi's small elegant captions (user-picked), soft pacing.
-  // B-roll rides a tight 30-38% band by request: always substantial, with
-  // just enough headroom for the footage rating to breathe.
+  // Calm & Clean — Umi's small elegant captions (user-picked). All three
+  // Submagic variants run extra-fast silence cutting by request; the
+  // sensitivity gate still softens the pace on medical/emotional or
+  // personal footage. B-roll rides a tight 30-38% band: always substantial,
+  // with just enough headroom for the footage rating to breathe.
   'our-v1': {
     id: 'our-v1',
     name: 'Calm & Clean',
     captionLane: 'clean',
     templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
-    locked: { magicZooms: true, hookTitle: false, basePace: 'natural' },
+    locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
     adaptive: { brollCeiling: { none: 30, some: 34, rich: 38 } },
     useMusic: true,
   },
@@ -84,7 +86,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     name: 'UGC Aesthetic',
     captionLane: 'bold',
     templatePool: ['Luke', 'Beast', 'Ella'],
-    locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
+    locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
     adaptive: { brollCeiling: { none: 38, some: 38, rich: 48 } },
     useMusic: true,
   },
@@ -96,7 +98,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     name: 'Creator Bold',
     captionLane: 'bold',
     templatePool: ['Hormozi 3', 'Hormozi 1', 'Hormozi 2', 'Hormozi 4', 'Hormozi 5'],
-    locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
+    locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
     adaptive: { brollCeiling: { none: 32, some: 44, rich: 49 } },
     useMusic: true,
   },
