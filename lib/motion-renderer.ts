@@ -18,7 +18,7 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
 import { planEubankGraphics, planEubankSfxCues, type EubankGraphic } from './eubank-graphics'
@@ -513,6 +513,37 @@ async function finishVariant(
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
+// Rebuilds the library-music context for a Submagic variant from the DB —
+// the status route's finisher calls arrive without the render's in-memory
+// context, and a race winner must never produce a music-less video. Returns
+// null for variants that shouldn't get library music (no spec / music off).
+async function libraryMusicContextFromDb(
+  jobId: string,
+  variantId: string,
+): Promise<{ hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null> {
+  const spec = VARIANT_SPECS[variantId]
+  if (!spec?.useMusic) return null
+  try {
+    const db = supabaseAdmin()
+    const { data: job } = await db.from('video_jobs').select('script_id, content_profile, variants').eq('id', jobId).single()
+    if (!job) return null
+    const variant = (job.variants as { id: string; music_mode?: string }[] | null)?.find(v => v.id === variantId)
+    if (variant?.music_mode === 'off') return null
+    let hook = ''
+    let moodTag: string | null = null
+    let scriptFormat: string | undefined
+    if (job.script_id) {
+      const { data: s } = await db.from('scripts').select('hook, mood_tag, filming_plan').eq('id', job.script_id).single()
+      hook = (s?.hook as string | null) ?? ''
+      moodTag = (s?.mood_tag as string | null) ?? null
+      scriptFormat = (s?.filming_plan as { script_format?: string } | null)?.script_format
+    }
+    return { hook, moodTag, scriptFormat, profile: (job.content_profile as ContentProfile | null) ?? null, transcript: null }
+  } catch {
+    return null
+  }
+}
+
 // One finisher at a time per variant: both the background poll loop
 // (start-variant route) and the status route can notice a Submagic project
 // completing — whichever gets here first does the retrieval + DB write and
@@ -531,9 +562,10 @@ export async function finalizeSubmagicVariant(
   if (activeSubmagicFinalizes.has(key)) return
   activeSubmagicFinalizes.add(key)
   try {
+    const musicCtx = music ?? await libraryMusicContextFromDb(jobId, variantId)
     let finalUrl: string
     try {
-      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, music)
+      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx)
       console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
     } catch (e) {
       // Fall back to Submagic's own URL rather than failing the variant —
@@ -567,7 +599,19 @@ export async function retrieveAndStoreSubmagicResult(
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
 
-  // Add our own library music on top of the finished Submagic video, so v2/v3
+  // Voice polish on the dialogue BEFORE music goes under it: Auphonic
+  // denoise/level (ElevenLabs isolation as fallback) evens the voice out so
+  // the voice-aware music mix below can trust its level. Submagic's own
+  // cleaner is skipped — this file just came out of Submagic with cleanAudio
+  // already applied, and re-running it would spend another render for nothing.
+  try {
+    const cleaner = await cleanAudioInPlace(localPath, { skipSubmagic: true })
+    if (cleaner !== 'none') console.log(`[motion-renderer] post-Submagic voice polish via ${cleaner} for ${jobId}:${variantId}`)
+  } catch (e) {
+    console.warn('[motion-renderer] post-Submagic voice polish failed, keeping original audio:', (e as Error).message)
+  }
+
+  // Add our own library music on top of the finished Submagic video, so v1-v3
   // share the exact v4/v5 music system (mood match, best-part offset, ducking,
   // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
   if (music) {
@@ -700,6 +744,27 @@ async function mixTransitionSfx(videoPath: string, profile: ContentProfile | nul
 
 // ── Background music from the curated library ────────────────────────────────
 
+// Integrated loudness (LUFS) of a file's first audio stream via ebur128.
+// Returns null when unmeasurable (no audio stream, ffmpeg error) — callers
+// fall back to fixed levels rather than failing the mix.
+async function measureIntegratedLoudness(filePath: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    exec(
+      `ffmpeg -hide_banner -nostats -i "${filePath}" -map a:0 -af ebur128 -f null -`,
+      { timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
+      (err, _out, stderr) => {
+        if (err) return resolve(null)
+        // The summary block at the end holds the final integrated value; per-
+        // frame lines also print "I:" so take the LAST match.
+        const matches = String(stderr ?? '').match(/I:\s*(-?[\d.]+)\s*LUFS/g)
+        if (!matches?.length) return resolve(null)
+        const last = matches[matches.length - 1].match(/(-?[\d.]+)/)
+        resolve(last ? parseFloat(last[1]) : null)
+      }
+    )
+  })
+}
+
 // Picks a mood-matched track from the creator's own library, starts it at the
 // detected best part (chorus/drop), and mixes it under the voice: EQ-carve the
 // vocal band, light sidechain duck so the music stays present, then master the
@@ -733,23 +798,40 @@ export async function mixBackgroundMusic(
   const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
   console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
+  // VOICE-AWARE leveling: measure how loud the dialogue in THIS video actually
+  // is and place the music bed a fixed distance (18 LU) below it, instead of
+  // trusting a constant that assumed studio-level voice. The duck trigger
+  // scales with the voice too — a fixed threshold never fired on quiet takes,
+  // which is exactly when music "covers the voice". Falls back to the audited
+  // constants when measurement fails.
+  const voiceI = await measureIntegratedLoudness(videoPath)
+  const musicI = await measureIntegratedLoudness(musicPath)
+  let bedVolume = 'volume=0.13'
+  if (voiceI !== null && musicI !== null) {
+    const gainDb = Math.max(-40, Math.min(0, voiceI - 18 - musicI))
+    bedVolume = `volume=${gainDb.toFixed(1)}dB`
+    console.log(`[motion-renderer] voice ${voiceI.toFixed(1)} LUFS, music ${musicI.toFixed(1)} LUFS -> bed gain ${gainDb.toFixed(1)} dB`)
+  }
+  const duckThreshold = voiceI !== null
+    ? Math.min(0.08, Math.max(0.005, 10 ** ((voiceI - 8) / 20)))
+    : 0.035
+
   // Fade in over 1.5s at start, fade out in the last 1.5s
   const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
   const tmp = videoPath + '_mx.mp4'
 
   try {
     // loop → fade in/out → EQ-carve the vocal presence band (-5dB ~2.5kHz so
-    // music never masks speech) → quiet bed level (0.13) → DEEP, SMOOTH sidechain
-    // duck (ratio 6, slow 700ms release) so music sits well under the voice and
-    // stays down through a phrase instead of "pumping" back up in every micro-gap
-    // → master to -14 LUFS / -1.5 dBTP. Tuned down from 0.18/ratio-4/-13 after a
-    // strict audit called the music too loud and pumpy against the cleaned voice.
+    // music never masks speech) → voice-relative bed level → DEEP, SMOOTH
+    // sidechain duck (ratio 6, slow 700ms release) so music sits well under the
+    // voice and stays down through a phrase instead of "pumping" back up in
+    // every micro-gap → master to -14 LUFS / -1.5 dBTP.
     await run(
       `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
       `-filter_complex ` +
       `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
-      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.13[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.035:ratio=6:attack=15:release=700[ducked];` +
+      `equalizer=f=2500:width_type=q:w=1.4:g=-5,${bedVolume}[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=${duckThreshold.toFixed(4)}:ratio=6:attack=15:release=700[ducked];` +
       `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
@@ -1099,7 +1181,11 @@ async function renderRemotionEdit(
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
-        const graphicWindows = graphics.map(g => ({ start: g.start, duration: g.duration }))
+        // The hook is a top-band overlay — B-roll can run under it, so it
+        // never claims timeline from the cutaway planner.
+        const graphicWindows = graphics
+          .filter(g => g.kind !== 'hook')
+          .map(g => ({ start: g.start, duration: g.duration }))
         const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, graphicWindows)
         broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
         if (viral) {
@@ -1107,25 +1193,77 @@ async function renderRemotionEdit(
           // are dropped (the card carries its own headline).
           plan.pages = applyViralCoverTreatment(plan.pages, broll)
         } else {
-          // Eubank: the reference anchors captions in the UPPER third whenever
-          // full-screen B-roll owns the frame ("Top-Third Hook Captions"), and
-          // every cover carries its OWN transition — the combo rotation that
-          // keeps consecutive cutaways from repeating the same move.
+          // Eubank layout system (the "One Shot" reference): B-roll slots
+          // rotate through three treatments — full-screen cover (with its own
+          // transition from the combo rotation), the SPLIT (footage slides to
+          // the top 55%, media fills the bottom, captions ride the seam), and
+          // the translucent PANEL over the speaker. Captions elsewhere hold
+          // the chest band; only split windows move them (to the seam) and
+          // covers lift them to the top third.
           if (kit.captionStyle === 'eubank') {
-            for (const p of plan.pages) {
-              if (broll.some(b => b.layout === 'cover' && p.start < b.start + b.duration && p.end > b.start)) {
-                p.position = 'high'
-              }
-            }
+            const LAYOUTS: Array<'cover' | 'split' | 'panel'> = ['split', 'cover', 'panel', 'cover', 'split', 'panel']
             const COMBO: TransitionStyle[] = ['zoom', 'flash', 'whip', 'slide', 'blur']
             let combo = kit.variation
-            for (const b of broll) {
-              if (b.layout === 'cover') b.transition = COMBO[combo++ % COMBO.length]
+            // A single opaque-ish panel slides in on the side the face ISN'T.
+            // A centered face has no safe side — but the CAROUSEL treatment
+            // (2-3 translucent panels across the top, the reference's "bunch
+            // of B-roll" moment) reads fine over anyone, so panel beats try to
+            // become carousels first and only then fall back to covers.
+            const panelSide: 'left' | 'right' | null =
+              profile?.faceFraming === 'tight' ? null
+              : profile?.faceSide === 'left' ? 'right'
+              : profile?.faceSide === 'right' ? 'left'
+              : null
+            for (let bi = 0; bi < broll.length; bi++) {
+              const b = broll[bi]
+              if (b.layout !== 'cover') continue
+              let pick = LAYOUTS[(bi + kit.variation) % LAYOUTS.length]
+              if (pick === 'panel') {
+                const extras = await resolveExtraImages(
+                  b.query ?? 'city skyline golden hour',
+                  path.join(REMOTION_DIR, 'public', brollPrefix),
+                  brollPrefix,
+                  `carousel-${bi}`,
+                  2,
+                  kit.variation,
+                ).catch(() => [] as string[])
+                if (extras.length >= 1) {
+                  b.extraFiles = extras
+                  b.from = 'top'
+                  if (b.duration < 2.8) b.duration = 3.0
+                } else if (panelSide) {
+                  b.from = panelSide
+                } else {
+                  pick = 'cover'
+                }
+              }
+              b.layout = pick
+              if (pick === 'cover') b.transition = COMBO[combo++ % COMBO.length]
+              // Splits hold longer than a flash cover — give them room.
+              if (pick === 'split' && b.duration < 3) b.duration = Math.min(3.4, b.duration + 0.8)
+            }
+            // The split is the signature layout move — with 2+ cutaways, at
+            // least one must be a split even when the rotation misses it.
+            if (broll.length >= 1 && !broll.some(b => b.layout === 'split')) {
+              const last = [...broll].reverse().find(b => b.layout === 'cover') ?? broll[broll.length - 1]
+              last.layout = 'split'
+              delete last.transition
+              if (last.duration < 3) last.duration = Math.min(3.4, last.duration + 0.8)
+            }
+            for (const p of plan.pages) {
+              if (broll.some(b => b.layout === 'split' && p.start < b.start + b.duration && p.end > b.start)) {
+                p.position = 'mid'   // the seam
+              } else if (broll.some(b => b.layout === 'cover' && p.start < b.start + b.duration && p.end > b.start)) {
+                p.position = 'high'
+              }
             }
           }
           avoidCaptionCollisions(plan.pages, broll)
         }
-        broll.forEach(b => { if (b.file) staged.push(path.join(REMOTION_DIR, 'public', b.file)) })
+        broll.forEach(b => {
+          if (b.file) staged.push(path.join(REMOTION_DIR, 'public', b.file))
+          for (const f of b.extraFiles ?? []) staged.push(path.join(REMOTION_DIR, 'public', f))
+        })
       } catch (e) {
         console.warn('[motion-renderer] B-roll pass failed, rendering without it:', (e as Error).message)
       }
@@ -1221,6 +1359,8 @@ async function renderRemotionEdit(
       grade: kit.grade,
       hookSpotlight: kit.hookSpotlight,
       handheld: kit.handheld,
+      splits: broll.filter(b => b.layout === 'split').map(b => ({ start: b.start, end: b.start + b.duration })),
+      faceArea: profile?.faceArea,
       sfx,
     }))
     staged.push(propsPath)

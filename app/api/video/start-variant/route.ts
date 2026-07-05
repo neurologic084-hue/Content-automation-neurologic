@@ -193,6 +193,12 @@ export async function POST(req: NextRequest) {
       // shares one compression + upload pass.
       const videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
       let projectId: string
+      // Local-library music to mix on top AFTER Submagic finishes (v1-v3). Stays
+      // null for the autonomous aiEditTemplate + legacy paths, which keep
+      // Submagic's own in-render audio.
+      let postMusic:
+        | { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null }
+        | null = null
 
       if (preset.aiEditTemplate) {
         // Fully autonomous mode — Submagic controls everything itself, no
@@ -209,24 +215,28 @@ export async function POST(req: NextRequest) {
         // without a V2 spec.
         const spec = VARIANT_SPECS[variantId]
 
-        // v1-v3 music comes from SUBMAGIC's own library, mixed by Submagic in
-        // the render itself — never our local library. Music is locked per
-        // variant (spec.useMusic); 'off' mode disables it everywhere. The
-        // track follows the footage's actual mood (content profile first,
-        // script mood tag as fallback) and rotates per variant so v1/v2/v3
-        // don't all carry the same song.
+        // v1-v3 (the spec path) now get their music from OUR local library,
+        // mixed on top of the FINISHED Submagic video — the exact same system
+        // v4/v5 use (mood match, best-part offset, voice ducking, -13 LUFS).
+        // Submagic itself renders silent for them: no music track is sent, and
+        // mixBackgroundMusic runs in the post step (retrieveAndStoreSubmagicResult).
+        // The legacy fallback (no spec) has no ContentProfile to match a track
+        // against, so it keeps Submagic's own in-render library as before.
+        // Music is locked per variant (spec.useMusic); 'off' mode disables it.
         const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
         const wantsMusic = spec ? spec.useMusic : (variant.submagicProfile?.useMusic ?? true)
-        const pickMusicTrack = async (profile?: ContentProfile | null): Promise<string | undefined> => {
-          if (musicOff || !wantsMusic) return undefined
-          const trackId = await fetchSubmagicAudioTrack(scriptRow?.mood_tag ?? null, { profile, variantId }) ?? undefined
-          if (!trackId) console.warn('[start-variant] no Submagic audio track available — rendering without music')
-          return trackId
+        const useLibraryMusic = !!spec && !musicOff && wantsMusic
+
+        // Only the legacy (no-spec) path still pulls a Submagic-hosted track.
+        const musicTrackId = !musicOff && wantsMusic && !useLibraryMusic
+          ? await fetchSubmagicAudioTrack(scriptRow?.mood_tag ?? null) ?? undefined
+          : undefined
+        if (!musicOff && wantsMusic && !useLibraryMusic && !musicTrackId) {
+          console.warn('[start-variant] no Submagic audio track available — rendering without music')
         }
 
         if (spec) {
           const profile = await ensureContentProfile(jobId, job.source_drive_url as string)
-          const musicTrackId = await pickMusicTrack(profile)
           // A custom theme (exact caption style) needs no template resolution at
           // all. Otherwise a pinned template pool (e.g. the UGC Aesthetic Umi
           // family) wins over the fuzzy caption-lane classifier, with lane
@@ -252,6 +262,19 @@ export async function POST(req: NextRequest) {
             removeSilencePace: resolved.removeSilencePace,
             musicTrackId,
           })
+
+          // Music comes from our library AFTER Submagic returns — same matcher
+          // inputs as v4/v5: Gemini's footage profile + null transcript, with a
+          // per-variant shortlist pick. Runs in retrieveAndStoreSubmagicResult.
+          if (useLibraryMusic) {
+            postMusic = {
+              hook: scriptRow?.hook ?? '',
+              moodTag: scriptRow?.mood_tag ?? null,
+              scriptFormat,
+              profile,
+              transcript: null,
+            }
+          }
         } else {
           // Legacy fallback: written script + directive, no video understanding.
           let actualTranscript = job.transcript as string | null
@@ -267,7 +290,6 @@ export async function POST(req: NextRequest) {
             }
           }
 
-          const musicTrackId = await pickMusicTrack()
           const smart = await deriveSmartSubmagicSettings(
             {
               hook: scriptRow?.hook ?? '',
@@ -298,9 +320,10 @@ export async function POST(req: NextRequest) {
         progress: { step: 2, total: 2, label: 'Processing in Submagic' },
       })
 
-      // Fire-and-forget poll loop. Music is Submagic's own (mixed in-render),
-      // so the post step only retrieves the file and lays transition SFX.
-      pollSubmagicUntilDone(jobId, variantId, projectId, null).catch(e =>
+      // Fire-and-forget poll loop. For v1-v3 the post step also mixes our library
+      // music onto the finished file (postMusic); the aiEditTemplate/legacy paths
+      // pass null and keep Submagic's own audio.
+      pollSubmagicUntilDone(jobId, variantId, projectId, postMusic).catch(e =>
         console.error('[start-variant] Submagic poll error:', e)
       )
 

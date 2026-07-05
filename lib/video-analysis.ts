@@ -43,6 +43,9 @@ export interface ContentProfile {
   // Where the face sits VERTICALLY in frame — graphics/overlay planners place
   // text in the opposite band so it never covers the speaker.
   faceArea: 'upper' | 'middle' | 'lower'
+  // Where the face sits HORIZONTALLY — overlay panels go to the opposite side,
+  // and a dead-center face means there is no safe side at all.
+  faceSide: 'left' | 'center' | 'right'
 }
 
 // Neutral, middle-of-the-road profile. Returned when Gemini is unavailable or
@@ -63,6 +66,7 @@ export const FALLBACK_PROFILE: ContentProfile = {
   captionMood: 'clean',
   faceFraming: 'wide',
   faceArea: 'middle',
+  faceSide: 'center',
 }
 
 // Google's JSON-schema subset (uppercase type names + enum). gemini.ts passes
@@ -83,11 +87,12 @@ const CONTENT_PROFILE_SCHEMA: Record<string, unknown> = {
     captionMood: { type: 'STRING', enum: ['calm', 'clean', 'energetic'] },
     faceFraming: { type: 'STRING', enum: ['tight', 'wide'] },
     faceArea: { type: 'STRING', enum: ['upper', 'middle', 'lower'] },
+    faceSide: { type: 'STRING', enum: ['left', 'center', 'right'] },
   },
   required: [
     'speechPace', 'energy', 'sensitivity', 'format', 'brollableRichness',
     'hasNumbers', 'keyNumbers', 'emphasisPhrases', 'hookStrength',
-    'suggestedHookTitle', 'captionMood', 'faceFraming', 'faceArea',
+    'suggestedHookTitle', 'captionMood', 'faceFraming', 'faceArea', 'faceSide',
   ],
 }
 
@@ -114,6 +119,8 @@ const PROMPT = [
   '  it), "wide" if there is room around them.',
   '- faceArea: which vertical band of the frame the face mostly occupies ("upper" /',
   '  "middle" / "lower") — used to place graphics in the emptiest band.',
+  '- faceSide: which horizontal third the face mostly occupies ("left" / "center" /',
+  '  "right") — overlays go on the opposite side. Most centered talking heads are "center".',
 ].join('\n')
 
 // Guessed mime types are fine — Gemini only needs the family right.
@@ -162,6 +169,7 @@ function normalizeProfile(raw: Partial<ContentProfile>): ContentProfile {
     captionMood: oneOf(raw.captionMood, ['calm', 'clean', 'energetic'], f.captionMood),
     faceFraming: oneOf(raw.faceFraming, ['tight', 'wide'], f.faceFraming),
     faceArea: oneOf(raw.faceArea, ['upper', 'middle', 'lower'], f.faceArea),
+    faceSide: oneOf(raw.faceSide, ['left', 'center', 'right'], f.faceSide),
   }
 }
 

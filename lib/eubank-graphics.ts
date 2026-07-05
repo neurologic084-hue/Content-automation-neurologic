@@ -26,7 +26,7 @@ import type { SfxCue } from './render-kit'
 export interface EubankGraphic {
   start: number      // edited-timeline seconds
   duration: number
-  kind: 'notes' | 'equation' | 'crossout' | 'cards' | 'keyword'
+  kind: 'notes' | 'equation' | 'crossout' | 'cards' | 'keyword' | 'hook'
   placement?: 'top' | 'bottom'
   title?: string             // notes header / quote text / cards verdict / method name
   items?: string[]           // notes items / cards labels
@@ -89,7 +89,10 @@ export async function planEubankGraphics(
   const graphics: EubankGraphic[] = []
   if (duration < 10 || editedWords.length < 15) return graphics
 
-  const placement: 'top' | 'bottom' = profile?.faceArea === 'upper' ? 'bottom' : 'top'
+  // Text graphics go in the band the face ISN'T. Talking-head faces live in
+  // the upper/middle bands almost always, so 'bottom' is the default — 'top'
+  // only when the face genuinely sits low in frame.
+  const placement: 'top' | 'bottom' = profile?.faceArea === 'lower' ? 'top' : 'bottom'
   const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
 
   let raw: {
@@ -178,7 +181,7 @@ export async function planEubankGraphics(
           spokenTimes.push(nextKnown !== undefined ? (prev + nextKnown) / 2 : prev + 0.9)
         }
         const start = Number(Math.max(0, spokenTimes[0] - 0.5).toFixed(2))
-        const dur = Math.min(13, spokenTimes[spokenTimes.length - 1] - start + 2.2)
+        const dur = Math.min(10, spokenTimes[spokenTimes.length - 1] - start + 2.2)
         if (fits(start, dur)) {
           graphics.push({
             start, duration: dur, kind: 'notes', placement,
@@ -309,9 +312,21 @@ export async function planEubankGraphics(
     }
   }
 
+  // Opening hook (the reference's first seconds): title word doubled with the
+  // cyan italic echo over falling dust. Deterministic — from the profile hook,
+  // so the video always opens with a moment. Doesn't count against the cap.
+  const hookWord = (profile?.suggestedHookTitle ?? '')
+    .split(/\s+/).filter(Boolean).slice(0, 3).join(' ')
+  const hook: EubankGraphic | null = hookWord
+    ? { start: 0.25, duration: 2.8, kind: 'hook', title: clipWords(hookWord, 22) }
+    : null
+
   // Density cap: at most 7 graphics per render, earliest first — the reference
   // averages a device every ~7s, but never two in the same breath.
-  const sorted = graphics.sort((a, b) => a.start - b.start).slice(0, 7)
+  const sorted = [
+    ...(hook ? [hook] : []),
+    ...graphics.sort((a, b) => a.start - b.start).slice(0, 7),
+  ]
   console.log(`[eubank-graphics] ${sorted.length} graphic(s): ${sorted.map(g => `${g.kind}@${g.start.toFixed(1)}s`).join(', ') || 'none'}`)
   return sorted
 }
@@ -357,6 +372,9 @@ export function planEubankSfxCues(graphics: EubankGraphic[]): SfxCue[] {
     } else if (g.kind === 'keyword') {
       // Quote panel: airy whoosh in; the words carry themselves.
       cues.push({ start: Math.max(0, g.start - 0.08), peakAt: g.start + 0.12, category: 'whoosh-airy', volume: 0.24 })
+    } else if (g.kind === 'hook') {
+      // Opening title: a soft sparkle pop as the doubled word lands.
+      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.15, category: 'flash-pop', volume: 0.2 })
     }
   }
   return cues
