@@ -206,8 +206,14 @@ async function submagicCleanInPlace(videoPath: string): Promise<void> {
 
 export type AudioCleaner = 'submagic' | 'auphonic' | 'elevenlabs' | 'none'
 
-export async function cleanAudioInPlace(videoPath: string): Promise<AudioCleaner> {
-  if (process.env.SUBMAGIC_API_KEY) {
+export async function cleanAudioInPlace(
+  videoPath: string,
+  opts: { skipSubmagic?: boolean } = {},
+): Promise<AudioCleaner> {
+  // skipSubmagic: for files that JUST came out of a Submagic render with
+  // cleanAudio already applied — re-running their cleaner would spend another
+  // render for nothing, so go straight to Auphonic.
+  if (!opts.skipSubmagic && process.env.SUBMAGIC_API_KEY) {
     try {
       await submagicCleanInPlace(videoPath)
       console.log('[audio-clean] Submagic: cleaned dialogue remuxed over original picture')

@@ -1,6 +1,7 @@
 import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
 import type { CaptionLane } from './variant-specs'
+import type { ContentProfile } from './video-analysis'
 
 // Per-render background-music choice, picked in the video studio and stored on
 // each variant. 'smart' = pick a mood-matched track from the curated library
@@ -64,19 +65,21 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   {
     id: 'our-v1',
     name: 'Calm & Clean',
-    description: 'Soft pacing, minimal captions, gentle zooms. Your voice leads — ideal for sensitive or educational topics.',
+    description: 'Soft pacing, elegant Umi captions, gentle zooms. Your voice leads — ideal for sensitive or educational topics.',
     tool: 'submagic',
     order: 1,
     autoStart: false,
     submagicProfile: {
       directive: 'Calm, gentle energy suited to sensitive, personal, medical, or educational content. Keep B-roll light and unobtrusive, pacing natural (never extra-fast), zooms subtle. The voice should feel like it is carrying the video alone.',
-      useMusic: false,
+      // Kept in sync with VARIANT_SPECS['our-v1'].useMusic (the authoritative
+      // flag when a V2 spec exists): music on, but always a gentle track.
+      useMusic: true,
     },
   },
   {
     id: 'our-v2',
     name: 'Aesthetic',
-    description: 'Elegant captions with italic accents, punch-in zooms, and B-roll cutaways. Music sits softly under the voice.',
+    description: 'Bold Luke captions, punch-in zooms, and B-roll cutaways. Music sits softly under the voice.',
     tool: 'submagic',
     order: 2,
     autoStart: false,
@@ -87,8 +90,8 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
   },
   {
     id: 'our-v3',
-    name: 'Creator Classic',
-    description: 'Clean minimal captions, multi-angle punch-ins, and B-roll that follows what you say — with music underneath.',
+    name: 'Creator Bold',
+    description: 'Bold Hormozi-style captions, punchy pacing, rich B-roll coverage, and music underneath.',
     tool: 'submagic',
     order: 3,
     autoStart: false,
@@ -511,7 +514,31 @@ const MOOD_TAG_TO_CATEGORY: Record<string, string> = {
   'story-driven': 'emotional',
 }
 
-export async function fetchSubmagicAudioTrack(moodTag?: string | null): Promise<string | null> {
+// What the footage ACTUALLY is (Gemini watched it) beats the script's planned
+// mood tag — delivery often lands differently than the script intended.
+function categoryFromProfile(profile: ContentProfile): string {
+  if (profile.sensitivity === 'medical_emotional' || profile.sensitivity === 'personal') return 'emotional'
+  if (profile.energy === 'high') return 'motivation'
+  if (profile.energy === 'low') return 'calm'
+  switch (profile.format) {
+    case 'story': return 'emotional'
+    case 'sales': return 'motivation'
+    default: return 'curious'
+  }
+}
+
+// Each Submagic variant starts at a different position in the category's track
+// list, so v1/v2/v3 rendered from the same footage don't all carry the same song.
+const VARIANT_TRACK_OFFSET: Record<string, number> = { 'our-v1': 0, 'our-v2': 1, 'our-v3': 2 }
+
+// Categories soft enough for Calm & Clean — v1 never gets a hype track, no
+// matter how energetic the footage reads.
+const GENTLE_CATEGORIES = new Set(['calm', 'curious', 'emotional', 'sad'])
+
+export async function fetchSubmagicAudioTrack(
+  moodTag?: string | null,
+  opts: { profile?: ContentProfile | null; variantId?: string } = {},
+): Promise<string | null> {
   try {
     const res = await fetch('https://api.submagic.co/v1/user-media?type=AUDIO&limit=50', {
       headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
@@ -528,15 +555,28 @@ export async function fetchSubmagicAudioTrack(moodTag?: string | null): Promise<
 
     const nameOf = (item: (typeof items)[number]) => item.fileName ?? item.name ?? item.title ?? ''
 
-    // Mood-matched pick first, calm as the safe default, then anything.
-    const category = MOOD_TAG_TO_CATEGORY[moodTag ?? ''] ?? 'calm'
-    const wanted = SUBMAGIC_TRACKS_BY_MOOD[category] ?? []
-    const calmSet = SUBMAGIC_TRACKS_BY_MOOD.calm
+    let category = opts.profile
+      ? categoryFromProfile(opts.profile)
+      : MOOD_TAG_TO_CATEGORY[moodTag ?? ''] ?? 'calm'
+    if (opts.variantId === 'our-v1' && !GENTLE_CATEGORIES.has(category)) category = 'calm'
+
+    // Walk the category's tracks in variant-rotated order, calm as the safe
+    // fallback pool, then anything the account has.
+    const offset = VARIANT_TRACK_OFFSET[opts.variantId ?? ''] ?? 0
+    const rotated = (names: string[]): string[] =>
+      names.length ? names.slice(offset % names.length).concat(names.slice(0, offset % names.length)) : names
+    const findByNames = (names: string[]) => {
+      for (const n of names) {
+        const hit = items.find(i => nameOf(i) === n)
+        if (hit) return hit
+      }
+      return undefined
+    }
     const picked =
-      items.find(i => wanted.includes(nameOf(i)))
-      ?? items.find(i => calmSet.includes(nameOf(i)))
+      findByNames(rotated(SUBMAGIC_TRACKS_BY_MOOD[category] ?? []))
+      ?? findByNames(rotated(SUBMAGIC_TRACKS_BY_MOOD.calm))
       ?? items[0]
-    if (picked?.id) console.log(`[submagic] selected audio media: ${nameOf(picked) || picked.id} (mood: ${moodTag ?? 'none'} -> ${category})`)
+    if (picked?.id) console.log(`[submagic] selected audio media: ${nameOf(picked) || picked.id} (${opts.profile ? 'profile' : 'moodTag'}: ${moodTag ?? 'none'} -> ${category}, variant: ${opts.variantId ?? 'n/a'})`)
     return picked?.id ?? null
   } catch {
     return null

@@ -173,6 +173,13 @@ const COVER_IN: Record<TransitionStyle, SfxCategory[]> = {
   zoom: ['whoosh-deep', 'whoosh'],   // zoom-through: deep sub-heavy rush
   whip: ['whoosh-snap', 'whoosh'],   // whip-pan: the tightest whip swish
 }
+// The transition-matched whoosh family, shared with the Submagic variants'
+// cut-SFX pass (motion-renderer's mixTransitionSfx) so both pipelines speak
+// the same sound grammar.
+export function transitionSoundFamily(style: TransitionStyle): SfxCategory[] {
+  return COVER_IN[style]
+}
+
 const COVER_OUT: SfxCategory[] = ['whoosh-airy', 'whoosh']
 const CARD_IN: SfxCategory[] = ['shutter', 'shutter-soft', 'pop']
 const EMPHASIS: SfxCategory[] = ['pop', 'flash-pop']

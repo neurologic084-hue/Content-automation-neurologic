@@ -15,7 +15,7 @@ import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planInsetSegments } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
-import { buildRenderKit, planSfxCues } from './render-kit'
+import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
 import { planBrollSlots, resolveBrollMedia, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
@@ -513,6 +513,46 @@ async function finishVariant(
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
+// One finisher at a time per variant: both the background poll loop
+// (start-variant route) and the status route can notice a Submagic project
+// completing — whichever gets here first does the retrieval + DB write and
+// the other is a no-op. Without this, the status route used to write
+// Submagic's EXPIRING hosted URL over the permanent R2 URL, which is why
+// finished previews sometimes went black hours later.
+const activeSubmagicFinalizes = new Set<string>()
+
+export async function finalizeSubmagicVariant(
+  jobId: string,
+  variantId: string,
+  submagicDownloadUrl: string,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
+): Promise<void> {
+  const key = `${jobId}:${variantId}`
+  if (activeSubmagicFinalizes.has(key)) return
+  activeSubmagicFinalizes.add(key)
+  try {
+    let finalUrl: string
+    try {
+      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, music)
+      console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
+    } catch (e) {
+      // Fall back to Submagic's own URL rather than failing the variant —
+      // still playable right now, just not pulled into our own storage.
+      console.warn(`[motion-renderer] could not retrieve Submagic result for ${key}, keeping their hosted URL:`, (e as Error).message)
+      finalUrl = submagicDownloadUrl
+    }
+    await patchVariant(
+      supabaseAdmin(),
+      jobId,
+      variantId,
+      { status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null },
+      { completeWhenAllDone: true },
+    )
+  } finally {
+    activeSubmagicFinalizes.delete(key)
+  }
+}
+
 // Pulls a finished Submagic render down to a local file instead of just
 // linking to Submagic's hosted URL, so the video survives even if Submagic
 // later expires or removes the file from their end.
@@ -543,7 +583,7 @@ export async function retrieveAndStoreSubmagicResult(
   // cuts are recovered from the finished file via scene detection and a whoosh
   // is peak-aligned onto each one — same sound grammar as the Remotion variants.
   try {
-    await mixTransitionSfx(localPath)
+    await mixTransitionSfx(localPath, music?.profile ?? null)
   } catch (e) {
     console.warn('[motion-renderer] transition SFX pass failed, keeping video without it:', (e as Error).message)
   }
@@ -589,7 +629,7 @@ async function detectSceneCuts(videoPath: string): Promise<number[]> {
   return times
 }
 
-async function mixTransitionSfx(videoPath: string): Promise<void> {
+async function mixTransitionSfx(videoPath: string, profile: ContentProfile | null = null): Promise<void> {
   const duration = await getVideoDuration(videoPath)
 
   // Keep cuts away from the edges and at least 1.5s apart; cap the count so a
@@ -609,29 +649,37 @@ async function mixTransitionSfx(videoPath: string): Promise<void> {
     return
   }
 
-  // Variety rule: no single sound file plays more than twice per video. Build
-  // a pool of five distinct whoosh files (two takes of two categories plus an
-  // airy one) and rotate cuts through it — 10 cuts = each file at most twice,
-  // and neighboring cuts never share a sound.
-  const POOL_DEFS: Array<[SfxCategory, number]> = [
-    ['whoosh', 0], ['whoosh', 1], ['whoosh-snap', 0], ['whoosh-snap', 1], ['whoosh-airy', 0],
-  ]
+  // Same sound grammar as the Remotion variants (lib/render-kit.ts): pick a
+  // transition identity for THIS render — weighted by the footage's energy —
+  // and draw the whoosh pool from that style's sound family. A fresh style
+  // pick plus a shuffled pool means two renders of the same script never
+  // sound alike, and round-robin keeps neighboring cuts on different files.
+  const style = pickTransitionSmart(profile)
+  const categories = [...new Set<SfxCategory>([...transitionSoundFamily(style), 'whoosh-airy'])]
   const pool: Array<{ path: string; peakSec: number }> = []
-  for (const [cat, take] of POOL_DEFS) {
-    const p = await getSfx(cat, take)
-    if (!p) continue
-    try { pool.push({ path: p, peakSec: (await probeSfxTiming(p)).peakSec }) } catch { /* skip */ }
+  for (const cat of categories) {
+    for (const take of [0, 1]) {
+      const p = await getSfx(cat, take)
+      if (!p || pool.some(e => e.path === p)) continue
+      try { pool.push({ path: p, peakSec: (await probeSfxTiming(p)).peakSec }) } catch { /* skip */ }
+    }
   }
   if (!pool.length) return
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[pool[i], pool[j]] = [pool[j], pool[i]]
+  }
 
   // Back-time each cue so its file's PEAK lands on the cut, then delay-mix all
   // instances over the existing audio. Each cut gets its own input (the files
   // are ~1s mp3s, so repeated inputs are cheap and keep the filter graph
-  // simple). normalize=0 keeps the voice/music level.
+  // simple). normalize=0 keeps the voice/music level. A light per-cue volume
+  // wobble stops even a repeated file from reading as a copy-paste.
   const inputs = cuts.map((_, i) => `-i "${pool[i % pool.length].path}"`).join(' ')
   const chains = cuts.map((t, i) => {
     const ms = Math.max(0, Math.round((t - pool[i % pool.length].peakSec) * 1000))
-    return `[${i + 1}:a]adelay=${ms}|${ms},volume=0.35[s${i}]`
+    const vol = (0.3 + Math.random() * 0.08).toFixed(2)
+    return `[${i + 1}:a]adelay=${ms}|${ms},volume=${vol}[s${i}]`
   }).join(';')
   const mixIn = cuts.map((_, i) => `[s${i}]`).join('')
   const tmp = videoPath + '_sfx.mp4'
@@ -644,7 +692,7 @@ async function mixTransitionSfx(videoPath: string): Promise<void> {
   )
   if (fs.existsSync(tmp) && fs.statSync(tmp).size > 1000) {
     fs.renameSync(tmp, videoPath)
-    console.log(`[motion-renderer] transition SFX on ${cuts.length} cut${cuts.length === 1 ? '' : 's'} (${cuts.map(t => t.toFixed(1)).join(', ')}s)`)
+    console.log(`[motion-renderer] transition SFX on ${cuts.length} cut${cuts.length === 1 ? '' : 's'}, style=${style} (${cuts.map(t => t.toFixed(1)).join(', ')}s)`)
   } else {
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
   }

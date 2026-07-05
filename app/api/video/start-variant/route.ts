@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
+import { startSingleVariant, finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   pickPremiumTemplates,
@@ -44,25 +44,18 @@ async function pollSubmagicUntilDone(
     const result = await pollSubmagicJob(projectId).catch(() => null)
     if (!result || result.status === 'processing') continue
 
-    let finalUrl: string | null = result.downloadUrl
     if (result.status === 'ready' && result.downloadUrl) {
-      try {
-        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, result.downloadUrl, music)
-        console.log(`[start-variant] Submagic result retrieved into Olympus storage for ${jobId}:${variantId}`)
-      } catch (e) {
-        console.warn(`[start-variant] could not retrieve Submagic result, keeping their hosted URL:`, (e as Error).message)
-        // Fall back to Submagic's own URL rather than failing the variant —
-        // still playable, just not pulled into our own storage this time.
-      }
+      // Single canonical finisher (shared with the status route): retrieval,
+      // SFX/frame post-steps, R2 upload, and the ready write all live there.
+      await finalizeSubmagicVariant(jobId, variantId, result.downloadUrl, music)
+      return
     }
 
     await patchVariant(
       db,
       jobId,
       variantId,
-      result.status === 'ready'
-        ? { status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null }
-        : { status: 'failed', error: result.error ?? 'Submagic failed', progress: null },
+      { status: 'failed', error: result.error ?? 'Submagic failed', progress: null },
       { completeWhenAllDone: true },
     )
     return
@@ -73,7 +66,7 @@ async function pollSubmagicUntilDone(
 }
 
 export async function POST(req: NextRequest) {
-  const { jobId, variantId } = await req.json()
+  const { jobId, variantId, force } = await req.json()
 
   if (!jobId || !variantId) {
     return NextResponse.json({ error: 'Missing jobId or variantId.' }, { status: 400 })
@@ -159,10 +152,16 @@ export async function POST(req: NextRequest) {
     const preset = variant.submagicPreset ?? {}
     const lockKey = `${jobId}:${variantId}`
 
-    if (variant.external_id && (variant.status === 'processing' || variant.status === 'ready')) {
+    // A finished variant normally reuses its Submagic project (no double
+    // spend on accidental re-clicks). force=true (the studio's retry button
+    // on a ready variant) skips the reuse and submits a fresh render —
+    // a variant that's actively processing is never force-restarted.
+    const forceRegenerate = force === true && variant.status === 'ready'
+    if (!forceRegenerate && variant.external_id && (variant.status === 'processing' || variant.status === 'ready')) {
       console.log(`[start-variant] Reusing existing Submagic project for ${lockKey}: ${variant.external_id}`)
       return NextResponse.json({ ok: true, reused: true, projectId: variant.external_id })
     }
+    if (forceRegenerate) console.log(`[start-variant] force regeneration for ${lockKey}`)
 
     if (activeSubmagicStarts.has(lockKey)) {
       console.log(`[start-variant] Suppressed duplicate Submagic start for ${lockKey}`)
@@ -175,7 +174,9 @@ export async function POST(req: NextRequest) {
         supabase,
         jobId,
         variantId,
-        { status: 'processing', preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } },
+        // external_id cleared so the status poller never polls a stale
+        // Submagic project between this reset and the new projectId write.
+        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } },
         { jobStatus: 'processing' },
       )
 
@@ -210,18 +211,22 @@ export async function POST(req: NextRequest) {
 
         // v1-v3 music comes from SUBMAGIC's own library, mixed by Submagic in
         // the render itself — never our local library. Music is locked per
-        // variant (spec.useMusic); 'off' mode disables it everywhere.
+        // variant (spec.useMusic); 'off' mode disables it everywhere. The
+        // track follows the footage's actual mood (content profile first,
+        // script mood tag as fallback) and rotates per variant so v1/v2/v3
+        // don't all carry the same song.
         const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
         const wantsMusic = spec ? spec.useMusic : (variant.submagicProfile?.useMusic ?? true)
-        const musicTrackId = !musicOff && wantsMusic
-          ? await fetchSubmagicAudioTrack(scriptRow?.mood_tag ?? null) ?? undefined
-          : undefined
-        if (!musicOff && wantsMusic && !musicTrackId) {
-          console.warn('[start-variant] no Submagic audio track available — rendering without music')
+        const pickMusicTrack = async (profile?: ContentProfile | null): Promise<string | undefined> => {
+          if (musicOff || !wantsMusic) return undefined
+          const trackId = await fetchSubmagicAudioTrack(scriptRow?.mood_tag ?? null, { profile, variantId }) ?? undefined
+          if (!trackId) console.warn('[start-variant] no Submagic audio track available — rendering without music')
+          return trackId
         }
 
         if (spec) {
           const profile = await ensureContentProfile(jobId, job.source_drive_url as string)
+          const musicTrackId = await pickMusicTrack(profile)
           // A custom theme (exact caption style) needs no template resolution at
           // all. Otherwise a pinned template pool (e.g. the UGC Aesthetic Umi
           // family) wins over the fuzzy caption-lane classifier, with lane
@@ -262,6 +267,7 @@ export async function POST(req: NextRequest) {
             }
           }
 
+          const musicTrackId = await pickMusicTrack()
           const smart = await deriveSmartSubmagicSettings(
             {
               hook: scriptRow?.hook ?? '',

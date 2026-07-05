@@ -147,7 +147,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     router.push(`/publish?jobId=${jobId}&variantId=${variantId}`)
   }
 
-  async function handleStartVariant(variantId: string) {
+  async function handleStartVariant(variantId: string, force = false) {
     if (!jobId) return
     const preparingSource = variants.length > 0 && variants.every(v => v.status === 'pending') && variants.some(v => v.progress)
     if (preparingSource) return
@@ -156,7 +156,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
       await fetch('/api/video/start-variant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, variantId }),
+        body: JSON.stringify({ jobId, variantId, force }),
       })
       setStatus('processing')
       startPolling(jobId)
@@ -389,7 +389,9 @@ export function VideoStudio({ script, existingJobId }: Props) {
               const isReady = v?.status === 'ready'
               const isSelected = selectedVariant === v?.id
               const isStarting = v?.id ? startingVariants.has(v.id) : false
-              const canRetryReady = v?.tool !== 'submagic'
+              // Submagic variants included: retry sends force=true so the
+              // backend submits a fresh project instead of reusing the old one.
+              const canRetryReady = true
               const toolMeta = v ? TOOL_COLOR[v.tool] : null
 
               return (
@@ -500,7 +502,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                         </button>
                         {canRetryReady && (
                           <button
-                            onClick={() => v?.id && handleStartVariant(v.id)}
+                            onClick={() => v?.id && handleStartVariant(v.id, true)}
                             disabled={isStarting}
                             className="h-9 w-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all disabled:opacity-40"
                             style={{ background: '#F4F3F0', color: '#71717A' }}

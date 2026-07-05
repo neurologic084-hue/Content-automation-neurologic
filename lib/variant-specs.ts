@@ -63,38 +63,41 @@ export interface ResolvedSubmagicSettings {
 // v1-v5. v6 skips Submagic entirely, so it has no spec. v4/v5 reuse the same
 // resolver for their Submagic pass (their motion-graphics layer is separate).
 export const VARIANT_SPECS: Record<string, VariantSpec> = {
+  // Calm & Clean — Umi's small elegant captions (user-picked), soft pacing.
+  // B-roll rides a tight 30-38% band by request: always substantial, with
+  // just enough headroom for the footage rating to breathe.
   'our-v1': {
     id: 'our-v1',
     name: 'Calm & Clean',
-    captionLane: 'minimal',
+    captionLane: 'clean',
+    templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'natural' },
-    adaptive: { brollCeiling: { none: 10, some: 22, rich: 30 } },
+    adaptive: { brollCeiling: { none: 30, some: 34, rich: 38 } },
     useMusic: true,
   },
-  // UGC Aesthetic — modeled on the reference edit ("Multiple Shots, Voice
-  // Isolation, No Music, Photo B Roll"): small elegant captions with italic
-  // accent words (Umi family) and punch-in zooms standing in for multi-angle
-  // cuts. B-roll comes from Submagic's stock magicBrolls (plan-included, no AI
-  // credits). Music mixes in post from our library, quiet under the voice.
+  // UGC Aesthetic — Luke captions (user-picked; Beast/Ella as backup) with
+  // punch-in zooms standing in for multi-angle cuts. B-roll comes from
+  // Submagic's stock magicBrolls (plan-included, no AI credits). The plain-
+  // footage tier is removed by request: 38% floor even on static footage.
   'our-v2': {
     id: 'our-v2',
     name: 'UGC Aesthetic',
-    captionLane: 'clean',
-    templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
+    captionLane: 'bold',
+    templatePool: ['Luke', 'Beast', 'Ella'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 25, some: 38, rich: 48 } },
+    adaptive: { brollCeiling: { none: 38, some: 38, rich: 48 } },
     useMusic: true,
   },
-  // Creator Classic — simple clean captions from the built-in template pool
-  // (no custom theme), punch-in zooms standing in for multi-angle cuts, stock
-  // cutaways at the same coverage, music on.
+  // Creator Bold — Hormozi 3 captions (user-picked, other Hormozis as
+  // backup), punchy pacing. B-roll ceilings run high on request — every tier
+  // generous, never ≥50%.
   'our-v3': {
     id: 'our-v3',
-    name: 'Creator Classic',
-    captionLane: 'clean',
-    templatePool: ['Gstaad', 'Malta', 'Nema', 'Umi'],
+    name: 'Creator Bold',
+    captionLane: 'bold',
+    templatePool: ['Hormozi 3', 'Hormozi 1', 'Hormozi 2', 'Hormozi 4', 'Hormozi 5'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 25, some: 38, rich: 48 } },
+    adaptive: { brollCeiling: { none: 32, some: 44, rich: 49 } },
     useMusic: true,
   },
   // v4/v5: the Remotion overlay carries the visual interest, so their Submagic
