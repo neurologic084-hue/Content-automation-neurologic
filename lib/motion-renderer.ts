@@ -593,6 +593,19 @@ export async function finalizeSubmagicVariant(
   }
 }
 
+// The ffmpeg-heavy finishing steps (voice polish, loudness measurement, music
+// mix, scene detection, SFX) run ONE variant at a time. Without this, several
+// Submagic variants finishing together each spin up multiple full-decode
+// ffmpeg passes in parallel — alongside a headless-Chrome Remotion render —
+// and the machine thrashes hard enough that renders die on delayRender
+// timeouts (fonts taking 4+ minutes to "load").
+let audioPostQueue: Promise<unknown> = Promise.resolve()
+function enqueueAudioPostSteps<T>(fn: () => Promise<T>): Promise<T> {
+  const p = audioPostQueue.then(fn, fn)
+  audioPostQueue = p.catch(() => undefined)
+  return p
+}
+
 // Pulls a finished Submagic render down to a local file instead of just
 // linking to Submagic's hosted URL, so the video survives even if Submagic
 // later expires or removes the file from their end.
@@ -607,38 +620,40 @@ export async function retrieveAndStoreSubmagicResult(
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
 
-  // Voice polish on the dialogue BEFORE music goes under it: Auphonic
-  // denoise/level (ElevenLabs isolation as fallback) evens the voice out so
-  // the voice-aware music mix below can trust its level. Submagic's own
-  // cleaner is skipped — this file just came out of Submagic with cleanAudio
-  // already applied, and re-running it would spend another render for nothing.
-  try {
-    const cleaner = await cleanAudioInPlace(localPath, { skipSubmagic: true })
-    if (cleaner !== 'none') console.log(`[motion-renderer] post-Submagic voice polish via ${cleaner} for ${jobId}:${variantId}`)
-  } catch (e) {
-    console.warn('[motion-renderer] post-Submagic voice polish failed, keeping original audio:', (e as Error).message)
-  }
-
-  // Add our own library music on top of the finished Submagic video, so v1-v3
-  // share the exact v4/v5 music system (mood match, best-part offset, ducking,
-  // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
-  if (music) {
+  await enqueueAudioPostSteps(async () => {
+    // Voice polish on the dialogue BEFORE music goes under it: Auphonic
+    // denoise/level (ElevenLabs isolation as fallback) evens the voice out so
+    // the voice-aware music mix below can trust its level. Submagic's own
+    // cleaner is skipped — this file just came out of Submagic with cleanAudio
+    // already applied, and re-running it would spend another render for nothing.
     try {
-      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart', music.profile ?? null, music.transcript ?? null, variantId)
-      console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
+      const cleaner = await cleanAudioInPlace(localPath, { skipSubmagic: true })
+      if (cleaner !== 'none') console.log(`[motion-renderer] post-Submagic voice polish via ${cleaner} for ${jobId}:${variantId}`)
     } catch (e) {
-      console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
+      console.warn('[motion-renderer] post-Submagic voice polish failed, keeping original audio:', (e as Error).message)
     }
-  }
 
-  // Transition whooshes on Submagic's own cuts. Submagic has no SFX API, so the
-  // cuts are recovered from the finished file via scene detection and a whoosh
-  // is peak-aligned onto each one — same sound grammar as the Remotion variants.
-  try {
-    await mixTransitionSfx(localPath, music?.profile ?? null)
-  } catch (e) {
-    console.warn('[motion-renderer] transition SFX pass failed, keeping video without it:', (e as Error).message)
-  }
+    // Add our own library music on top of the finished Submagic video, so v1-v3
+    // share the exact v4/v5 music system (mood match, best-part offset, ducking,
+    // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
+    if (music) {
+      try {
+        await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart', music.profile ?? null, music.transcript ?? null, variantId)
+        console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
+      } catch (e) {
+        console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
+      }
+    }
+
+    // Transition whooshes on Submagic's own cuts. Submagic has no SFX API, so the
+    // cuts are recovered from the finished file via scene detection and a whoosh
+    // is peak-aligned onto each one — same sound grammar as the Remotion variants.
+    try {
+      await mixTransitionSfx(localPath, music?.profile ?? null)
+    } catch (e) {
+      console.warn('[motion-renderer] transition SFX pass failed, keeping video without it:', (e as Error).message)
+    }
+  })
 
   // Push finished Submagic result to R2 finished/ folder so it's always
   // available for publishing even if local disk is wiped.
@@ -1377,11 +1392,12 @@ async function renderRemotionEdit(
     await enqueueRemotionRender(async () => {
       await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
       await run(
-        // 240s delayRender timeout: on a busy machine (user apps + dev server),
-        // headless-Chrome startup + font loads can crawl past 120s and fail
-        // renders that would otherwise succeed.
+        // 360s delayRender timeout: on a busy machine (user apps + dev server +
+        // the serialized audio post-steps), headless-Chrome startup + font
+        // loads can crawl far past 120s and fail renders that would otherwise
+        // succeed.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=240000`,
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=360000`,
         900_000,
       )
     })
