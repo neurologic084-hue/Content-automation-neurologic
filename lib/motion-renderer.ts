@@ -433,8 +433,16 @@ export async function prepareJobSource(
   // first Submagic variant to start -- so the job survives a server restart
   // without needing to re-pull from Drive, and every variant just reuses this
   // cached upload (getSubmagicSourceUrl) instead of re-uploading.
+  // BEST-EFFORT: the local file is what variants actually need to start.
+  // If the network flakes here (e.g. TLS "bad record mac" mid-upload), the
+  // job must NOT fail — Submagic variants re-attempt this exact upload when
+  // they start (the source-URL cache drops rejected promises).
   await onProgress?.(97, 'Backing up footage to storage')
-  await getSubmagicSourceUrl(jobId, sourceUrl)
+  try {
+    await getSubmagicSourceUrl(jobId, sourceUrl)
+  } catch (e) {
+    console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
+  }
   // Analyze the footage once now, while the compressed file is warm on disk, so
   // the content profile is ready before any variant starts. Best-effort — never
   // block source prep on it.

@@ -123,7 +123,7 @@ export async function POST(req: NextRequest) {
         ...v,
         status: 'failed' as const,
         progress: null,
-        error: `Could not download footage from Google Drive: ${(e as Error).message}`,
+        error: `Could not prepare footage: ${(e as Error).message}`,
       }))
 
       await supabase
