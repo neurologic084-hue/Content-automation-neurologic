@@ -527,7 +527,7 @@ export async function retrieveAndStoreSubmagicResult(
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
 
-  // Add our own library music on top of the finished Submagic video, so v2/v3
+  // Add our own library music on top of the finished Submagic video, so v1-v3
   // share the exact v4/v5 music system (mood match, best-part offset, ducking,
   // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
   if (music) {
