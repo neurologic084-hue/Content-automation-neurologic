@@ -17,6 +17,7 @@ import { patchVariant } from './job-lock'
 import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
+import { trimResidualSilences } from './post-trim'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -657,6 +658,15 @@ export async function retrieveAndStoreSubmagicResult(
       if (cleaner !== 'none') console.log(`[motion-renderer] post-Submagic voice polish via ${cleaner} for ${jobId}:${variantId}`)
     } catch (e) {
       console.warn('[motion-renderer] post-Submagic voice polish failed, keeping original audio:', (e as Error).message)
+    }
+
+    // Backstop cut: Submagic's extra-fast silence removal still leaves the
+    // occasional long gap. Trim any residual dead air from the finished file
+    // BEFORE music/SFX so both land on the final timeline. Best-effort.
+    try {
+      await trimResidualSilences(localPath)
+    } catch (e) {
+      console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
     }
 
     // Add our own library music on top of the finished Submagic video, so v1-v3
