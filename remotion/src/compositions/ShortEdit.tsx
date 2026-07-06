@@ -67,6 +67,11 @@ const KOE_DISPLAY = 'EditKoeDisplay'
 loadFont({ family: KOE_DISPLAY, url: staticFile('fonts/Fraunces-Variable.ttf'), weight: '100 900' }).catch(() => undefined)
 const KOE_DISPLAY_VARIATION = "'opsz' 144, 'SOFT' 40, 'WONK' 0, 'wght' 640"
 const KOE_NUMERAL_VARIATION = "'opsz' 144, 'SOFT' 60, 'WONK' 0, 'wght' 560"
+// Koe collage connector text: Space Grotesk — a geometric grotesque with real
+// character (distinctive a/g/numerals), so the small sans line never reads as
+// a generic Arial default. Kept separate from the viral sans so only v6 moves.
+const KOE_CONNECTOR = 'EditKoeConnector'
+loadFont({ family: KOE_CONNECTOR, url: staticFile('fonts/SpaceGrotesk-Variable.ttf'), weight: '300 700' }).catch(() => undefined)
 // Julie (v4) accent: heavy italic geometric sans for the two-tone keywords.
 const JULIE_ACCENT = 'EditJulieAccent'
 loadFont({ family: JULIE_ACCENT, url: staticFile('fonts/Poppins-BoldItalic.ttf') }).catch(() => undefined)
@@ -1321,11 +1326,12 @@ const KoeCollageGroup: React.FC<{
     Math.max(0, Math.round((page.start - groupStart) * fps))
 
   const smallStyle: React.CSSProperties = {
-    fontFamily: VIRAL_SANS,
+    fontFamily: KOE_CONNECTOR,
+    fontWeight: 500,
     fontSize: widthPx * 0.05,
     color: 'rgba(255, 255, 255, 0.96)',
     textShadow: '0 2px 10px rgba(0, 0, 0, 0.6)',
-    letterSpacing: '0.012em',
+    letterSpacing: '0.006em',
     lineHeight: 1.25,
   }
 
