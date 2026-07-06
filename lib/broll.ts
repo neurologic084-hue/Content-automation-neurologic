@@ -439,9 +439,20 @@ export function applyViralCoverTreatment(pages: CaptionPage[], broll: BrollItem[
   return pages.filter(page => {
     const over = covers.find(b => page.start < b.start + b.duration && page.end > b.start)
     if (!over) return true
-    if (over.design) return false
+    const coverEnd = over.start + over.duration
+    // Overlap FRACTION, not overlap-at-all: a page that merely grazes the
+    // cover's edge spends most of its life over the raw footage, where the
+    // centered poster treatment sits straight across the speaker's face. Those
+    // pages keep their face-safe band; only pages truly inside the cover go big.
+    const overlap = Math.min(page.end, coverEnd) - Math.max(page.start, over.start)
+    const frac = overlap / Math.max(page.end - page.start, 0.01)
+    if (over.design) return frac < 0.6
+    if (frac < 0.6) return true
     page.big = true
     page.position = 'mid'
+    // And never let the poster page outlive its cover — once the footage is
+    // back, 'mid' IS the face band.
+    page.end = Math.min(page.end, coverEnd + 0.15)
     return true
   })
 }

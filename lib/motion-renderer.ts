@@ -13,7 +13,7 @@ import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
-import { buildEditPlan, planViralCaptions, planEubankCaptions, planInsetSegments } from './edit-plan'
+import { buildEditPlan, planViralCaptions, planEubankCaptions, planInsetSegments, type CaptionPage } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
@@ -1184,6 +1184,9 @@ async function renderRemotionEdit(
           for (let i = page.accentRange[0]; i <= page.accentRange[1]; i++) page.words[i].accent = true
         }
         // Strip the viral-only styling fields so the page renders as julie.
+        // Behind-hook pages were parked at 'mid' for the matte look — julie
+        // never stages a matte, so re-home them off the face first.
+        if (page.behind) page.position = profile?.faceArea === 'lower' ? 'high' : 'low'
         delete page.accentRange
         delete page.accentFont
         delete page.accentColor
@@ -1287,10 +1290,17 @@ async function renderRemotionEdit(
               delete last.transition
               if (last.duration < 3) last.duration = Math.min(3.4, last.duration + 0.8)
             }
+            // Overlap FRACTION, not overlap-at-all: a page that merely grazes
+            // a split/cover window would otherwise carry the seam/top position
+            // into the raw-footage beats around it — where 'mid' is the face.
+            const overlapFrac = (p: { start: number; end: number }, b: { start: number; duration: number }) => {
+              const overlap = Math.min(p.end, b.start + b.duration) - Math.max(p.start, b.start)
+              return overlap / Math.max(p.end - p.start, 0.01)
+            }
             for (const p of plan.pages) {
-              if (broll.some(b => b.layout === 'split' && p.start < b.start + b.duration && p.end > b.start)) {
+              if (broll.some(b => b.layout === 'split' && overlapFrac(p, b) >= 0.6)) {
                 p.position = 'mid'   // the seam
-              } else if (broll.some(b => b.layout === 'cover' && p.start < b.start + b.duration && p.end > b.start)) {
+              } else if (broll.some(b => b.layout === 'cover' && overlapFrac(p, b) >= 0.6)) {
                 p.position = 'high'
               }
             }
@@ -1317,10 +1327,14 @@ async function renderRemotionEdit(
       )
     }
 
-    // Inset-card beats (template-gated): center any caption that plays during
-    // one so it sits on the shrunken footage, not the margin.
+    // Inset-card beats (template-gated): keep captions on the shrunken footage,
+    // but NOT at 'mid' — the card scales the frame toward center, which maps a
+    // centered face to exactly the mid band (44-60%), so centering the caption
+    // put it straight across the (shrunken) face. The face-safe home band lands
+    // on the card's chest area instead, still reading as "on the footage".
     const insetTimes: Array<{ start: number; end: number }> = []
     if (kit.insets) {
+      const insetHome: CaptionPage['position'] = profile?.faceArea === 'lower' ? 'high' : 'low'
       planInsetSegments(plan.segments, broll, plan.editedDuration, kit.variation)
       let offset = 0
       for (const seg of plan.segments) {
@@ -1329,7 +1343,7 @@ async function renderRemotionEdit(
         if (seg.frame !== 'inset') continue
         insetTimes.push({ start: segStart, end: segStart + seg.duration })
         for (const p of plan.pages) {
-          if (p.start < segStart + seg.duration && p.end > segStart && !p.big) p.position = 'mid'
+          if (p.start < segStart + seg.duration && p.end > segStart && !p.big) p.position = insetHome
         }
       }
     }
@@ -1354,6 +1368,17 @@ async function renderRemotionEdit(
         name: `${variantId}-${jobId.slice(0, 8)}-matte`,
       })
       if (matte) staged.push(path.join(REMOTION_DIR, 'public', matte.file))
+    }
+
+    // A 'behind' page only works while the matte actually plays — without one
+    // (staging is best-effort, and some templates never gate it in) or past
+    // its end, ShortEdit keeps the page ON TOP, where its forced 'mid' sits
+    // straight across the face. Re-home those pages to the face-safe band.
+    for (const p of plan.pages) {
+      if (p.behind && (!matte || p.start >= matte.durationSec)) {
+        delete p.behind
+        p.position = profile?.faceArea === 'lower' ? 'high' : 'low'
+      }
     }
 
     // Event-driven audio: plan the cues (motion whooshes, texture clicks, the
