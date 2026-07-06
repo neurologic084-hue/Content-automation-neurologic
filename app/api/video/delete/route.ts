@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { deleteJobStorage, deleteStoragePrefixes } from '@/lib/storage'
+import { rendersDir } from '@/lib/paths'
 
 /** Deletes a video job along with its stored files (R2 + local renders dir).
  *  Replaces the client-side row delete, which left every uploaded video
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    fs.rmSync(path.join(process.cwd(), 'public', 'renders', jobId), { recursive: true, force: true })
+    fs.rmSync(rendersDir(jobId), { recursive: true, force: true })
   } catch { /* best-effort */ }
 
   return NextResponse.json({ ok: true })

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant, finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
+import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
+import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
 import {
   deriveSmartSubmagicSettings,
   pickPremiumTemplates,
@@ -103,6 +104,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, reused: true })
     }
 
+    // Instant UI feedback; the task patches again on start (harmless repeat).
     await patchVariant(
       supabase,
       jobId,
@@ -111,39 +113,9 @@ export async function POST(req: NextRequest) {
       { jobStatus: 'processing' },
     )
 
-    const { data: scriptRow } = await supabase
-      .from('scripts')
-      .select('hook, cta, mood_tag, filming_plan')
-      .eq('id', job.script_id)
-      .single()
-
-    const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
-
-    // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
-    // so they read as a real side-by-side comparison rather than two random picks.
-    // our-v6 never touches Submagic (Remotion-only edit), so it needs no template.
-    let submagicTemplateName: string | undefined
-    if (!variant.motionGraphicsTestOnly && !variant.remotionEdit) {
-      const [tplA, tplB] = await pickPremiumTemplates()
-      submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
-    }
-
-    startSingleVariant(jobId, variantId, job.source_drive_url, {
-      hook: scriptRow?.hook ?? '',
-      cta: scriptRow?.cta ?? '',
-      nativeCaptions: variant.nativeCaptions as boolean | undefined,
-      moodTag: scriptRow?.mood_tag ?? null,
-      scriptFormat,
-      motionGraphicsTestOnly: variant.motionGraphicsTestOnly as boolean | undefined,
-      remotionEdit: variant.remotionEdit as boolean | undefined,
-      captionTestOnly: variant.captionTestOnly as boolean | undefined,
-      motionGraphics: variant.motionGraphics as boolean | undefined,
-      motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
-      submagicTemplateName,
-      submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
-      submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
-      musicMode: variant.music_mode as MusicMode | undefined,
-    })
+    // The whole render (option building included) is a pipeline task —
+    // in-process here on a long-lived server, in a Sandbox VM on Vercel.
+    await dispatchPipelineTask({ task: 'render-variant', jobId, variantId })
 
     return NextResponse.json({ ok: true })
   }

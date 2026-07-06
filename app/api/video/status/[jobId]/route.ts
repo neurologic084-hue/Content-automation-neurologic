@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { pollSubmagicJob, VARIANT_DEFINITIONS } from '@/lib/video-pipeline'
 import type { VideoVariant } from '@/lib/video-pipeline'
-import { releaseJobSource, finalizeSubmagicVariant } from '@/lib/motion-renderer'
+import { releaseJobSource } from '@/lib/motion-renderer'
+import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
+import { rendersDir } from '@/lib/paths'
 import fs from 'fs'
 import path from 'path'
 
@@ -59,7 +61,7 @@ export async function GET(
     if (v.status === 'ready' && isSubmagicHostedUrl(v.download_url) && !healAttempted.has(key)) {
       healAttempted.add(key)
       console.log(`[video-status] ready variant ${key} still on Submagic's URL — re-pulling into storage`)
-      finalizeSubmagicVariant(jobId, v.id, v.download_url!).catch((e) =>
+      dispatchPipelineTask({ task: 'finalize-submagic', jobId, variantId: v.id, downloadUrl: v.download_url! }).catch((e) =>
         console.warn(`[video-status] heal failed for ${key}:`, (e as Error).message)
       )
     }
@@ -81,10 +83,10 @@ export async function GET(
   // Recovery: if a locally-rendered variant is still showing "processing" but
   // the output file exists on disk, the DB missed the markVariant write (race condition).
   // Trust the file and heal the DB state here.
-  const rendersDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const jobRendersDir = rendersDir(jobId)
   for (const v of variants) {
     if (v.status === 'processing' && !v.tool) {
-      const localFile = path.join(rendersDir, `${v.id}.mp4`)
+      const localFile = path.join(jobRendersDir, `${v.id}.mp4`)
       if (fs.existsSync(localFile)) {
         v.status = 'ready'
         v.download_url = `/renders/${jobId}/${v.id}.mp4`
@@ -111,12 +113,19 @@ export async function GET(
 
       if (poll.status === 'ready' && poll.downloadUrl) {
         // Never write Submagic's expiring URL as the final state — hand off to
-        // the canonical finisher (retrieval, SFX/frame, R2 upload, ready
-        // write). If the background poll loop is already on it, this is a
-        // no-op. The variant stays "processing" until the real URL lands.
-        finalizeSubmagicVariant(jobId, target.id, poll.downloadUrl).catch((e) =>
-          console.warn(`[video-status] finalize failed for ${jobId}:${target.id}:`, (e as Error).message)
-        )
+        // the canonical finisher (retrieval, SFX, R2 upload, ready write).
+        // The 'Finalizing' progress label is the poll-storm guard: status is
+        // polled every few seconds and must not launch a finisher each time
+        // (on Vercel each launch would be a whole Sandbox VM). The in-process
+        // lock inside finalizeSubmagicVariant stays as the second layer.
+        const FINALIZING_LABEL = 'Finalizing the edit'
+        if (target.progress?.label !== FINALIZING_LABEL) {
+          target.progress = { step: 2, total: 2, label: FINALIZING_LABEL }
+          variantsChanged = true
+          dispatchPipelineTask({ task: 'finalize-submagic', jobId, variantId: target.id, downloadUrl: poll.downloadUrl }).catch((e) =>
+            console.warn(`[video-status] finalize failed for ${jobId}:${target.id}:`, (e as Error).message)
+          )
+        }
       } else if (poll.status === 'failed') {
         target.status = 'failed'
         target.error = poll.error

@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/server'
 import { publishPost } from '@/lib/blotato'
 import { PLATFORM_CAPS } from '@/lib/caption-platforms'
 import { uploadToStorage } from '@/lib/storage'
+import { rendersDir } from '@/lib/paths'
 
 /** If the URL is a local /renders/... path, upload it to R2 Storage
  *  and return the public URL. Otherwise return as-is. */
@@ -23,7 +24,7 @@ async function resolveMediaUrl(url: string): Promise<string> {
   if (!jobId || !fileName || jobId.startsWith('.') || fileName.startsWith('.')) return url
   if (!SAFE_SEGMENT.test(jobId) || !SAFE_SEGMENT.test(fileName)) return url
 
-  const localPath = path.join(process.cwd(), 'public', 'renders', jobId, fileName)
+  const localPath = path.join(rendersDir(jobId), fileName)
 
   if (!fs.existsSync(localPath)) {
     // Local file is gone (server restart, disk cleanup, etc.).

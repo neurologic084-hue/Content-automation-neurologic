@@ -6,13 +6,15 @@ import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
+import type { VideoVariant } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { getLibraryMusic } from './music-library'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
+import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planInsetSegments, type CaptionPage } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
@@ -331,7 +333,17 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   if (cached) return cached
 
   const promise = (async () => {
-    const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+    // A previous run may have already uploaded the compressed source — reuse
+    // that URL directly instead of downloading + re-uploading ~50MB. Matters
+    // most on Vercel, where this runs inside a request handler.
+    if (process.env.R2_PUBLIC_URL) {
+      const existingUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-compressed.mp4`
+      try {
+        const head = await fetch(existingUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+        if (head.ok) return existingUrl
+      } catch { /* not there or unreachable — fall through to the full path */ }
+    }
+    const outDir = rendersDir(jobId)
     const compressedPath = await getLocalCompressedSource(jobId, rawSourceUrl, outDir)
     return uploadToStorage(compressedPath, 'source-compressed.mp4', jobId)
   })()
@@ -389,7 +401,7 @@ export async function ensureContentProfile(jobId: string, sourceUrl: string): Pr
     if (cachedProfile) return cachedProfile
 
     try {
-      const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+      const outDir = rendersDir(jobId)
       const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
 
       // Transcribe once if we don't have it yet, from the LOCAL compressed file
@@ -441,7 +453,7 @@ export async function prepareJobSource(
   sourceUrl: string,
   onProgress?: ProgressCallback,
 ): Promise<{ localPath: string }> {
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const outDir = rendersDir(jobId)
   const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir, onProgress)
   // Back the compressed copy up to R2 right away rather than waiting for the
   // first Submagic variant to start -- so the job survives a server restart
@@ -520,7 +532,7 @@ async function finishVariant(
     // R2 failed — copy the file into public/renders/ so the /renders/ URL is
     // actually reachable. If this copy also fails, mark the variant failed rather
     // than storing a dead path that will ENOENT at publish time.
-    const pubDir = path.join(process.cwd(), 'public', 'renders', jobId)
+    const pubDir = rendersDir(jobId)
     const pubPath = path.join(pubDir, fileName)
     try {
       fs.mkdirSync(pubDir, { recursive: true })
@@ -629,7 +641,7 @@ export async function retrieveAndStoreSubmagicResult(
   downloadUrl: string,
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
 ): Promise<string> {
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
@@ -1586,17 +1598,17 @@ async function renderSmartCinematic(
   }
 }
 
-export function startSingleVariant(
+export async function runSingleVariant(
   jobId: string,
   variantId: string,
   sourceUrl: string,
   opts: RenderVariantOptions,
-) {
+): Promise<void> {
   const key = jobId + ':' + variantId
   if (active.has(key)) return
   active.add(key)
 
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
 
   // Caption/motion-graphics test runs skip Submagic (no round-trip), but keep
@@ -1624,10 +1636,128 @@ export function startSingleVariant(
     await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, opts)
   }
 
-  launch()
-    .catch(e => console.error('[motion-renderer] startSingleVariant fatal:', e))
-    .finally(() => {
-      clearTimeout(timeoutId)
-      active.delete(key)
-    })
+  try {
+    await launch()
+  } catch (e) {
+    console.error('[motion-renderer] runSingleVariant fatal:', e)
+  } finally {
+    clearTimeout(timeoutId)
+    active.delete(key)
+  }
+}
+
+// Fire-and-forget wrapper for long-lived servers (local dev, VPS). On Vercel,
+// dispatchPipelineTask('render-variant') runs the awaited version inside a
+// Sandbox instead — background work there cannot outlive the response.
+export function startSingleVariant(
+  jobId: string,
+  variantId: string,
+  sourceUrl: string,
+  opts: RenderVariantOptions,
+) {
+  void runSingleVariant(jobId, variantId, sourceUrl, opts)
+}
+
+// ── Dispatchable pipeline tasks ───────────────────────────────────────────────
+// Self-contained units of background work. On a long-lived server the routes
+// run them fire-and-forget in-process; on Vercel the worker (worker/run-task.ts)
+// runs them to completion inside a Sandbox VM. Everything they need comes from
+// the DB + env, so they work identically in both homes.
+
+// Downloads + compresses the job's footage and uploads it to R2, writing prep
+// progress onto the pending variants; marks the whole job failed if the
+// footage can't be fetched.
+export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
+  const db = supabaseAdmin()
+
+  let lastProgressWrite = 0
+  const writePrepProgress = async (percent: number, label: string) => {
+    const now = Date.now()
+    if (percent < 100 && now - lastProgressWrite < 700) return
+    lastProgressWrite = now
+    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    const currentVariants = (currentJob?.variants ?? []) as VideoVariant[]
+    const nextVariants = currentVariants.map((v) => (
+      v.status === 'pending'
+        ? { ...v, progress: { step: Math.max(1, Math.min(100, Math.round(percent))), total: 100, label } }
+        : v
+    ))
+    await db.from('video_jobs').update({ variants: nextVariants }).eq('id', jobId)
+  }
+
+  try {
+    const prepared = await prepareJobSource(jobId, sourceUrl, writePrepProgress)
+    console.log(`[motion-renderer] source prepared job=${jobId} local=${prepared.localPath}`)
+    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
+      v.status === 'pending' ? { ...v, progress: null } : v
+    ))
+    await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
+  } catch (e) {
+    console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
+    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    const failedVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => ({
+      ...v,
+      status: 'failed' as const,
+      progress: null,
+      error: `Could not prepare the footage: ${(e as Error).message}`,
+    }))
+    await db.from('video_jobs').update({ variants: failedVariants, status: 'failed' }).eq('id', jobId)
+  }
+}
+
+// Renders one edit-tool variant (v4-v6) start to finish: builds the render
+// options from the job + script the same way the start-variant route does,
+// then awaits the full pipeline.
+export async function renderEditVariantTask(jobId: string, variantId: string): Promise<void> {
+  const db = supabaseAdmin()
+
+  const { data: job } = await db.from('video_jobs').select('*').eq('id', jobId).single()
+  if (!job) throw new Error(`job ${jobId} not found`)
+
+  const stored = ((job.variants ?? []) as VideoVariant[]).find((v) => v.id === variantId)
+  const def = VARIANT_DEFINITIONS.find((v) => v.id === variantId)
+  const variant = (stored && def ? { ...stored, ...def } : stored) as (VideoVariant & Record<string, unknown>) | undefined
+  if (!variant) throw new Error(`variant ${variantId} not found on job ${jobId}`)
+
+  await patchVariant(
+    db,
+    jobId,
+    variantId,
+    { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null },
+    { jobStatus: 'processing' },
+  )
+
+  const { data: scriptRow } = await db
+    .from('scripts')
+    .select('hook, cta, mood_tag, filming_plan')
+    .eq('id', job.script_id)
+    .single()
+  const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
+
+  // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
+  // so they read as a real side-by-side comparison rather than two random picks.
+  // our-v6 never touches Submagic (Remotion-only edit), so it needs no template.
+  let submagicTemplateName: string | undefined
+  if (!variant.motionGraphicsTestOnly && !variant.remotionEdit) {
+    const [tplA, tplB] = await pickPremiumTemplates()
+    submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
+  }
+
+  await runSingleVariant(jobId, variantId, job.source_drive_url as string, {
+    hook: scriptRow?.hook ?? '',
+    cta: scriptRow?.cta ?? '',
+    nativeCaptions: variant.nativeCaptions as boolean | undefined,
+    moodTag: scriptRow?.mood_tag ?? null,
+    scriptFormat,
+    motionGraphicsTestOnly: variant.motionGraphicsTestOnly as boolean | undefined,
+    remotionEdit: variant.remotionEdit as boolean | undefined,
+    captionTestOnly: variant.captionTestOnly as boolean | undefined,
+    motionGraphics: variant.motionGraphics as boolean | undefined,
+    motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
+    submagicTemplateName,
+    submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
+    submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
+    musicMode: variant.music_mode as MusicMode | undefined,
+  })
 }
