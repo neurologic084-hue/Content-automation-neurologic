@@ -1,0 +1,10 @@
+node_modules
+remotion/node_modules
+.next
+out
+public/renders
+.git
+.env*
+npm-debug.log*
+.DS_Store
+coverage
