@@ -67,8 +67,37 @@ export interface CaptionPage {
   // Hook page rendered behind the speaker (needs the subject matte staged).
   behind?: boolean
   // Eubank (v4) horizontal variety: the reference occasionally left-aligns a
-  // caption block. Default (absent) is centered.
-  align?: 'left' | 'center'
+  // caption block. Default (absent) is centered. Koe collages also use 'right'.
+  align?: 'left' | 'center' | 'right'
+  // ── koe editorial-collage (v6) extras — absent for every other style ───────
+  // Pages sharing a koeGroup render as ONE accumulating collage: each phrase
+  // enters at its own start time and PERSISTS until the group's last page
+  // ends, then the whole collage fades together (the reference's stacked
+  // "once you / make the / money work" build).
+  koeGroup?: number
+  // Word index (absolute, inside accentRange) where the accent's dim tail
+  // starts: "make the money work" → accent [2,3], koeDimFrom=3 renders "work"
+  // as the offset translucent serif echo under "money".
+  koeDimFrom?: number
+  // This page's accent line replaces the PREVIOUS page's accent line in place
+  // (the reference's $10k → $20k → $50k blur swap) instead of stacking below.
+  koeSwap?: boolean
+  // Compact display rewrite of the accent words ("ten k" → "$10k", "three" → "3").
+  koeRewrite?: string
+  // Serif payoff hue. Money reads 'gold', big punches stay white (absent), the
+  // rest rotate through a soft cinematic palette. Absent = pure white.
+  koeColor?: 'white' | 'gold' | 'coral' | 'sky' | 'mint' | 'lilac'
+}
+
+// Koe (v6) persistent numeral motif: a huge serif digit that marks the current
+// section ("these 3 sequential sentences" → a giant "3") and holds on screen
+// across many caption pages, like the reference edit.
+export interface KoeMotif {
+  text: string
+  start: number  // edited seconds
+  end: number
+  align: 'left' | 'center' | 'right'
+  band: 'low' | 'high'
 }
 
 export interface SegmentPlan {
@@ -702,6 +731,273 @@ export async function planEubankCaptions(
   pages.forEach(page => {
     page.position = page.big ? 'mid' : home
   })
+}
+
+// ── Koe editorial-collage caption planning (v6) ───────────────────────────────
+// Modeled on "v6 Sample.mp4": small clean sans connector phrases accumulate
+// into an asymmetric collage while the payoff words land as HUGE lowercase
+// soft-serif type (Fraunces). Secondary emphasis words echo in a translucent
+// dim serif offset below; spoken numbers/money swap in place with a blur
+// crossfade; giant persistent numerals mark counted sections. An LLM makes the
+// judgement calls (which phrase is the payoff, which words go dim, section
+// numerals); the code owns grouping, positions, swaps, and all validation —
+// a failed call still yields the collage look from the profile heuristic.
+
+const KOE_MAX_GROUP_PAGES = 4
+const KOE_MAX_GROUP_WORDS = 10
+const KOE_GROUP_GAP = 1.0
+
+// Deterministic grouping: consecutive pages accumulate into one collage until
+// a real pause, the page cap, or the word cap breaks it. Pure code — the LLM
+// never controls grouping. Runs AFTER accents are known so a swap chain
+// (pure-emphasis page hard on the heels of an accented one — the $10k → $20k
+// beat) is never split across two collages by the caps.
+function assignKoeGroups(pages: CaptionPage[]): void {
+  const pureAccent = (p: CaptionPage) =>
+    !!p.accentRange && p.accentRange[0] === 0 && p.accentRange[1] === p.words.length - 1
+  const numberAccent = (p: CaptionPage) =>
+    /\d/.test(p.koeRewrite ?? (p.accentRange ? p.words.slice(p.accentRange[0], p.accentRange[1] + 1).map(w => w.t).join(' ') : ''))
+  let group = 0
+  let groupPages = 0
+  let groupWords = 0
+  pages.forEach((page, i) => {
+    if (i > 0) {
+      const prev = pages[i - 1]
+      const gap = page.start - prev.end
+      const chained = pureAccent(page) && numberAccent(page) && numberAccent(prev) && gap < 0.5
+      if (!chained && (gap > KOE_GROUP_GAP || groupPages >= KOE_MAX_GROUP_PAGES || groupWords >= KOE_MAX_GROUP_WORDS)) {
+        group++
+        groupPages = 0
+        groupWords = 0
+      }
+    }
+    page.koeGroup = group
+    groupPages++
+    groupWords += page.words.length
+  })
+}
+
+// Heuristic accent fallback: koe styles FEWER pages than viral — only clear
+// payoff tokens (profile emphasis + numbers) get the serif, everything else
+// stays as the quiet sans collage.
+function koeFallbackAccents(pages: CaptionPage[], profile: ContentProfile | null): void {
+  const accents = accentTokens(profile)
+  for (const page of pages) {
+    if (page.accentRange) continue
+    let from = -1
+    let to = -1
+    page.words.forEach((w, i) => {
+      const clean = w.t.toLowerCase().replace(/[^a-z0-9$%.]/gi, '')
+      if (accents.has(clean) || /\d/.test(clean)) {
+        if (from === -1) from = i
+        to = i
+      }
+    })
+    if (from !== -1) page.accentRange = [from, Math.min(to, from + 2)]
+  }
+}
+
+export async function planKoeCollageCaptions(
+  pages: CaptionPage[],
+  profile: ContentProfile | null,
+  variation = 0,
+): Promise<KoeMotif[]> {
+  if (!pages.length) return []
+
+  const numbered = pages
+    .map((p, i) => `${i}: ${p.words.map(w => w.t).join(' | ')}`)
+    .join('\n')
+  const motifs: KoeMotif[] = []
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      temperature: 0.2,
+      max_tokens: 3000,
+      json: true,
+      messages: [{
+        role: 'user',
+        content: [
+          'You are styling captions for a cinematic talking-head edit. Each numbered line below',
+          'is one caption page (a short spoken phrase); words are separated by " | " (word',
+          'indices start at 0).',
+          '',
+          'TASK 1 — emphasis picks. Pick pages whose ONE contiguous phrase (1-3 words) deserves',
+          'huge elegant serif emphasis: the payoff noun, number, money amount, or punch word the',
+          'sentence is really about ("give a f*ck", "$10k", "expensive", "full confidence").',
+          'Style roughly one page in two — connector-only pages ("and then", "so if you") get',
+          'no pick. ALWAYS pick pages containing numbers or money.',
+          'Optionally, when the emphasized phrase has a trailing echo word that reads better as',
+          'a quieter second line ("money work" → "work", "nervous about doing it" → "doing it"),',
+          'set "d" to the word index where that dim tail starts (must be inside the pick, never',
+          'the first word of it).',
+          'Optionally, when the emphasized words are a SPOKEN number or money amount, set "rw"',
+          'to the compact display form: "ten k" → "$10k", "twenty thousand dollars" → "$20k",',
+          '"three" → "3". Max 7 characters, digits only where possible. Spelled-out numbers',
+          'count as numbers ("these three sequential" → pick "three" with rw "3").',
+          '',
+          'TASK 2 — section numerals. When the speaker counts things ("these 3 sentences",',
+          '"the first thing", "number two", "lastly"), output up to 3 motifs: a giant numeral',
+          'that appears when the section starts and holds until the section ends.',
+          'Use "from"/"to" page indices (inclusive) and a text of max 3 characters ("3", "1", "2").',
+          'Sections usually span many pages — be generous with "to". No motifs if nothing is counted.',
+          '',
+          numbered,
+          '',
+          'Return JSON only:',
+          '{"picks":[{"p":pageIndex,"a":firstWordIndex,"b":lastWordIndex,"d":dimFromIndex,"rw":"$10k"},...],',
+          ' "motifs":[{"text":"3","from":pageIndex,"to":pageIndex},...]}',
+          '("d" and "rw" are optional per pick.)',
+        ].join('\n'),
+      }],
+    })
+    const parsed = parseJsonLoose<{
+      picks?: Array<{ p?: number; a?: number; b?: number; d?: number; rw?: string }>
+      motifs?: Array<{ text?: string; from?: number; to?: number }>
+    }>(raw)
+    let applied = 0
+    for (const pick of parsed.picks ?? []) {
+      const { p, a, b } = pick
+      if (!Number.isInteger(p) || !Number.isInteger(a) || !Number.isInteger(b)) continue
+      const page = pages[p as number]
+      if (!page) continue
+      if ((a as number) < 0 || (b as number) >= page.words.length || (b as number) < (a as number)) continue
+      if ((b as number) - (a as number) > 2) continue
+      page.accentRange = [a as number, b as number]
+      if (Number.isInteger(pick.d) && (pick.d as number) > (a as number) && (pick.d as number) <= (b as number)) {
+        page.koeDimFrom = pick.d as number
+      }
+      if (typeof pick.rw === 'string') {
+        const rw = pick.rw.trim()
+        // Rewrites exist to compact spoken numbers — anything else is the
+        // model editorializing. The rewrite must carry a digit AND the picked
+        // words must actually BE a number (digits or spelled out), or a "3"
+        // could silently replace a normal word and change the meaning.
+        const SPELLED_NUM_RE = /^(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|k|grand|percent|dollars?|bucks)$/i
+        const accentIsNumber = page.words
+          .slice(a as number, (b as number) + 1)
+          .some(w => /\d/.test(w.t) || SPELLED_NUM_RE.test(w.t.replace(/[^a-z0-9]/gi, '')))
+        if (rw.length > 0 && rw.length <= 7 && /\d/.test(rw) && accentIsNumber) page.koeRewrite = rw
+      }
+      applied++
+    }
+    // The serif payoff IS the identity — top up heuristically if the model
+    // under-delivered rather than leaving a flat sans edit.
+    if (applied < pages.length * 0.35) koeFallbackAccents(pages, profile)
+
+    for (const m of parsed.motifs ?? []) {
+      if (motifs.length >= 3) break
+      if (typeof m.text !== 'string' || !Number.isInteger(m.from) || !Number.isInteger(m.to)) continue
+      const text = m.text.trim()
+      if (!text || text.length > 3) continue
+      const from = pages[m.from as number]
+      const to = pages[m.to as number]
+      if (!from || !to || (m.to as number) < (m.from as number)) continue
+      const start = from.start
+      const end = Math.max(to.end, start + 2)
+      // Overlapping numerals fight each other — keep the earlier one.
+      if (motifs.some(x => start < x.end && end > x.start)) continue
+      motifs.push({ text, start, end, align: 'center', band: 'low' })
+    }
+  } catch (e) {
+    console.warn('[edit-plan] koe collage planning failed, using emphasis heuristic:', (e as Error).message)
+    koeFallbackAccents(pages, profile)
+  }
+
+  // Everything below is deterministic code — swaps, sizes, colors, positions.
+
+  // Digit-bearing tokens are ALWAYS payoffs, even when the model skipped them.
+  for (const page of pages) {
+    if (page.accentRange) continue
+    const i = page.words.findIndex(w => /\d/.test(w.t))
+    if (i !== -1) page.accentRange = [i, i]
+  }
+
+  // Grouping runs AFTER accents are known so swap chains stay whole.
+  assignKoeGroups(pages)
+
+  // Swap detection: a pure-emphasis NUMBER page right after another accented
+  // number page replaces it in place (the $10k → $20k → $50k beat). Digits on
+  // BOTH sides — a normal payoff word must stack, never erase its predecessor.
+  const accentText = (p: CaptionPage) =>
+    p.koeRewrite ?? (p.accentRange ? p.words.slice(p.accentRange[0], p.accentRange[1] + 1).map(w => w.t).join(' ') : '')
+  for (let i = 1; i < pages.length; i++) {
+    const page = pages[i]
+    const prev = pages[i - 1]
+    if (page.koeGroup !== prev.koeGroup) continue
+    if (!page.accentRange || !prev.accentRange) continue
+    const allAccent = page.accentRange[0] === 0 && page.accentRange[1] === page.words.length - 1
+    const numbers = /\d/.test(accentText(page)) && /\d/.test(accentText(prev))
+    if (allAccent && numbers && page.words.length <= 3 && page.start - prev.end < 0.5) page.koeSwap = true
+  }
+
+  // Punch treatment: an all-accent page opening its own group renders extra
+  // big ("give a f*ck"). Capped so the edit never turns into a shout.
+  let punches = 0
+  for (let i = 0; i < pages.length && punches < 3; i++) {
+    const page = pages[i]
+    if (!page.accentRange || page.koeSwap) continue
+    const first = i === 0 || pages[i - 1].koeGroup !== page.koeGroup
+    const allAccent = page.accentRange[0] === 0 && page.accentRange[1] === page.words.length - 1
+    if (first && allAccent && page.words.length <= 3) {
+      page.big = true
+      punches++
+    }
+  }
+
+  // Color pass. Money amounts read GOLD; big punch pages stay pure white for
+  // gravitas (the reference's "give a f*ck"); every other payoff rotates
+  // through a soft cinematic palette, with white salted in so the edit still
+  // breathes and never turns into confetti. Swap members inherit the chain
+  // head's hue so $10k → $20k → $50k never flickers tone.
+  const KOE_COLOR_ROTATION: Array<CaptionPage['koeColor'] | undefined> =
+    ['coral', undefined, 'sky', 'mint', undefined, 'lilac', undefined]
+  let colorBeat = variation
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i]
+    if (!page.accentRange) continue
+    if (page.koeSwap) {
+      page.koeColor = pages[i - 1]?.koeColor
+      continue
+    }
+    const text = page.koeRewrite ?? page.words.slice(page.accentRange[0], page.accentRange[1] + 1).map(w => w.t).join(' ')
+    if (/\$\s?\d/.test(text)) { page.koeColor = 'gold'; continue }
+    if (page.big) continue   // punch pages hold pure white
+    page.koeColor = KOE_COLOR_ROTATION[colorBeat++ % KOE_COLOR_ROTATION.length]
+  }
+
+  // Positions move per GROUP (a collage is one unit), face-aware like v4/v5:
+  // rotate only through bands the face doesn't occupy. The reference holds the
+  // chest band — 'mid' — whenever the face sits high in frame.
+  const RUN_POSITIONS: Array<CaptionPage['position']> =
+    profile?.faceFraming === 'tight'
+      ? (profile?.faceArea === 'lower' ? ['high'] : ['low'])
+      : profile?.faceArea === 'upper' ? ['mid', 'low', 'mid']
+      : profile?.faceArea === 'lower' ? ['high', 'mid', 'high']
+      : ['low', 'high', 'low']
+  // Horizontal: the collage leans AWAY from the face side; a centered face
+  // alternates left/right so consecutive collages don't stamp the same spot.
+  const RUN_ALIGNS: Array<NonNullable<CaptionPage['align']>> =
+    profile?.faceSide === 'left' ? ['right', 'center']
+    : profile?.faceSide === 'right' ? ['left', 'center']
+    : ['left', 'right', 'center']
+  for (const page of pages) {
+    const g = page.koeGroup ?? 0
+    page.position = RUN_POSITIONS[(g + variation) % RUN_POSITIONS.length]
+    page.align = RUN_ALIGNS[(g + variation) % RUN_ALIGNS.length]
+  }
+
+  // Numerals live in the band captions avoid, horizontally away from the face.
+  const motifBand: KoeMotif['band'] = profile?.faceArea === 'lower' ? 'high' : 'low'
+  const MOTIF_ALIGNS: Array<KoeMotif['align']> =
+    profile?.faceSide === 'left' ? ['right', 'center']
+    : profile?.faceSide === 'right' ? ['left', 'center']
+    : ['center', 'left', 'right']
+  motifs.forEach((m, i) => {
+    m.band = motifBand
+    m.align = MOTIF_ALIGNS[(i + variation) % MOTIF_ALIGNS.length]
+  })
+
+  return motifs
 }
 
 // Pick which talking-head segments shrink into the white inset card. The

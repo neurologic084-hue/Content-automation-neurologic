@@ -15,7 +15,7 @@ import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
 import { rendersDir } from './paths'
-import { buildEditPlan, planViralCaptions, planEubankCaptions, planInsetSegments, type CaptionPage } from './edit-plan'
+import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
@@ -1339,6 +1339,46 @@ async function renderRemotionEdit(
       )
     }
 
+    // Koe (v6) editorial-collage pass: grouping, serif payoffs, dim echoes,
+    // in-place number swaps, and section numerals — see lib/edit-plan.ts.
+    // Runs AFTER the graphics drop so collages never reference removed pages.
+    let koeMotifs: KoeMotif[] = []
+    if (kit.captionStyle === 'koe') {
+      koeMotifs = await planKoeCollageCaptions(plan.pages, profile, kit.variation)
+      // A collage moves as ONE unit — group-uniform B-roll overrides (splits
+      // pull the collage to the seam, covers lift it high, mid-band cards
+      // push it low), replacing the per-page avoidCaptionCollisions result.
+      const overlapFrac = (p: { start: number; end: number }, b: { start: number; duration: number }) => {
+        const overlap = Math.min(p.end, b.start + b.duration) - Math.max(p.start, b.start)
+        return overlap / Math.max(p.end - p.start, 0.01)
+      }
+      const groups = new Map<number, CaptionPage[]>()
+      plan.pages.forEach((p, i) => {
+        const id = p.koeGroup ?? -(i + 1)
+        const arr = groups.get(id)
+        if (arr) arr.push(p)
+        else groups.set(id, [p])
+      })
+      for (const groupPages of groups.values()) {
+        const hitsSplit = groupPages.some(p => broll.some(b => b.layout === 'split' && overlapFrac(p, b) >= 0.5))
+        const hitsCover = groupPages.some(p => broll.some(b => b.layout === 'cover' && overlapFrac(p, b) >= 0.5))
+        const hitsCard = groupPages.some(p => broll.some(b => (b.layout === 'card' || b.layout === 'panel') && overlapFrac(p, b) >= 0.4))
+        for (const p of groupPages) {
+          if (hitsSplit) p.position = 'mid'
+          else if (hitsCover) p.position = 'high'
+          else if (hitsCard && p.position === 'mid') p.position = 'low'
+        }
+      }
+      // A numeral living mostly under a text-carrying graphic would fight it.
+      koeMotifs = koeMotifs.filter(m =>
+        !graphics.some(g =>
+          TEXT_GRAPHICS.has(g.kind) &&
+          Math.min(m.end, g.start + g.duration) - Math.max(m.start, g.start) > 0.3 * (m.end - m.start)
+        )
+      )
+      console.log(`[motion-renderer] koe collage: ${groups.size} group(s), ${plan.pages.filter(p => p.accentRange).length} serif payoff(s), ${koeMotifs.length} numeral motif(s)`)
+    }
+
     // Inset-card beats (template-gated): keep captions on the shrunken footage,
     // but NOT at 'mid' — the card scales the frame toward center, which maps a
     // centered face to exactly the mid band (44-60%), so centering the caption
@@ -1435,6 +1475,7 @@ async function renderRemotionEdit(
       handheld: kit.handheld,
       splits: broll.filter(b => b.layout === 'split').map(b => ({ start: b.start, end: b.start + b.duration })),
       faceArea: profile?.faceArea,
+      koeMotifs: koeMotifs.length ? koeMotifs : undefined,
       sfx,
     }))
     staged.push(propsPath)

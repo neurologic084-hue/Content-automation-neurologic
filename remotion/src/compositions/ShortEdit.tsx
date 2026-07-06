@@ -58,6 +58,15 @@ loadFont({ family: KOE_SERIF, url: staticFile('fonts/PlayfairDisplay-ExtraBoldIt
 loadFont({ family: KOE_SANS, url: staticFile('fonts/Inter-Bold.ttf') }).catch(() => undefined)
 loadFont({ family: KOE_MONO, url: staticFile('fonts/SpaceMono-Regular.ttf') }).catch(() => undefined)
 loadFont({ family: KOE_MONO_BOLD, url: staticFile('fonts/SpaceMono-Bold.ttf') }).catch(() => undefined)
+// Koe collage captions (v6 Sample look): Fraunces variable — the soft
+// high-contrast serif with the blobby ball terminals the reference's huge
+// lowercase payoff words and giant section numerals are set in. Registered
+// across the full weight range; weight is picked per use via
+// fontVariationSettings (opsz 144 = the display cut).
+const KOE_DISPLAY = 'EditKoeDisplay'
+loadFont({ family: KOE_DISPLAY, url: staticFile('fonts/Fraunces-Variable.ttf'), weight: '100 900' }).catch(() => undefined)
+const KOE_DISPLAY_VARIATION = "'opsz' 144, 'SOFT' 40, 'WONK' 0, 'wght' 640"
+const KOE_NUMERAL_VARIATION = "'opsz' 144, 'SOFT' 60, 'WONK' 0, 'wght' 560"
 // Julie (v4) accent: heavy italic geometric sans for the two-tone keywords.
 const JULIE_ACCENT = 'EditJulieAccent'
 loadFont({ family: JULIE_ACCENT, url: staticFile('fonts/Poppins-BoldItalic.ttf') }).catch(() => undefined)
@@ -89,7 +98,23 @@ export type ShortEditPage = {
   accentColor?: 'gold' | 'copper' | 'orange' | 'purple' | 'gradient'
   big?: boolean                  // poster treatment over a cover / eubank punch page
   behind?: boolean               // hook page rendered behind the subject matte
-  align?: 'left' | 'center'      // eubank: occasional left-aligned editorial block
+  align?: 'left' | 'center' | 'right'  // eubank/koe: horizontal lean of the block
+  // ── koe editorial-collage (v6) — see lib/edit-plan.ts for full docs ─────────
+  koeGroup?: number              // pages sharing a group accumulate as one collage
+  koeDimFrom?: number            // accent word index where the dim serif echo starts
+  koeSwap?: boolean              // accent line replaces the previous one in place
+  koeRewrite?: string            // compact display form of the accent ("$10k")
+  koeColor?: 'white' | 'gold' | 'coral' | 'sky' | 'mint' | 'lilac'  // serif payoff hue
+}
+
+// Koe (v6) giant persistent section numeral ("3" while the speaker walks the
+// three sentences), planned pipeline-side.
+export type KoeMotifProp = {
+  text: string
+  start: number
+  end: number
+  align: 'left' | 'center' | 'right'
+  band: 'low' | 'high'
 }
 
 export type ShortEditBroll = {
@@ -170,6 +195,8 @@ export type ShortEditProps = {
   // Which vertical band the face occupies — the split crop keeps that band on
   // screen when the stage shrinks.
   faceArea?: 'upper' | 'middle' | 'lower'
+  // Koe (v6): giant persistent serif numerals marking counted sections.
+  koeMotifs?: KoeMotifProp[]
   // Event-driven audio cues, fully planned and peak-aligned pipeline-side
   // (lib/render-kit.ts + lib/sfx-stage.ts). durationSec is the real file
   // length so long sounds (risers) never get clipped mid-build.
@@ -1219,29 +1246,292 @@ const CreditTag: React.FC<{ credit: { name: string; title: string }; widthPx: nu
 // viral, koe, julie, and eubank have dedicated renderers.
 type CaptionStyleName = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
 
-// Koe captions: tiny bold sentence-case sans, centered just below the chest —
-// deliberately quiet so the graphics and footage carry the frame.
-const KoeCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ page, widthPx }) => {
+// ── Koe editorial-collage captions (v6) ───────────────────────────────────────
+// Modeled frame-by-frame on "v6 Sample.mp4": small clean sans connector
+// phrases accumulate into an asymmetric collage while the payoff words land as
+// HUGE lowercase Fraunces serif. Grammar:
+//   · each phrase (page) enters at its own spoken time and PERSISTS until the
+//     whole collage fades out together
+//   · serif payoffs blur-pop in (soft blur → sharp, slight settle, brightness
+//     kiss); dim serif echoes slide in translucent below ("money work")
+//   · consecutive pure-emphasis pages swap IN PLACE with a blur crossfade
+//     (the $10k → $20k → $50k beat)
+//   · a giant persistent numeral marks counted sections (KoeMotifNumeral)
+// Placement is face-aware pipeline-side (band + horizontal lean per group).
+
+// Soft, cinematic palette for the serif payoffs. Near-monochrome by default
+// (white dominates), but money reads gold and a rotating set of muted hues
+// gives the edit color without turning garish. Each hue carries a matching
+// glow so it lifts off the dark footage.
+const KOE_PALETTE: Record<string, { color: string; glow: string }> = {
+  white: { color: '#FFFFFF', glow: 'rgba(255, 255, 255, 0.18)' },
+  gold: { color: '#E9C77E', glow: 'rgba(233, 199, 126, 0.42)' },
+  coral: { color: '#F19A80', glow: 'rgba(241, 154, 128, 0.42)' },
+  sky: { color: '#93B8EC', glow: 'rgba(147, 184, 236, 0.42)' },
+  mint: { color: '#8FE0BC', glow: 'rgba(143, 224, 188, 0.42)' },
+  lilac: { color: '#C0A6F2', glow: 'rgba(192, 166, 242, 0.44)' },
+}
+
+// Adaptive serif sizing: big, editorial payoffs (~2x the old restrained set),
+// clamped so a phrase still fits the collage column on one line; genuinely
+// long phrases wrap instead of overflowing.
+function koeSerifPx(widthPx: number, text: string, big?: boolean): number {
+  const base = widthPx * (big ? 0.2 : 0.155)
+  return Math.min(base, (widthPx * 0.92) / Math.max(4, text.length * 0.5))
+}
+
+type KoeBlock = { chain: ShortEditPage[] }
+
+// One accumulating collage. `pages` all share a koeGroup; the surrounding
+// <Sequence> spans from the first phrase's start to a beat after the last
+// phrase ends, and every entrance offset is computed against that start.
+const KoeCollageGroup: React.FC<{
+  pages: ShortEditPage[]
+  groupStart: number
+  durationInFrames: number
+  widthPx: number
+}> = ({ pages, groupStart, durationInFrames, widthPx }) => {
   const frame = useCurrentFrame()
-  const opacity = interpolate(frame, [0, 2], [0, 1], { extrapolateRight: 'clamp' })
+  const { fps } = useVideoConfig()
+
+  const align = pages[0].align ?? 'left'
+  const band = pages[0].position
+  const bandStyle: React.CSSProperties =
+    band === 'low' ? { bottom: '15%' }
+    : band === 'mid' ? { top: '37%' }
+    : { top: '10%' }
+
+  // Swap chains collapse into one block that crossfades between its members.
+  const blocks: KoeBlock[] = []
+  for (const page of pages) {
+    const last = blocks[blocks.length - 1]
+    if (page.koeSwap && last && last.chain[last.chain.length - 1].accentRange) last.chain.push(page)
+    else blocks.push({ chain: [page] })
+  }
+
+  // The whole collage breathes out together at the end of the group.
+  const groupOpacity = interpolate(
+    frame,
+    [durationInFrames - 6, durationInFrames - 1],
+    [1, 0],
+    { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' },
+  )
+
+  const enterFrameOf = (page: ShortEditPage) =>
+    Math.max(0, Math.round((page.start - groupStart) * fps))
+
+  const smallStyle: React.CSSProperties = {
+    fontFamily: VIRAL_SANS,
+    fontSize: widthPx * 0.05,
+    color: 'rgba(255, 255, 255, 0.96)',
+    textShadow: '0 2px 10px rgba(0, 0, 0, 0.6)',
+    letterSpacing: '0.012em',
+    lineHeight: 1.25,
+  }
+
+  // Small sans words breathe in one by one with a tiny rise.
+  const renderSmallWords = (words: string[], startF: number) =>
+    words.map((w, i) => {
+      const at = startF + i * 2
+      const o = interpolate(frame, [at, at + 4], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+      const y = interpolate(frame, [at, at + 4], [6, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+      return (
+        <span key={i} style={{ display: 'inline-block', opacity: o, translate: `0px ${y}px`, padding: '0 0.14em' }}>
+          {w}
+        </span>
+      )
+    })
+
+  // The serif payoff line: soft blur → sharp with a settle and a brightness
+  // kiss (the reference's "expensive edit" landing).
+  const renderAccentLine = (text: string, page: ShortEditPage, startF: number, exitAtF: number | null) => {
+    const size = koeSerifPx(widthPx, text, page.big)
+    const pal = page.koeColor ? KOE_PALETTE[page.koeColor] : null
+    const o = interpolate(frame, [startF, startF + 4], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const blur = interpolate(frame, [startF, startF + 6], [9, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.quad) })
+    const scale = interpolate(frame, [startF, startF + 7], [1.07, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    const flash = interpolate(frame, [startF + 1, startF + 9], [1.28, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.quad) })
+    const y = interpolate(frame, [startF, startF + 7], [-8, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    // Swap exit: blur back out and sink as the replacement lands.
+    const exitO = exitAtF === null ? 1
+      : interpolate(frame, [exitAtF - 2, exitAtF + 2], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const exitBlur = exitAtF === null ? 0
+      : interpolate(frame, [exitAtF - 2, exitAtF + 2], [0, 8], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const exitY = exitAtF === null ? 0
+      : interpolate(frame, [exitAtF - 2, exitAtF + 2], [0, 12], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    return (
+      <div
+        style={{
+          fontFamily: KOE_DISPLAY,
+          fontVariationSettings: KOE_DISPLAY_VARIATION,
+          fontSize: size,
+          textTransform: 'lowercase',
+          letterSpacing: '-0.012em',
+          lineHeight: 1.0,
+          color: pal ? pal.color : '#FFFFFF',
+          textShadow: pal
+            ? `0 0 32px ${pal.glow}, 0 3px 16px rgba(0, 0, 0, 0.5)`
+            : '0 3px 18px rgba(0, 0, 0, 0.55)',
+          opacity: o * exitO,
+          filter: `blur(${(blur + exitBlur).toFixed(2)}px) brightness(${flash.toFixed(3)})`,
+          scale: String(scale),
+          translate: `0px ${(y + exitY).toFixed(1)}px`,
+        }}
+      >
+        {text}
+      </div>
+    )
+  }
+
+  // Dim serif echo ("work" under "money"): slides in with motion blur and
+  // settles translucent, offset toward the block's open side.
+  const renderDimLine = (text: string, size: number, startF: number) => {
+    const o = interpolate(frame, [startF, startF + 5], [0, 0.62], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const x = interpolate(frame, [startF, startF + 6], [align === 'right' ? 26 : -26, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    const blur = interpolate(frame, [startF, startF + 6], [7, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.quad) })
+    return (
+      <div
+        style={{
+          fontFamily: KOE_DISPLAY,
+          fontVariationSettings: KOE_DISPLAY_VARIATION,
+          fontSize: size * 0.74,
+          textTransform: 'lowercase',
+          letterSpacing: '-0.01em',
+          lineHeight: 1.0,
+          color: '#E7E0D4',
+          textShadow: '0 2px 12px rgba(0, 0, 0, 0.5)',
+          opacity: o,
+          filter: `blur(${blur.toFixed(2)}px)`,
+          translate: `${x.toFixed(1)}px 0px`,
+          // The echo hangs off the payoff's trailing edge, like the reference.
+          marginLeft: align === 'right' ? undefined : '16%',
+          marginRight: align === 'right' ? '16%' : undefined,
+        }}
+      >
+        {text}
+      </div>
+    )
+  }
+
+  // Asymmetric stagger: consecutive blocks indent differently so the collage
+  // reads as composed type, not a subtitle stack.
+  const indentFor = (i: number): React.CSSProperties => {
+    const steps = ['0%', '12%', '5%', '18%']
+    const inset = steps[i % steps.length]
+    if (align === 'right') return { marginRight: inset, textAlign: 'right' }
+    if (align === 'center') return { textAlign: 'center', marginLeft: i % 2 === 1 ? '8%' : '0%' }
+    return { marginLeft: inset, textAlign: 'left' }
+  }
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none', opacity: groupOpacity }}>
+      <div
+        style={{
+          position: 'absolute',
+          left: '8%',
+          width: '84%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: align === 'right' ? 'flex-end' : align === 'center' ? 'center' : 'flex-start',
+          gap: widthPx * 0.006,
+          ...bandStyle,
+        }}
+      >
+        {blocks.map((block, bi) => {
+          const first = block.chain[0]
+          const range = first.accentRange
+          const texts = first.words.map(w => w.t)
+          const enterF = enterFrameOf(first)
+
+          // Prefix sans words (before the payoff) build first.
+          const prefix = range ? texts.slice(0, range[0]) : texts
+          const accentStartF = enterF + Math.min(prefix.length, 3) * 2
+
+          // Payoff main text + optional dim echo tail.
+          let accentMain = ''
+          let dimTail = ''
+          if (range) {
+            const dimFrom = first.koeDimFrom
+            const mainTo = dimFrom !== undefined ? dimFrom - 1 : range[1]
+            accentMain = first.koeRewrite ?? texts.slice(range[0], mainTo + 1).join(' ')
+            if (dimFrom !== undefined) dimTail = texts.slice(dimFrom, range[1] + 1).join(' ')
+          }
+          const suffix = range ? texts.slice(range[1] + 1) : []
+          const suffixStartF = accentStartF + 4
+
+          return (
+            <div key={bi} style={{ ...indentFor(bi), maxWidth: '100%' }}>
+              {prefix.length ? <div style={smallStyle}>{renderSmallWords(prefix, enterF)}</div> : null}
+              {range ? (
+                block.chain.length > 1 ? (
+                  // Swap chain: members crossfade in place; the container holds
+                  // the tallest member so nothing below reflows.
+                  <div style={{ position: 'relative' }}>
+                    {block.chain.map((member, mi) => {
+                      const mRange = member.accentRange!
+                      const mTexts = member.words.map(w => w.t)
+                      const mText = member.koeRewrite ?? mTexts.slice(mRange[0], mRange[1] + 1).join(' ')
+                      const mStartF = mi === 0 ? accentStartF : enterFrameOf(member)
+                      const next = block.chain[mi + 1]
+                      const exitAtF = next ? enterFrameOf(next) : null
+                      return (
+                        <div key={mi} style={mi === 0 ? undefined : { position: 'absolute', inset: 0 }}>
+                          {renderAccentLine(mText, member, mStartF, exitAtF)}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  renderAccentLine(accentMain, first, accentStartF, null)
+                )
+              ) : null}
+              {dimTail ? renderDimLine(dimTail, koeSerifPx(widthPx, accentMain, first.big), accentStartF + 3) : null}
+              {suffix.length ? (
+                <div style={{ ...smallStyle, marginLeft: align === 'right' ? undefined : '22%', marginRight: align === 'right' ? '22%' : undefined }}>
+                  {renderSmallWords(suffix, suffixStartF)}
+                </div>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// Giant persistent Fraunces numeral marking a counted section — blur-pops in,
+// then just HOLDS while caption collages come and go around it.
+const KoeMotifNumeral: React.FC<{ m: KoeMotifProp; durationInFrames: number; widthPx: number }> = ({ m, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const o = interpolate(frame, [0, 6, durationInFrames - 7, durationInFrames - 1], [0, 0.97, 0.97, 0], {
+    extrapolateLeft: 'clamp', extrapolateRight: 'clamp',
+  })
+  const blur = interpolate(frame, [0, 8], [12, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.quad) })
+  const scale = interpolate(frame, [0, 9], [1.14, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+  const horizontal: React.CSSProperties =
+    m.align === 'left' ? { left: '10%', textAlign: 'left' }
+    : m.align === 'right' ? { right: '10%', textAlign: 'right' }
+    : { left: '0%', width: '100%', textAlign: 'center' }
+  const vertical: React.CSSProperties = m.band === 'high' ? { top: '8%' } : { bottom: '9%' }
   return (
     <AbsoluteFill style={{ pointerEvents: 'none' }}>
       <div
         style={{
           position: 'absolute',
-          left: '10%',
-          width: '80%',
-          bottom: '31%',
-          textAlign: 'center',
-          opacity,
-          fontFamily: KOE_SANS,
-          fontSize: widthPx * 0.036,
+          ...horizontal,
+          ...vertical,
+          fontFamily: KOE_DISPLAY,
+          fontVariationSettings: KOE_NUMERAL_VARIATION,
+          fontSize: widthPx * 0.21,
+          lineHeight: 0.9,
           color: '#FFFFFF',
-          textShadow: '0 2px 10px rgba(0, 0, 0, 0.65)',
-          letterSpacing: '0.005em',
+          textShadow: '0 4px 26px rgba(0, 0, 0, 0.5)',
+          opacity: o,
+          filter: `blur(${blur.toFixed(2)}px)`,
+          scale: String(scale),
         }}
       >
-        {page.words.map(w => w.t).join(' ')}
+        {m.text}
       </div>
     </AbsoluteFill>
   )
@@ -2267,7 +2557,8 @@ const CaptionPage: React.FC<{ page: ShortEditPage; widthPx: number; style: Capti
   const frame = useCurrentFrame()
 
   if (style === 'viral') return <ViralCaptionPage page={page} widthPx={widthPx} />
-  if (style === 'koe') return <KoeCaptionPage page={page} widthPx={widthPx} />
+  // 'koe' never reaches this dispatch — its pages render as collage GROUPS
+  // (KoeCollageGroup) straight from the main composition.
   if (style === 'julie') return <JulieCaptionPage page={page} widthPx={widthPx} />
   if (style === 'eubank') return <EubankCaptionPage page={page} widthPx={widthPx} />
 
@@ -2349,6 +2640,7 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
   handheld,
   splits = [],
   faceArea,
+  koeMotifs = [],
   sfx = [],
   width = 1080,
 }) => {
@@ -2372,6 +2664,37 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
   // Without a staged matte the behind flag is meaningless — keep those pages on top.
   const behindPages = viral && matte ? pages.filter(p => p.behind && p.start < matte.durationSec) : []
   const topPages = pages.filter(p => !behindPages.includes(p))
+
+  // Koe (v6): pages sharing a koeGroup render as ONE accumulating collage.
+  // Pages without a group (planner fallback) become singleton collages, so the
+  // identity holds even when the planning pass never ran.
+  const koeCaption = captionStyle === 'koe'
+  type KoeGroup = { pages: ShortEditPage[]; start: number; end: number }
+  const koeGroups: KoeGroup[] = []
+  if (koeCaption) {
+    const byId = new Map<number, ShortEditPage[]>()
+    let synth = -1
+    for (const p of topPages) {
+      const id = p.koeGroup ?? synth--
+      const arr = byId.get(id)
+      if (arr) arr.push(p)
+      else byId.set(id, [p])
+    }
+    for (const groupPages of byId.values()) {
+      koeGroups.push({
+        pages: groupPages,
+        start: groupPages[0].start,
+        end: groupPages[groupPages.length - 1].end,
+      })
+    }
+    koeGroups.sort((a, b) => a.start - b.start)
+    // Hold each finished collage a beat before it breathes out — but never
+    // into the next collage's entrance.
+    koeGroups.forEach((g, i) => {
+      const next = koeGroups[i + 1]
+      g.end = next ? Math.min(g.end + 0.35, next.start - 0.02) : g.end + 0.35
+    })
+  }
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -2456,15 +2779,37 @@ export const ShortEdit: React.FC<ShortEditProps> = ({
         </Sequence>
       ))}
 
-      {topPages.map((page, i) => {
-        const from = Math.round(page.start * fps)
-        const durationInFrames = Math.max(2, Math.round((page.end - page.start) * fps))
+      {/* Koe numerals sit UNDER the caption collages — a section marker the
+          phrases float over, exactly like the reference. */}
+      {koeCaption ? koeMotifs.map((m, i) => {
+        const from = Math.round(m.start * fps)
+        const durationInFrames = Math.max(6, Math.round((m.end - m.start) * fps))
         return (
-          <Sequence key={`cap-${i}`} from={from} durationInFrames={durationInFrames}>
-            <CaptionPage page={page} widthPx={width} style={captionStyle} />
+          <Sequence key={`koemotif-${i}`} from={from} durationInFrames={durationInFrames}>
+            <KoeMotifNumeral m={m} durationInFrames={durationInFrames} widthPx={width} />
           </Sequence>
         )
-      })}
+      }) : null}
+
+      {koeCaption
+        ? koeGroups.map((g, i) => {
+            const from = Math.round(g.start * fps)
+            const durationInFrames = Math.max(4, Math.round((g.end - g.start) * fps))
+            return (
+              <Sequence key={`koegrp-${i}`} from={from} durationInFrames={durationInFrames}>
+                <KoeCollageGroup pages={g.pages} groupStart={g.start} durationInFrames={durationInFrames} widthPx={width} />
+              </Sequence>
+            )
+          })
+        : topPages.map((page, i) => {
+            const from = Math.round(page.start * fps)
+            const durationInFrames = Math.max(2, Math.round((page.end - page.start) * fps))
+            return (
+              <Sequence key={`cap-${i}`} from={from} durationInFrames={durationInFrames}>
+                <CaptionPage page={page} widthPx={width} style={captionStyle} />
+              </Sequence>
+            )
+          })}
 
       {/* Grain LAST — over footage, B-roll, and type alike, so every layer
           shares one photographic surface instead of reading as composited. */}
