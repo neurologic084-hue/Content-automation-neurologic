@@ -76,7 +76,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
   function startPolling(id: string) {
     if (pollRef.current) clearInterval(pollRef.current)
-    pollRef.current = setInterval(() => pollStatus(id), 2500)
+    // 4s: fast enough that progress feels live, light enough that the server
+    // isn't hammering Submagic's poll API (and on Vercel, each tick is a
+    // billed function call).
+    pollRef.current = setInterval(() => pollStatus(id), 4000)
     pollStatus(id)
   }
 
@@ -407,13 +410,16 @@ export function VideoStudio({ script, existingJobId }: Props) {
                   {isReady && v?.preview_url && !v.preview_url.startsWith('placeholder') ? (
                     <div className="w-full rounded-xl mb-3 overflow-hidden bg-black" style={{ height: 240 }}>
                       <video
-                        src={v.preview_url}
-                        autoPlay
+                        // #t=0.1 makes the browser show a real frame from just
+                        // past the start as the poster (frame 0 is sometimes
+                        // black on Submagic renders). preload="metadata" +
+                        // no autoplay: the page fetches kilobytes per card
+                        // instead of streaming six ~50MB videos at once.
+                        src={`${v.preview_url}#t=0.1`}
                         muted
-                        loop
                         playsInline
                         controls
-                        preload="auto"
+                        preload="metadata"
                         className="w-full h-full object-cover"
                       />
                     </div>
