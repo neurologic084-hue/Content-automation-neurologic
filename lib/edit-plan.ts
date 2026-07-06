@@ -572,7 +572,20 @@ export async function planViralCaptions(
 
   // Positions move in RUNS of pages (the reference holds a spot for a beat,
   // then relocates), not on every page — per-page rotation reads as churn.
-  const RUN_POSITIONS: Array<CaptionPage['position']> = ['low', 'mid', 'low', 'high']
+  // The run is FACE-AWARE (the same profile signal v4 uses): it only rotates
+  // through bands the face does not occupy, so a relocation never lands on
+  // the speaker. 'mid' (top 44%) IS the face band for a centered talking
+  // head — it only enters the rotation when the face sits clearly high or
+  // low in frame. Tight framing leaves no safe band to relocate to, so it
+  // holds the one furthest from the face, like v4's stable home.
+  const RUN_POSITIONS: Array<CaptionPage['position']> =
+    profile?.faceFraming === 'tight'
+      ? (profile?.faceArea === 'lower' ? ['high'] : ['low'])
+      : profile?.faceArea === 'upper' ? ['low', 'mid', 'low']
+      : profile?.faceArea === 'lower' ? ['high', 'mid', 'high']
+      // Centered face (the common talking-head framing): the top band is the
+      // only spot fully clear of the person, so it anchors the rotation.
+      : ['high', 'low', 'high']
   pages.forEach((page, i) => {
     page.position = RUN_POSITIONS[(Math.floor(i / 3) + variation) % RUN_POSITIONS.length]
   })
