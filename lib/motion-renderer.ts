@@ -1536,16 +1536,22 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
       await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
+      // Sandbox VM is Amazon Linux 2023 (glibc 2.34), but Remotion's default
+      // Linux compositor is the -gnu build that needs glibc 2.35+ → it can't
+      // load and every frame extraction dies ("Compositor quit: GLIBC_2.35
+      // not found"). The MUSL compositor is statically linked and runs on any
+      // libc; the bootstrap installs it and we point Remotion at it here.
+      const sandboxFlags = process.env.SANDBOX
+        ? ` --offthreadvideo-cache-size-in-bytes=536870912` +
+          ` --binaries-directory="${path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-musl')}"`
+        : ''
       await run(
         // 360s delayRender timeout: on a busy machine (user apps + dev server +
         // the serialized audio post-steps), headless-Chrome startup + font
         // loads can crawl far past 120s and fail renders that would otherwise
-        // succeed. In a sandbox VM (small RAM/disk), cap the OffthreadVideo
-        // frame cache at 512MB — the default sizes itself off free memory and
-        // can starve the compositor process to death mid-render.
+        // succeed.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=360000` +
-        (process.env.SANDBOX ? ' --offthreadvideo-cache-size-in-bytes=536870912' : ''),
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=360000${sandboxFlags}`,
         900_000,
       )
     })

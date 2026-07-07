@@ -93,7 +93,14 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
     ...(needsRemotion
       ? [
           CHROME_DEPS,
-          'cd remotion && npm ci --no-audit --no-fund && npx remotion browser ensure && cd ..',
+          'cd remotion && npm ci --no-audit --no-fund',
+          // AL2023's glibc (2.34) is older than Remotion's default -gnu
+          // compositor needs (2.35). Force-install the statically-linked musl
+          // compositor (pinned to the installed renderer version) — it runs on
+          // any libc, and the render points --binaries-directory at it.
+          'npm install @remotion/compositor-linux-x64-musl@"$(node -p "require(\'@remotion/renderer/package.json\').version")" --no-save --force --no-audit --no-fund',
+          'npx remotion browser ensure',
+          'cd ..',
         ]
       : []),
     `node --import tsx worker/run-task.ts '${Buffer.from(JSON.stringify(payload)).toString('base64')}'`,
