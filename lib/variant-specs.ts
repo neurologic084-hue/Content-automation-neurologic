@@ -139,8 +139,10 @@ export function resolveSubmagicSettings(
 ): ResolvedSubmagicSettings {
   const pace = gatePace(spec.locked.basePace, profile.sensitivity)
 
-  // Guardrail 2: B-roll % = the variant's ceiling for this richness, never more.
-  const brollPct = spec.adaptive.brollCeiling[profile.brollableRichness]
+  // Guardrail 2: B-roll % = the variant's ceiling for this richness, never
+  // more — and NEVER 50 or above, no matter what a future spec edit says.
+  // The voice and the speaker's face stay the anchor of every edit.
+  const brollPct = Math.min(spec.adaptive.brollCeiling[profile.brollableRichness], 49)
 
   // Guardrail 3: zooms only if the variant wants them AND framing has room —
   // push-ins on an already-tight face read as jitter, not energy.

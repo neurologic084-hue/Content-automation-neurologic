@@ -10,10 +10,10 @@ import fs from 'fs'
 import { exec } from 'child_process'
 import { detectSilences } from './audio-clean'
 
-const MIN_RESIDUAL_SEC = 0.7   // only silences at least this long get cut
-const EDGE_PAD_SEC = 0.18      // breathing room kept on each side of a cut
+const MIN_RESIDUAL_SEC = 0.55  // only silences at least this long get cut
+const EDGE_PAD_SEC = 0.15      // breathing room kept on each side of a cut
 const HEAD_GUARD_SEC = 0.5     // never touch the very top — that's the hook
-const MAX_CUTS = 40
+const MAX_CUTS = 60
 
 function run(cmd: string, timeoutMs = 600_000): Promise<void> {
   return new Promise((resolve, reject) => {

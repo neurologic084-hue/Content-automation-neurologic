@@ -18,6 +18,7 @@ import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { trimResidualSilences } from './post-trim'
+import { applyVisualTransitions } from './visual-transitions'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -699,6 +700,16 @@ export async function retrieveAndStoreSubmagicResult(
       await trimResidualSilences(localPath)
     } catch (e) {
       console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
+    }
+
+    // Visual accents (white flash / glow-up / black dip) on a smart subset of
+    // the edit's cuts — the layer Submagic's API can't provide. Runs before
+    // the SFX pass so the whooshes land on the same cuts the eyes see flash.
+    // Best-effort — a veil failure never loses the video.
+    try {
+      await applyVisualTransitions(localPath, music?.profile ?? null)
+    } catch (e) {
+      console.warn('[motion-renderer] visual transitions failed, keeping as-is:', (e as Error).message)
     }
 
     // Add our own library music on top of the finished Submagic video, so v1-v3
