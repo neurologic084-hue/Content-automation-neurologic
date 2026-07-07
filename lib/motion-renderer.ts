@@ -596,6 +596,38 @@ export async function finalizeSubmagicVariant(
   const key = `${jobId}:${variantId}`
   if (activeSubmagicFinalizes.has(key)) return
   activeSubmagicFinalizes.add(key)
+
+  // Callers that notice a finished Submagic project OUTSIDE the launch flow
+  // (the status route's poll, the heal pass) have no music context in hand —
+  // without this, whichever finisher won the race decided whether the video
+  // got its library music. Build the context from the DB so every path mixes
+  // the same way.
+  if (!music && VARIANT_SPECS[variantId]?.useMusic) {
+    try {
+      const db = supabaseAdmin()
+      const { data: job } = await db
+        .from('video_jobs')
+        .select('script_id, content_profile, transcript, variants')
+        .eq('id', jobId)
+        .single()
+      const variantRow = ((job?.variants ?? []) as VideoVariant[]).find(v => v.id === variantId)
+      const musicOff = (variantRow?.music_mode as MusicMode | undefined) === 'off'
+      if (job && !musicOff) {
+        const { data: s } = job.script_id
+          ? await db.from('scripts').select('hook, mood_tag, filming_plan').eq('id', job.script_id).single()
+          : { data: null }
+        music = {
+          hook: (s?.hook as string | undefined) ?? '',
+          moodTag: (s?.mood_tag as string | null | undefined) ?? null,
+          scriptFormat: (s?.filming_plan as { script_format?: string } | null)?.script_format,
+          profile: (job.content_profile as ContentProfile | null) ?? null,
+          transcript: (job.transcript as string | null) ?? null,
+        }
+      }
+    } catch (e) {
+      console.warn(`[motion-renderer] could not build music context for ${key}, finishing without music:`, (e as Error).message)
+    }
+  }
   try {
     const musicCtx = music ?? await libraryMusicContextFromDb(jobId, variantId)
     let finalUrl: string

@@ -87,7 +87,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     captionLane: 'bold',
     templatePool: ['Luke', 'Beast', 'Ella'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
-    adaptive: { brollCeiling: { none: 38, some: 38, rich: 48 } },
+    adaptive: { brollCeiling: { none: 42, some: 45, rich: 48 } },
     useMusic: true,
   },
   // Creator Bold — Hormozi 3 captions (user-picked, other Hormozis as
@@ -99,7 +99,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     captionLane: 'bold',
     templatePool: ['Hormozi 3', 'Hormozi 1', 'Hormozi 2', 'Hormozi 4', 'Hormozi 5'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
-    adaptive: { brollCeiling: { none: 32, some: 44, rich: 49 } },
+    adaptive: { brollCeiling: { none: 42, some: 46, rich: 49 } },
     useMusic: true,
   },
   // v4/v5: the Remotion overlay carries the visual interest, so their Submagic
