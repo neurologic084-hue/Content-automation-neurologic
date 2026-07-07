@@ -66,6 +66,8 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
   }
   // The worker writes to /tmp inside its own VM regardless, but be explicit.
   env.RENDERS_DIR = '/tmp/renders'
+  // Lets the render command adapt to the small VM (compositor cache cap).
+  env.SANDBOX = '1'
 
   // Remotion renders need the browser + the remotion package tree; the other
   // tasks are ffmpeg-only (ffmpeg-static comes with the root npm ci).
@@ -75,15 +77,18 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
   // fine but can't LAUNCH without the system graphics/print/sound libraries
   // (nss, atk, gbm, pango, ...). Without this install the render dies with a
   // ChildProcess exit pointing at node_modules/.remotion/chrome-*.
-  // --skip-broken keeps a renamed package from failing the whole install.
+  // skip_missing_names + skip-broken: a renamed/absent package (distro naming
+  // drifts) must never block the ones that DO exist.
   const CHROME_DEPS =
-    'sudo dnf install -y --skip-broken nss nspr alsa-lib atk at-spi2-atk at-spi2-core ' +
+    'sudo dnf install -y --skip-broken --setopt=skip_missing_names_on_install=True ' +
+    'nss nspr alsa-lib atk at-spi2-atk at-spi2-core ' +
     'cups-libs dbus-libs expat libdrm libgbm mesa-libgbm libX11 libxcb libXcomposite ' +
     'libXdamage libXext libXfixes libXrandr libxkbcommon pango cairo ' +
-    'liberation-fonts google-noto-color-emoji-fonts'
+    'liberation-fonts google-noto-color-emoji-fonts google-noto-emoji-color-fonts'
 
-  const bootstrap = [
+  const inner = [
     'set -e',
+    'df -h /tmp || true',
     'npm ci --no-audit --no-fund',
     ...(needsRemotion
       ? [
@@ -93,6 +98,16 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
       : []),
     `node --import tsx worker/run-task.ts '${Buffer.from(JSON.stringify(payload)).toString('base64')}'`,
   ].join(' && ')
+
+  // Everything the VM does lands in one log, and that log is pushed to R2
+  // win or lose (logs/{jobId}/{task}.log) — production failures become
+  // readable without any access to the dead VM. tail echoes the ending to
+  // the sandbox's own stdout for Vercel's live view.
+  const label = `${payload.task}${'variantId' in payload ? `-${payload.variantId}` : ''}`
+  const bootstrap =
+    `( ${inner} ) > /tmp/task.log 2>&1 ; EXIT=$? ; ` +
+    `tail -c 3000 /tmp/task.log ; ` +
+    `node --import tsx worker/upload-task-log.ts '${payload.jobId}' '${label}' /tmp/task.log || true`
 
   const sandbox = await Sandbox.create({
     source: {
@@ -113,7 +128,7 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
   // returns its HTTP response. The VM stops itself when the script exits.
   await sandbox.runCommand({
     cmd: 'bash',
-    args: ['-lc', `${bootstrap} ; EXIT=$? ; sudo shutdown -h now 2>/dev/null || true ; exit $EXIT`],
+    args: ['-lc', `${bootstrap} ; sudo shutdown -h now 2>/dev/null || true ; exit $EXIT`],
     env,
     detached: true,
   })

@@ -62,7 +62,7 @@ function run(cmd: string, timeoutMs = 300_000): Promise<void> {
     let stderrBuf = ''
     const proc = exec(cmd, { timeout: timeoutMs, maxBuffer: 512 * 1024 * 1024 }, (err) => {
       if (err) {
-        const detail = stderrBuf.slice(-800).trim()
+        const detail = stderrBuf.slice(-2500).trim()
         reject(new Error(detail || err.message))
       } else {
         resolve()
@@ -1540,9 +1540,12 @@ async function renderRemotionEdit(
         // 360s delayRender timeout: on a busy machine (user apps + dev server +
         // the serialized audio post-steps), headless-Chrome startup + font
         // loads can crawl far past 120s and fail renders that would otherwise
-        // succeed.
+        // succeed. In a sandbox VM (small RAM/disk), cap the OffthreadVideo
+        // frame cache at 512MB — the default sizes itself off free memory and
+        // can starve the compositor process to death mid-render.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=360000`,
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=360000` +
+        (process.env.SANDBOX ? ' --offthreadvideo-cache-size-in-bytes=536870912' : ''),
         900_000,
       )
     })
