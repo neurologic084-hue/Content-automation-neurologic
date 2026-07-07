@@ -18,9 +18,14 @@ interface Props {
 }
 
 interface MenuPos {
-  top: number
+  top?: number
+  bottom?: number
   right: number
 }
+
+// Tallest case (all seven rows) — used to decide whether the dropdown still
+// fits below the button or should open upward instead of falling off-screen.
+const MENU_MAX_HEIGHT = 380
 
 export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) {
   const [mounted, setMounted] = useState(false)
@@ -59,7 +64,13 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
 
   function openMenu(btn: HTMLButtonElement) {
     const rect = btn.getBoundingClientRect()
-    setMenuPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right })
+    const openUp = rect.bottom + MENU_MAX_HEIGHT > window.innerHeight
+    setMenuPos({
+      right: window.innerWidth - rect.right,
+      ...(openUp
+        ? { bottom: window.innerHeight - rect.top + 6 }
+        : { top: rect.bottom + 6 }),
+    })
     setMenuOpen(o => !o)
   }
 
@@ -182,6 +193,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
           style={{
             position: 'fixed',
             top: menuPos.top,
+            bottom: menuPos.bottom,
             right: menuPos.right,
             zIndex: 9999,
             minWidth: 192,
