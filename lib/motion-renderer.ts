@@ -1539,12 +1539,30 @@ async function renderRemotionEdit(
       // Sandbox VM is Amazon Linux 2023 (glibc 2.34). Remotion's default -gnu
       // COMPOSITOR needs glibc 2.35+ and can't load there ("Compositor quit:
       // GLIBC_2.35 not found"), but the -gnu ffmpeg/ffprobe run fine on 2.34.
-      // The bootstrap swaps ONLY the compositor binary in the gnu package for
-      // the statically-linked musl build (verified to run on AL2023), leaving
-      // ffmpeg/ffprobe as gnu — so this one dir has a working set of all three.
+      // Swap ONLY the compositor binary in the gnu package for the static musl
+      // build (verified on AL2023: musl compositor + gnu ffmpeg/ffprobe all run
+      // from one dir). Done HERE in the cloned worker code — not the bootstrap —
+      // so it rides the freshly-cloned repo and can't be blocked by a lagging
+      // Vercel function deploy. The binary is vendored in the repo, so no
+      // download/tar is needed inside the VM.
+      const gnuDir = path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')
+      if (process.env.SANDBOX) {
+        try {
+          const vendored = path.join(REMOTION_DIR, 'vendor', 'compositor-remotion-linux-x64-musl')
+          const target = path.join(gnuDir, 'remotion')
+          if (fs.existsSync(vendored) && fs.existsSync(gnuDir)) {
+            fs.copyFileSync(vendored, target)
+            fs.chmodSync(target, 0o755)
+            console.log('[motion-renderer] BUILD-MARKER musl-swap-v2 — swapped gnu compositor for vendored musl binary')
+          } else {
+            console.warn(`[motion-renderer] musl swap skipped: vendored=${fs.existsSync(vendored)} gnuDir=${fs.existsSync(gnuDir)}`)
+          }
+        } catch (e) {
+          console.warn('[motion-renderer] musl compositor swap failed:', (e as Error).message)
+        }
+      }
       const sandboxFlags = process.env.SANDBOX
-        ? ` --offthreadvideo-cache-size-in-bytes=536870912` +
-          ` --binaries-directory="${path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')}"`
+        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --binaries-directory="${gnuDir}"`
         : ''
       await run(
         // 360s delayRender timeout: on a busy machine (user apps + dev server +
