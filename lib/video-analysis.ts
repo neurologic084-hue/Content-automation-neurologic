@@ -195,14 +195,16 @@ export async function analyzeVideoContent(
     apiKey,
   })
 
-  const keys = [process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY_3]
-    .filter((k): k is string => !!k)
+  // Everything routes through the one OpenRouter account now — no separate
+  // Gemini keys to rotate. OpenRouter does its own provider failover; we keep
+  // only the model-level fallback ladder.
+  const keys = [process.env.OPENROUTER_API_KEY].filter((k): k is string => !!k)
 
   // Primary model (flash-lite) is cheapest but gets shed first under load (503s).
   // On a persistent overload, fall back to the sturdier gemini-2.5-flash, which
   // stays available when lite is busy. Deduped so we never try the same model twice.
-  const primaryModel = opts.model || process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite'
-  const models = [...new Set([primaryModel, 'gemini-2.5-flash'])]
+  const primaryModel = opts.model || process.env.GEMINI_MODEL || 'google/gemini-2.5-flash-lite'
+  const models = [...new Set([primaryModel, 'google/gemini-2.5-flash'])]
 
   // Retry a single (key, model) pair on transient 503/overload with backoff.
   const attempt = async (apiKey: string, model: string): Promise<Partial<ContentProfile>> => {

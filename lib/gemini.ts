@@ -1,14 +1,15 @@
-// ── Gemini client (native audio / video understanding) ────────────────────────
-// The OpenRouter client (lib/openrouter.ts) handles our text LLM calls. Gemini is
-// added ONLY for what OpenRouter can't reliably do: analyzing real media files
-// (an audio track, a video). It talks to Google's Generative Language REST API
-// directly — no SDK — mirroring the fetch style of the OpenRouter client.
+// ── Gemini via OpenRouter (native audio / video understanding) ────────────────
+// All LLM traffic — text AND media analysis — now flows through the one
+// OpenRouter account. Gemini models on OpenRouter accept video/audio as
+// content parts, so the separate GEMINI_API_KEY (and its separate billing)
+// is gone. The exported surface is unchanged: callers still pass a prompt,
+// inline media, and an optional Google-style responseSchema.
 //
-// Needs GEMINI_API_KEY. Model is overridable via GEMINI_MODEL (default below) so
-// we can bump versions without a code change if the id ever 404s.
+// Model is overridable via GEMINI_MODEL (default below) so we can bump
+// versions without a code change if the id ever 404s.
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta'
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash'
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'google/gemini-3.5-flash'
 
 export interface InlineMedia {
   mimeType: string   // e.g. "audio/mp3", "video/mp4"
@@ -19,63 +20,105 @@ interface GenerateOptions {
   prompt: string
   media?: InlineMedia[]
   model?: string
-  // A JSON Schema (Google's subset) — when set, Gemini returns validated JSON.
+  // A JSON Schema (Google's uppercase-type subset) — converted to standard
+  // JSON Schema and enforced via OpenRouter structured outputs.
   responseSchema?: Record<string, unknown>
   temperature?: number
   maxOutputTokens?: number
-  // Gemini 3.x models "think" by default, and reasoning tokens draw from the
-  // output budget — which can truncate the actual answer. Default to 0 (off) for
-  // our structured extraction tasks; raise it if a task genuinely needs reasoning.
+  // Gemini models "think" by default, and reasoning tokens draw from the
+  // output budget — which can truncate the actual answer. Default to 0 (off)
+  // for our structured extraction tasks.
   thinkingBudget?: number
-  // Override the API key (default GEMINI_API_KEY). Lets a caller spread requests
-  // across multiple keys to multiply a per-key rate limit.
+  // Override the API key (default OPENROUTER_API_KEY).
   apiKey?: string
 }
 
-// Low-level generateContent call. Returns the raw text part (JSON string when a
+// Google's schema subset writes types in uppercase (OBJECT/STRING/...);
+// standard JSON Schema wants lowercase. Convert recursively; everything else
+// (properties, items, enum, required, description) passes through untouched.
+function toStandardSchema(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(toStandardSchema)
+  if (node && typeof node === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      out[k] = k === 'type' && typeof v === 'string' ? v.toLowerCase() : toStandardSchema(v)
+    }
+    return out
+  }
+  return node
+}
+
+// One inline media file → the OpenRouter content part for its kind.
+function mediaPart(m: InlineMedia): Record<string, unknown> {
+  if (m.mimeType.startsWith('audio/')) {
+    // input_audio takes a bare format name, not a mime type
+    const format = m.mimeType.split('/')[1]?.replace('mpeg', 'mp3') ?? 'mp3'
+    return { type: 'input_audio', input_audio: { data: m.data, format } }
+  }
+  if (m.mimeType.startsWith('image/')) {
+    return { type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${m.data}` } }
+  }
+  return { type: 'video_url', video_url: { url: `data:${m.mimeType};base64,${m.data}` } }
+}
+
+// Low-level chat call. Returns the raw text (JSON string when a
 // responseSchema is supplied). Throws on a non-200 so callers can skip + retry.
 export async function geminiGenerate(opts: GenerateOptions): Promise<string> {
-  const key = opts.apiKey || process.env.GEMINI_API_KEY
-  if (!key) throw new Error('GEMINI_API_KEY is not set')
+  const key = opts.apiKey || process.env.OPENROUTER_API_KEY
+  if (!key) throw new Error('OPENROUTER_API_KEY is not set')
 
   const model = opts.model || DEFAULT_MODEL
-  const parts: Record<string, unknown>[] = [{ text: opts.prompt }]
-  for (const m of opts.media ?? []) {
-    parts.push({ inline_data: { mime_type: m.mimeType, data: m.data } })
-  }
+  const media = opts.media ?? []
+  const content: Record<string, unknown>[] = [
+    { type: 'text', text: opts.prompt },
+    ...media.map(mediaPart),
+  ]
+
+  const hasVideo = media.some(m => m.mimeType.startsWith('video/'))
 
   const body: Record<string, unknown> = {
-    contents: [{ role: 'user', parts }],
-    generationConfig: {
-      temperature: opts.temperature ?? 0.3,
-      maxOutputTokens: opts.maxOutputTokens ?? 1024,
-      thinkingConfig: { thinkingBudget: opts.thinkingBudget ?? 0 },
-      ...(opts.responseSchema
-        ? { responseMimeType: 'application/json', responseSchema: opts.responseSchema }
-        : {}),
-    },
+    model,
+    messages: [{ role: 'user', content }],
+    temperature: opts.temperature ?? 0.3,
+    max_tokens: opts.maxOutputTokens ?? 1024,
+    reasoning: (opts.thinkingBudget ?? 0) > 0
+      ? { max_tokens: opts.thinkingBudget }
+      : { enabled: false },
+    ...(opts.responseSchema
+      ? {
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: 'result', strict: true, schema: toStandardSchema(opts.responseSchema) },
+          },
+        }
+      : {}),
+    // Base64 video data URLs are a Vertex-only feature — Google's AI Studio
+    // provider on OpenRouter accepts YouTube links only.
+    ...(hasVideo ? { provider: { only: ['google-vertex'] } } : {}),
   }
 
-  const res = await fetch(`${GEMINI_BASE}/models/${model}:generateContent?key=${key}`, {
+  const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
   })
 
   if (!res.ok) {
     const err = await res.text()
-    throw new Error(`Gemini error ${res.status}: ${err}`)
+    throw new Error(`Gemini (OpenRouter) error ${res.status}: ${err.slice(0, 500)}`)
   }
 
   const data = await res.json()
-  const text: string = data?.candidates?.[0]?.content?.parts
-    ?.map((p: { text?: string }) => p.text ?? '')
-    .join('') ?? ''
+  const text: string = data?.choices?.[0]?.message?.content ?? ''
   return text.trim()
 }
 
-// Convenience: generateContent expecting a JSON object back (responseSchema set).
+// Convenience: a call expecting a JSON object back (responseSchema set).
 export async function geminiJSON<T>(opts: GenerateOptions): Promise<T> {
   const raw = await geminiGenerate(opts)
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim()
