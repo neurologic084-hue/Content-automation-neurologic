@@ -1578,17 +1578,22 @@ async function renderRemotionEdit(
       if (process.env.SANDBOX) {
         await patchSandboxCompositorGlibc(gnuDir)
       }
+      // In the sandbox: lower concurrency so the single render server isn't
+      // hammered by many tabs at once (its asset/frame serving is what stalls
+      // on long renders), a bigger delayRender timeout for headroom, and the
+      // compositor cache cap. Fonts are embedded (data URIs, see fonts-data.ts)
+      // so they never hit the server at all.
       const sandboxFlags = process.env.SANDBOX
-        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --binaries-directory="${gnuDir}"`
+        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2 --binaries-directory="${gnuDir}"`
         : ''
+      const renderTimeout = process.env.SANDBOX ? 900000 : 360000
       await run(
-        // 360s delayRender timeout: on a busy machine (user apps + dev server +
-        // the serialized audio post-steps), headless-Chrome startup + font
-        // loads can crawl far past 120s and fail renders that would otherwise
-        // succeed.
+        // Generous delayRender timeout: headless-Chrome startup + asset loads
+        // can crawl on a busy/constrained machine and fail renders that would
+        // otherwise succeed.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=360000${sandboxFlags}`,
-        900_000,
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=${renderTimeout}${sandboxFlags}`,
+        1_200_000,
       )
     })
     if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
