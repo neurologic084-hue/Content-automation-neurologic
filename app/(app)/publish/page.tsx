@@ -155,6 +155,20 @@ interface VideoJobRow {
   } | null
 }
 
+// A row in the "Published" section — everything that actually went out (or is
+// scheduled to). Doubles as the record the script engine learns from.
+interface PublishedRow {
+  id: string
+  video_job_id: string | null
+  variant_id: string | null
+  caption: string
+  status: string
+  published_at: string | null
+  scheduled_at: string | null
+  platform_posts: { platform: string; status: string }[]
+  script: { hook: string } | null
+}
+
 // ── Caption card ──────────────────────────────────────────────────────────────
 
 function CaptionCard({
@@ -365,6 +379,12 @@ function PublishForm() {
   const [jobs, setJobs] = useState<VideoJobRow[]>([])
   const [loadingJobs, setLoadingJobs] = useState(true)
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
+  // Which variant of the selected job goes out — publishing one variant no
+  // longer blocks publishing its siblings later.
+  const [pickedVariantId, setPickedVariantId] = useState<string | null>(null)
+  // `${jobId}:${variantId}` pairs that are already published or scheduled.
+  const [publishedKeys, setPublishedKeys] = useState<Set<string>>(new Set())
+  const [publishedList, setPublishedList] = useState<PublishedRow[]>([])
 
   // Video source
   const [videoUrl, setVideoUrl] = useState(prefillUrl)
@@ -452,22 +472,45 @@ function PublishForm() {
           .limit(30),
         supabase
           .from('publish_jobs')
-          .select('video_job_id')
-          .eq('status', 'published')
-          .not('video_job_id', 'is', null),
+          .select('id, video_job_id, variant_id, caption, status, published_at, scheduled_at, platform_posts, scripts(hook)')
+          .in('status', ['published', 'partial', 'scheduled'])
+          .eq('profile_slot', slot)
+          .order('published_at', { ascending: false, nullsFirst: false })
+          .limit(50),
       ])
 
-      const publishedJobIds = new Set((publishedRes.data ?? []).map(r => r.video_job_id as string))
+      const publishedRows = (publishedRes.data ?? []).map((row: Record<string, unknown>) => ({
+        ...row,
+        script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
+      })) as PublishedRow[]
+      setPublishedList(publishedRows)
 
-      const variantReady = (row: Record<string, unknown>): boolean => {
+      // Published/scheduled is tracked PER VARIANT — publishing our-v2 must
+      // not hide our-v3 from the list. Old rows without a variant_id count
+      // against the job's selected variant (the only thing publishable then).
+      const keys = new Set<string>()
+      const jobLevelPublished = new Set<string>()
+      for (const p of publishedRows) {
+        if (!p.video_job_id) continue
+        if (p.variant_id) keys.add(`${p.video_job_id}:${p.variant_id}`)
+        else jobLevelPublished.add(p.video_job_id)
+      }
+      for (const row of (jobsRes.data ?? []) as Record<string, unknown>[]) {
+        if (jobLevelPublished.has(row.id as string)) keys.add(`${row.id}:${row.selected_variant}`)
+      }
+      setPublishedKeys(keys)
+
+      // A job stays listed as long as ANY ready variant hasn't gone out yet.
+      const hasPublishableVariant = (row: Record<string, unknown>): boolean => {
         const variants = (row.variants ?? []) as VideoVariant[]
-        const selected = variants.find(v => v.id === row.selected_variant)
-        return selected?.status === 'ready' && !!selected.download_url
+        return variants.some(v =>
+          v.status === 'ready' && !!v.download_url && !keys.has(`${row.id}:${v.id}`)
+        )
       }
 
       setJobs(
         (jobsRes.data ?? [])
-          .filter((row: Record<string, unknown>) => !publishedJobIds.has(row.id as string) && variantReady(row))
+          .filter((row: Record<string, unknown>) => hasPublishableVariant(row))
           .map((row: Record<string, unknown>) => ({
             ...row,
             script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
@@ -495,6 +538,7 @@ function PublishForm() {
       setSelectedJobId(job.id)
       setVideoSource('job')
       const targetVariantId = paramVariantId ?? job.selected_variant
+      setPickedVariantId(targetVariantId)
       const variant = (job.variants ?? []).find((v: VideoVariant) => v.id === targetVariantId)
       if (variant?.download_url) setVideoUrl(variant.download_url)
     }
@@ -573,7 +617,7 @@ function PublishForm() {
 
   const selectedJob = jobs.find(j => j.id === selectedJobId) ?? null
   const selectedVariant = selectedJob
-    ? (selectedJob.variants ?? []).find(v => v.id === selectedJob.selected_variant) ?? null
+    ? (selectedJob.variants ?? []).find(v => v.id === (pickedVariantId ?? selectedJob.selected_variant)) ?? null
     : null
 
   const selectedAccounts = accounts.filter(a => selectedIds.has(a.id))
@@ -602,11 +646,31 @@ function PublishForm() {
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
+  function readyVariants(job: VideoJobRow): VideoVariant[] {
+    return (job.variants ?? []).filter(v => v.status === 'ready' && !!v.download_url)
+  }
+
+  function isPublished(jobId: string, variantId: string): boolean {
+    return publishedKeys.has(`${jobId}:${variantId}`)
+  }
+
+  function pickVariant(job: VideoJobRow, variantId: string) {
+    setPickedVariantId(variantId)
+    const variant = (job.variants ?? []).find(v => v.id === variantId)
+    if (variant?.download_url) setVideoUrl(variant.download_url)
+  }
+
   function pickJob(job: VideoJobRow) {
     setSelectedJobId(job.id)
     setVideoSource('job')
-    const variant = (job.variants ?? []).find(v => v.id === job.selected_variant)
-    if (variant?.download_url) setVideoUrl(variant.download_url)
+    // Default to the job's selected variant unless it already went out —
+    // then the first still-unpublished ready variant.
+    const ready = readyVariants(job)
+    const preferred =
+      ready.find(v => v.id === job.selected_variant && !isPublished(job.id, v.id))
+      ?? ready.find(v => !isPublished(job.id, v.id))
+      ?? ready[0]
+    if (preferred) pickVariant(job, preferred.id)
   }
 
   function switchSource(src: 'job' | 'drive') {
@@ -686,7 +750,7 @@ function PublishForm() {
       body: JSON.stringify({
         scriptId: selectedJob?.script_id ?? null,
         videoJobId: selectedJob?.id ?? null,
-        variantId: paramVariantId ?? selectedJob?.selected_variant ?? null,
+        variantId: pickedVariantId ?? paramVariantId ?? selectedJob?.selected_variant ?? null,
         downloadUrl: videoUrl.trim(),
         captions,
         accounts: selectedAccounts.map(a => ({ id: a.id, platform: a.platform, pageId: a.pageId })),
@@ -699,6 +763,9 @@ function PublishForm() {
     setSubmitting(false)
     if (!res.ok) { setSubmitError(data.error ?? 'Publish failed.'); return }
     setResult(data)
+    // Refresh the per-variant published markers and the Published section so
+    // the just-posted variant shows its badge immediately.
+    void loadJobs()
   }
 
   const noKey = accountsError?.includes('BLOTATO_API_KEY')
@@ -855,14 +922,13 @@ function PublishForm() {
             ) : (
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {jobs.map(job => {
-                  const variant = (job.variants ?? []).find(v => v.id === job.selected_variant)
                   const isSelected = selectedJobId === job.id
+                  const ready = readyVariants(job)
                   return (
-                    <button
+                    <div
                       key={job.id}
-                      type="button"
-                      onClick={() => pickJob(job)}
-                      className="w-full text-left rounded-xl border px-4 py-3 transition-all"
+                      onClick={() => { if (!isSelected) pickJob(job) }}
+                      className="w-full text-left rounded-xl border px-4 py-3 transition-all cursor-pointer"
                       style={{
                         borderColor: isSelected ? '#FF4F17' : '#E4E4E0',
                         background: isSelected ? '#FFF4F1' : '#FAFAFA',
@@ -875,7 +941,7 @@ function PublishForm() {
                             {job.script?.hook ?? 'Untitled video'}
                           </p>
                           <p className="text-[11px] text-[#A1A1AA] mt-0.5">
-                            {variant?.name ?? 'Edited'} · {new Date(job.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            {ready.length} ready variant{ready.length === 1 ? '' : 's'} · {new Date(job.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                           </p>
                         </div>
                         {isSelected && (
@@ -884,7 +950,37 @@ function PublishForm() {
                           </svg>
                         )}
                       </div>
-                    </button>
+                      {/* Variant picker — each ready variant is publishable on its
+                          own; ones already out are marked instead of hidden. */}
+                      {isSelected && ready.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2.5">
+                          {ready.map(v => {
+                            const done = isPublished(job.id, v.id)
+                            const active = (pickedVariantId ?? job.selected_variant) === v.id
+                            return (
+                              <button
+                                key={v.id}
+                                type="button"
+                                onClick={e => { e.stopPropagation(); pickVariant(job, v.id) }}
+                                className="px-2.5 h-7 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1"
+                                style={{
+                                  background: active ? '#FF4F17' : 'white',
+                                  color: active ? 'white' : done ? '#A1A1AA' : '#18181B',
+                                  border: `1px solid ${active ? '#FF4F17' : '#E4E4E0'}`,
+                                }}
+                              >
+                                {v.name ?? v.id}
+                                {done && (
+                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={active ? 'white' : '#22C55E'} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M20 6L9 17l-5-5" />
+                                  </svg>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
                   )
                 })}
               </div>
@@ -1041,7 +1137,7 @@ function PublishForm() {
             {allPublished && (
               <div className="mt-4 flex items-center gap-4 flex-wrap">
                 <button type="button"
-                  onClick={() => { setResult(null); setSelectedJobId(null); setVideoUrl(''); setDriveInput(''); setDriveResolved(null); setCaptions({}); setScheduleMode('now'); setSelectedDate(''); setSelectedTime('09:00') }}
+                  onClick={() => { setResult(null); setSelectedJobId(null); setPickedVariantId(null); setVideoUrl(''); setDriveInput(''); setDriveResolved(null); setCaptions({}); setScheduleMode('now'); setSelectedDate(''); setSelectedTime('09:00') }}
                   className="text-xs text-[#16A34A] underline">
                   Publish another
                 </button>
@@ -1267,6 +1363,51 @@ function PublishForm() {
         )}
 
       </form>
+
+      {/* ── Published ── everything that actually went out (or is scheduled).
+          This is also the record the script engine learns from: published
+          scripts rank highest as few-shot examples for new generations. */}
+      {publishedList.length > 0 && (
+        <div className="bg-white border border-[#E4E4E0] rounded-2xl p-5 mt-6">
+          <div className="flex items-center gap-2.5 mb-4">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            <p className="text-[11px] font-bold text-[#A1A1AA] uppercase tracking-widest">Published</p>
+            <span className="text-[11px] text-[#A1A1AA]">· {publishedList.length}</span>
+          </div>
+          <div className="space-y-2 max-h-72 overflow-y-auto">
+            {publishedList.map(p => {
+              const when = p.status === 'scheduled' ? p.scheduled_at : p.published_at
+              const platforms = (p.platform_posts ?? []).filter(pp => pp.status === 'published' || pp.status === 'scheduled')
+              return (
+                <div key={p.id} className="rounded-xl border border-[#F0EFED] bg-[#FAFAFA] px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-[#18181B] truncate flex-1 min-w-0">
+                      {p.script?.hook ?? (p.caption ? `“${p.caption.slice(0, 60)}${p.caption.length > 60 ? '…' : ''}”` : 'Published video')}
+                    </p>
+                    <span
+                      className="text-[10px] font-bold px-2 py-0.5 rounded-md flex-shrink-0"
+                      style={{
+                        background: p.status === 'scheduled' ? '#EFF6FF' : p.status === 'partial' ? '#FFFBEB' : '#F0FDF4',
+                        color: p.status === 'scheduled' ? '#3B82F6' : p.status === 'partial' ? '#D97706' : '#16A34A',
+                      }}
+                    >
+                      {p.status === 'scheduled' ? 'SCHEDULED' : p.status === 'partial' ? 'PARTIAL' : 'PUBLISHED'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#A1A1AA] mt-1">
+                    {p.variant_id ? `${p.variant_id.replace('our-', '')} · ` : ''}
+                    {platforms.length > 0 ? platforms.map(pp => pp.platform).join(', ') : '—'}
+                    {when ? ` · ${new Date(when).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

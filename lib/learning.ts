@@ -33,10 +33,10 @@ export async function getLearningContext(
   // bleed into Profile 2's scripts and vice versa.
   const slot = opts.profileSlot ?? 1
 
-  const [approvedRes, revisedRes, hooksRes] = await Promise.all([
+  const [approvedRes, revisedRes, hooksRes, publishedRes] = await Promise.all([
     supabase
       .from('scripts')
-      .select('hook, body, cta, is_few_shot, filming_plan, idea:ideas(confirmed_lane)')
+      .select('id, hook, body, cta, is_few_shot, filming_plan, idea:ideas(confirmed_lane)')
       .eq('status', 'approved')
       .eq('profile_slot', slot)
       .order('approved_at', { ascending: false })
@@ -56,7 +56,21 @@ export async function getLearningContext(
       .in('status', ['approved', 'pending_review'])
       .order('created_at', { ascending: false })
       .limit(20),
+    // Scripts that actually went OUT — the strongest signal there is. A
+    // script the creator approved, rendered, AND published survived every
+    // quality gate, so it outranks merely-approved examples.
+    supabase
+      .from('publish_jobs')
+      .select('script_id')
+      .in('status', ['published', 'partial', 'scheduled'])
+      .eq('profile_slot', slot)
+      .not('script_id', 'is', null)
+      .limit(100),
   ])
+
+  const publishedScriptIds = new Set(
+    (publishedRes.data ?? []).map(r => r.script_id as string)
+  )
 
   // ── Rank approved scripts by relevance ──────────────────────────────────
   const scored: ScoredScript[] = (approvedRes.data ?? []).map((s, i) => {
@@ -69,6 +83,8 @@ export async function getLearningContext(
     if (sameLane && sameFormat) score += 6
     else if (sameLane) score += 4
     else if (sameFormat) score += 2
+    // Published beats the manual few-shot flag: it's the realest endorsement.
+    if (publishedScriptIds.has(s.id as string)) score += 3
     if (s.is_few_shot) score += 1
     // Recency tiebreak: earlier in the (already newest-first) list ranks higher
     score += (40 - i) / 100
