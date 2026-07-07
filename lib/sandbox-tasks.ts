@@ -70,11 +70,26 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
   // Remotion renders need the browser + the remotion package tree; the other
   // tasks are ffmpeg-only (ffmpeg-static comes with the root npm ci).
   const needsRemotion = payload.task === 'render-variant'
+
+  // The sandbox VM is bare Amazon Linux — Chrome Headless Shell downloads
+  // fine but can't LAUNCH without the system graphics/print/sound libraries
+  // (nss, atk, gbm, pango, ...). Without this install the render dies with a
+  // ChildProcess exit pointing at node_modules/.remotion/chrome-*.
+  // --skip-broken keeps a renamed package from failing the whole install.
+  const CHROME_DEPS =
+    'sudo dnf install -y --skip-broken nss nspr alsa-lib atk at-spi2-atk at-spi2-core ' +
+    'cups-libs dbus-libs expat libdrm libgbm mesa-libgbm libX11 libxcb libXcomposite ' +
+    'libXdamage libXext libXfixes libXrandr libxkbcommon pango cairo ' +
+    'liberation-fonts google-noto-color-emoji-fonts'
+
   const bootstrap = [
     'set -e',
     'npm ci --no-audit --no-fund',
     ...(needsRemotion
-      ? ['cd remotion && npm ci --no-audit --no-fund && npx remotion browser ensure && cd ..']
+      ? [
+          CHROME_DEPS,
+          'cd remotion && npm ci --no-audit --no-fund && npx remotion browser ensure && cd ..',
+        ]
       : []),
     `node --import tsx worker/run-task.ts '${Buffer.from(JSON.stringify(payload)).toString('base64')}'`,
   ].join(' && ')
