@@ -48,19 +48,30 @@ async function probeJson(videoPath: string): Promise<{ width: number; height: nu
   })
 }
 
-// Same scene-cut recovery the SFX pass uses: Submagic never tells us its cut
-// list, so read it back off the finished pixels.
-async function detectCuts(videoPath: string): Promise<number[]> {
+// Scene-cut recovery WITH per-cut impact scores. A jump-cut inside the same
+// talking-head shot barely moves the scene score; B-roll entering or leaving
+// replaces the whole frame and scores high. Scoring every candidate lets the
+// selector give veils to the strongest B-roll transitions only — trim cuts
+// never qualify.
+interface ScoredCut { t: number; score: number }
+
+async function detectCuts(videoPath: string): Promise<ScoredCut[]> {
   const stderr = await run(
-    `ffmpeg -i "${videoPath}" -vf "select='gt(scene,0.30)',showinfo" -f null -`,
+    `ffmpeg -i "${videoPath}" -vf "select='gt(scene,0.30)',metadata=print" -f null -`,
     180_000,
   )
-  const times: number[] = []
-  for (const m of stderr.matchAll(/pts_time:([\d.]+)/g)) {
-    const t = parseFloat(m[1])
-    if (Number.isFinite(t)) times.push(t)
+  const cuts: ScoredCut[] = []
+  let pendingT: number | null = null
+  for (const line of stderr.split('\n')) {
+    const t = line.match(/pts_time:([\d.]+)/)
+    if (t) pendingT = parseFloat(t[1])
+    const s = line.match(/lavfi\.scene_score=([\d.]+)/)
+    if (s && pendingT !== null) {
+      cuts.push({ t: pendingT, score: parseFloat(s[1]) })
+      pendingT = null
+    }
   }
-  return times
+  return cuts
 }
 
 interface Veil {
@@ -89,32 +100,36 @@ export async function applyVisualTransitions(
   const cuts = await detectCuts(videoPath)
   if (!cuts.length) return 0
 
-  // Energy decides how MANY cuts earn a veil and which move leads.
+  // Energy decides how MANY transitions earn a veil.
   const energy = profile?.energy ?? 'medium'
   const fraction = energy === 'high' ? 0.4 : energy === 'low' ? 0.15 : 0.25
 
-  const eligible = cuts.filter(t => t > EDGE_GUARD_SEC && t < duration - EDGE_GUARD_SEC)
+  // B-roll-grade transitions only: a full-frame replacement scores ≥0.45;
+  // jump cuts and punch-ins score below it and never get a veil.
+  const eligible = cuts.filter(c =>
+    c.score >= 0.45 && c.t > EDGE_GUARD_SEC && c.t < duration - EDGE_GUARD_SEC
+  )
+  if (!eligible.length) return 0
   const target = Math.min(MAX_VEILS, Math.max(1, Math.round(eligible.length * fraction)))
 
-  // Spread the picks across the video with the spacing rule, walking a random
-  // starting offset so two renders don't veil identical cuts.
-  const veils: Veil[] = []
-  const stride = Math.max(1, Math.floor(eligible.length / target))
-  let idx = Math.floor(Math.random() * stride)
-  let lastAt = -Infinity
-  while (idx < eligible.length && veils.length < target) {
-    const at = eligible[idx]
-    if (at - lastAt >= MIN_GAP_SEC) {
-      // High energy leads with hard flashes and the occasional dip; calm
-      // footage gets soft glows only.
-      const style = energy === 'low'
-        ? GLOW
-        : veils.length % 3 === 2 ? DIP : energy === 'high' ? FLASH : (veils.length % 2 ? GLOW : FLASH)
-      veils.push({ at, ...style })
-      lastAt = at
-    }
-    idx += stride
+  // Smart pick: strongest frame-changes first (the real B-roll swaps), each
+  // respecting the spacing rule against everything already chosen.
+  const chosen: ScoredCut[] = []
+  for (const c of [...eligible].sort((a, b) => b.score - a.score)) {
+    if (chosen.length >= target) break
+    if (chosen.every(x => Math.abs(x.t - c.t) >= MIN_GAP_SEC)) chosen.push(c)
   }
+  chosen.sort((a, b) => a.t - b.t)
+
+  // Style matched to impact and mood: the hardest swaps flash white, medium
+  // ones glow up; every third becomes a black dip for rhythm. Calm footage
+  // gets soft glows only.
+  const veils: Veil[] = chosen.map((c, i) => {
+    const style = energy === 'low'
+      ? GLOW
+      : i % 3 === 2 ? DIP : c.score >= 0.6 ? FLASH : GLOW
+    return { at: c.t, ...style }
+  })
   if (!veils.length) return 0
 
   // One overlay chain per veil: a colored clip with alpha fades, shifted to
