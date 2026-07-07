@@ -168,28 +168,6 @@ export function VideoStudio({ script, existingJobId }: Props) {
     }
   }
 
-  async function handleReset() {
-    if (pollRef.current) clearInterval(pollRef.current)
-    // Delete the job server-side so its R2/local files go with it — a bare
-    // row delete here used to leave every rendered video orphaned in storage.
-    if (jobId) {
-      try {
-        await fetch('/api/video/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobId }),
-        })
-      } catch { /* reset the UI regardless */ }
-    }
-    setJobId(null)
-    setStatus('idle')
-    setVariants([])
-    setReadyCount(0)
-    setSelectedVariant(null)
-    setDriveUrl('')
-    setError(null)
-  }
-
   const prepProgress = variants.find(v => v.status === 'pending' && v.progress)?.progress ?? null
   const isPreparingSource = !!prepProgress && variants.length > 0 && variants.every(v => v.status === 'pending')
   const overallReadyTotal = variants.filter(v => v.status !== 'pending').length || variants.length || 5
@@ -562,15 +540,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
             })}
           </div>
 
-          {/* Actions */}
+          {/* Actions — deleting/replacing an edit lives in the Library's
+              script menu now, so the library stays the one place edits are
+              managed from. */}
           <div className="flex items-center gap-3 pt-1">
-            <button
-              onClick={handleReset}
-              className="h-9 px-4 rounded-xl text-xs font-medium cursor-pointer border"
-              style={{ borderColor: '#E4E4E0', color: '#71717A' }}
-            >
-              Replace footage
-            </button>
             {selectedVariant && (
               <div className="flex items-center gap-2 text-xs text-[#22C55E] font-medium">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
