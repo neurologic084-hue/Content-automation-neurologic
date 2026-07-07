@@ -114,9 +114,16 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
   async function handleDelete() {
     setDeleting(true)
     setShowDelete(false)
-    const supabase = createClient()
-    await supabase.from('scripts').delete().eq('id', scriptId)
-    if (ideaId) await supabase.from('ideas').delete().eq('id', ideaId)
+    // Server route instead of a direct row delete: it also removes the
+    // script's video edits AND their stored files (R2 + local renders),
+    // which a bare row delete leaves orphaned in the bucket forever.
+    try {
+      await fetch('/api/scripts/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scriptId, ideaId: ideaId || null }),
+      })
+    } catch { /* refresh shows the true state either way */ }
     router.refresh()
   }
 
