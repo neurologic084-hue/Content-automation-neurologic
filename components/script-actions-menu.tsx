@@ -250,7 +250,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
               <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
               <line x1="4" y1="2" x2="21" y2="22" />
             </svg>
-            Delete edit
+            Remove edit
           </button>
           <button
             onClick={() => { closeMenu(); setShowDelete(true) }}
@@ -261,7 +261,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
               <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
               <path d="M10 11v6M14 11v6M9 6V4h6v2" />
             </svg>
-            Delete script
+            Remove edit and script
           </button>
         </div>,
         document.body
@@ -388,9 +388,9 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
 
       <ConfirmModal
         open={showDeleteEdit}
-        title="Delete edit"
-        message="This deletes the video edit and its rendered videos (frees storage). The script stays — you can make a new edit anytime."
-        confirmLabel="Yes, delete edit"
+        title="Remove edit"
+        message="This removes the video edit and its rendered videos (frees storage). The script stays — you can make a new edit anytime."
+        confirmLabel="Yes, remove edit"
         cancelLabel="No, keep it"
         danger
         onConfirm={handleDeleteEdit}
@@ -398,9 +398,9 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
       />
       <ConfirmModal
         open={showDelete}
-        title="Delete script"
-        message="This permanently deletes the script, its idea, and any video edits made from it. Cannot be undone."
-        confirmLabel="Yes, delete"
+        title="Remove edit and script"
+        message="This permanently removes the script, its idea, and every video edit made from it. Cannot be undone."
+        confirmLabel="Yes, remove all"
         cancelLabel="No, keep it"
         danger
         onConfirm={handleDelete}
