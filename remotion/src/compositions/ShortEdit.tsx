@@ -287,6 +287,11 @@ const SegmentClip: React.FC<{
       <OffthreadVideo
         src={staticFile(videoFile)}
         startFrom={Math.round(seg.srcStart * fps)}
+        // Tone mapping needs ffmpeg zscale/tonemap filters that the bare
+        // sandbox VM's compositor lacks — leaving it on makes frame extraction
+        // 500 ("Could not extract frame from compositor"). Our footage is SDR,
+        // so tone mapping is a no-op visually; turning it off is free here.
+        toneMapping={false}
         style={{
           width: '100%',
           height: '100%',
@@ -312,6 +317,7 @@ const SegmentClip: React.FC<{
             src={staticFile(matte.file)}
             muted
             transparent
+            toneMapping={false}
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
         </Sequence>
@@ -501,7 +507,7 @@ const DesignedCover: React.FC<{
   const palette = POSTER_PALETTES[item.design?.palette ?? 'champagne']
   const hasMedia = !!item.file
   const media = !hasMedia ? null : item.kind === 'video'
-    ? <OffthreadVideo src={staticFile(item.file)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
 
   const kickerIn = interpolate(frame, [4, 10], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
@@ -669,7 +675,7 @@ const BrollClip: React.FC<{
   })
   // file may be '' for typography-only designed posters (DesignedCover guards).
   const media = !item.file ? null : item.kind === 'video'
-    ? <OffthreadVideo src={staticFile(item.file)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
 
   // Split: FootageStage carries the footage to the top while the media rises
@@ -726,7 +732,7 @@ const BrollClip: React.FC<{
       ]
       const mediaFor = (f: string) =>
         f.endsWith('.mp4')
-          ? <OffthreadVideo src={staticFile(f)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ? <OffthreadVideo src={staticFile(f)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           : <Img src={staticFile(f)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       return (
         <AbsoluteFill style={{ pointerEvents: 'none' }}>
