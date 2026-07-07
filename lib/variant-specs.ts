@@ -66,15 +66,15 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
   // Calm & Clean — Umi's small elegant captions (user-picked). All three
   // Submagic variants run extra-fast silence cutting by request; the
   // sensitivity gate still softens the pace on medical/emotional or
-  // personal footage. B-roll rides a tight 30-38% band: always substantial,
-  // with just enough headroom for the footage rating to breathe.
+  // personal footage. B-roll maxed by request on all three Submagic
+  // variants: 46-49% on every footage tier, always under 50.
   'our-v1': {
     id: 'our-v1',
     name: 'Calm & Clean',
     captionLane: 'clean',
     templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
-    adaptive: { brollCeiling: { none: 30, some: 34, rich: 38 } },
+    adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,
   },
   // UGC Aesthetic — Luke captions (user-picked; Beast/Ella as backup) with
@@ -87,7 +87,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     captionLane: 'bold',
     templatePool: ['Luke', 'Beast', 'Ella'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
-    adaptive: { brollCeiling: { none: 42, some: 45, rich: 48 } },
+    adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,
   },
   // Creator Bold — Hormozi 3 captions (user-picked, other Hormozis as
@@ -99,7 +99,7 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     captionLane: 'bold',
     templatePool: ['Hormozi 3', 'Hormozi 1', 'Hormozi 2', 'Hormozi 4', 'Hormozi 5'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
-    adaptive: { brollCeiling: { none: 42, some: 46, rich: 49 } },
+    adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,
   },
   // v4/v5: the Remotion overlay carries the visual interest, so their Submagic
