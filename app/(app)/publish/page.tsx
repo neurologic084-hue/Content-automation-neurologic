@@ -500,17 +500,17 @@ function PublishForm() {
       }
       setPublishedKeys(keys)
 
-      // A job stays listed as long as ANY ready variant hasn't gone out yet.
-      const hasPublishableVariant = (row: Record<string, unknown>): boolean => {
+      // A job stays listed as long as it has ANY ready variant — including
+      // fully-published jobs, so re-publishing stays possible (with a warning;
+      // the green checks on the chips show what already went out).
+      const hasReadyVariant = (row: Record<string, unknown>): boolean => {
         const variants = (row.variants ?? []) as VideoVariant[]
-        return variants.some(v =>
-          v.status === 'ready' && !!v.download_url && !keys.has(`${row.id}:${v.id}`)
-        )
+        return variants.some(v => v.status === 'ready' && !!v.download_url)
       }
 
       setJobs(
         (jobsRes.data ?? [])
-          .filter((row: Record<string, unknown>) => hasPublishableVariant(row))
+          .filter((row: Record<string, unknown>) => hasReadyVariant(row))
           .map((row: Record<string, unknown>) => ({
             ...row,
             script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
@@ -636,6 +636,15 @@ function PublishForm() {
   const takenPlatformsToday = selectedDate ? scheduledPlatformsByDay[selectedDate] ?? new Set<string>() : new Set<string>()
   const conflictingPlatforms = selectedPlatforms.filter(p => takenPlatformsToday.has(p))
   const dayTaken = conflictingPlatforms.length > 0
+
+  // Re-publish warning: the picked variant already went out (or is scheduled).
+  // Allowed — reposting can be deliberate — but never silent.
+  const pickedAlreadyPublished = !!(selectedJob && pickedVariantId &&
+    publishedKeys.has(`${selectedJob.id}:${pickedVariantId}`))
+  const pickedPublishedRecord = pickedAlreadyPublished
+    ? publishedList.find(p => p.video_job_id === selectedJob!.id &&
+        (p.variant_id === pickedVariantId || (!p.variant_id && pickedVariantId === selectedJob!.selected_variant)))
+    : undefined
 
   const hasScript = !!(selectedJob?.script?.hook)
   const canGenerate = hasScript && selectedPlatforms.length > 0
@@ -1337,6 +1346,26 @@ function PublishForm() {
           </div>
         )}
 
+        {/* Re-publish warning — allowed, but never silent */}
+        {!result && pickedAlreadyPublished && (
+          <div className="flex items-start gap-2.5 rounded-xl border px-4 py-3" style={{ borderColor: '#FDE68A', background: '#FFFBEB' }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#D97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-0.5">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <p className="text-xs text-[#92400E] leading-relaxed">
+              <span className="font-bold">This variant was already {pickedPublishedRecord?.status === 'scheduled' ? 'scheduled' : 'published'}</span>
+              {pickedPublishedRecord?.published_at || pickedPublishedRecord?.scheduled_at
+                ? ` on ${new Date((pickedPublishedRecord.published_at ?? pickedPublishedRecord.scheduled_at)!).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+                : ''}
+              {(pickedPublishedRecord?.platform_posts ?? []).length
+                ? ` to ${pickedPublishedRecord!.platform_posts.map(pp => pp.platform).join(', ')}`
+                : ''}
+              . Publishing again will post the same video another time — fine if that&apos;s the plan, just make sure it is.
+            </p>
+          </div>
+        )}
+
         {/* Submit */}
         {!result && (
           <button
@@ -1356,7 +1385,7 @@ function PublishForm() {
                   <line x1="22" y1="2" x2="11" y2="13" />
                   <polygon points="22 2 15 22 11 13 2 9 22 2" />
                 </svg>
-                {scheduleMode === 'later' ? 'Schedule' : 'Publish'} to {selectedIds.size} platform{selectedIds.size !== 1 ? 's' : ''}
+                {scheduleMode === 'later' ? (pickedAlreadyPublished ? 'Schedule again' : 'Schedule') : (pickedAlreadyPublished ? 'Publish again' : 'Publish')} to {selectedIds.size} platform{selectedIds.size !== 1 ? 's' : ''}
               </>
             )}
           </button>
