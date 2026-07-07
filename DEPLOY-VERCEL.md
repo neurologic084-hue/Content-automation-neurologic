@@ -28,7 +28,6 @@ in-process on your machine exactly as before.
        NEXT_PUBLIC_SUPABASE_ANON_KEY
        SUPABASE_SERVICE_ROLE_KEY
        OPENROUTER_API_KEY
-       GEMINI_API_KEY
        TAVILY_API_KEY
        SUBMAGIC_API_KEY
        ELEVENLABS_API_KEY
