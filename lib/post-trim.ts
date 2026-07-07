@@ -31,8 +31,15 @@ export async function trimResidualSilences(videoPath: string): Promise<number> {
   // so quiet-but-present speech never reads as silence.
   const silences = await detectSilences(videoPath, { noiseDb: -40, minDurationSec: MIN_RESIDUAL_SEC })
 
+  // Snap every window to FRAME boundaries (30fps grid). The video track can
+  // only drop whole frames while audio cuts at sample precision — unsnapped
+  // windows leave a sliver of mismatch per cut, and across many cuts that
+  // accumulates into visible lip-sync drift by the end of the video.
+  const FPS = 30
+  const snap = (t: number) => Math.round(t * FPS) / FPS
+
   const cuts = silences
-    .map(([s, e]) => [s + EDGE_PAD_SEC, e - EDGE_PAD_SEC] as [number, number])
+    .map(([s, e]) => [snap(s + EDGE_PAD_SEC), snap(e - EDGE_PAD_SEC)] as [number, number])
     .filter(([s, e]) => e - s >= 0.25)
     .filter(([s]) => s > HEAD_GUARD_SEC)
     .slice(0, MAX_CUTS)
