@@ -1183,6 +1183,38 @@ function enqueueRemotionRender<T>(fn: () => Promise<T>): Promise<T> {
   g.__olyRemotionQueue = p.catch(() => undefined)
   return p
 }
+
+// Sandbox-only: make Remotion's gnu compositor run on Amazon Linux 2023's glibc
+// 2.34. Mirrors @remotion/vercel's patchCompositor — download Ubuntu 22.04's
+// glibc 2.35 and patchelf the compositor's interpreter + rpath onto it. Runs
+// once per VM (marker file); ffmpeg/ffprobe are left on system glibc (they work
+// on 2.34). Verified end-to-end on a real AL2023 container.
+const GLIBC_PATCH_MARKER = '/tmp/.oly-glibc235-patched'
+async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
+  if (fs.existsSync(GLIBC_PATCH_MARKER)) return
+  const comp = path.join(gnuDir, 'remotion')
+  if (!fs.existsSync(comp)) {
+    console.warn(`[motion-renderer] compositor not found at ${comp}; skipping glibc patch`)
+    return
+  }
+  const scriptPath = path.join(os.tmpdir(), 'oly-patch-compositor.sh')
+  const script = [
+    'set -eu',
+    // patchelf/zstd/binutils(ar)/tar for the patch — idempotent, best-effort.
+    'sudo dnf install -y -q patchelf zstd binutils tar >/dev/null 2>&1 || true',
+    'GLIBC=/tmp/glibc235',
+    'mkdir -p "$GLIBC" && cd /tmp',
+    'curl -fsSL -o libc6.deb "https://launchpadlibrarian.net/612471225/libc6_2.35-0ubuntu3.1_amd64.deb" || curl -fsSL -o libc6.deb "https://remotion.media/libc6_2.35-0ubuntu3.1_amd64.deb"',
+    'ar x libc6.deb',
+    'zstd -d -f data.tar.zst -o data.tar',
+    'tar xf data.tar -C "$GLIBC" --strip-components=1',
+    `patchelf --set-interpreter "$GLIBC/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" --force-rpath --set-rpath "$GLIBC/lib/x86_64-linux-gnu:\\$ORIGIN" "${comp}"`,
+    `touch "${GLIBC_PATCH_MARKER}"`,
+    'echo "[motion-renderer] compositor patched onto bundled glibc 2.35"',
+  ].join('\n')
+  fs.writeFileSync(scriptPath, script)
+  await run(`bash "${scriptPath}"`, 300_000)
+}
 async function renderRemotionEdit(
   jobId: string,
   variantId: string,
@@ -1536,30 +1568,15 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
       await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
-      // Sandbox VM is Amazon Linux 2023 (glibc 2.34). Remotion's default -gnu
-      // COMPOSITOR needs glibc 2.35+ and can't load there ("Compositor quit:
-      // GLIBC_2.35 not found"), but the -gnu ffmpeg/ffprobe run fine on 2.34.
-      // Swap ONLY the compositor binary in the gnu package for the static musl
-      // build (verified on AL2023: musl compositor + gnu ffmpeg/ffprobe all run
-      // from one dir). Done HERE in the cloned worker code — not the bootstrap —
-      // so it rides the freshly-cloned repo and can't be blocked by a lagging
-      // Vercel function deploy. The binary is vendored in the repo, so no
-      // download/tar is needed inside the VM.
+      // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
+      // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
+      // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
+      // ffmpeg/ffprobe stay on system glibc 2.34. Verified end-to-end on real
+      // AL2023. Runs from the cloned worker (not the bootstrap) so it can't be
+      // blocked by a lagging Vercel function deploy; once-per-VM via a marker.
       const gnuDir = path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')
       if (process.env.SANDBOX) {
-        try {
-          const vendored = path.join(REMOTION_DIR, 'vendor', 'compositor-remotion-linux-x64-musl')
-          const target = path.join(gnuDir, 'remotion')
-          if (fs.existsSync(vendored) && fs.existsSync(gnuDir)) {
-            fs.copyFileSync(vendored, target)
-            fs.chmodSync(target, 0o755)
-            console.log('[motion-renderer] BUILD-MARKER musl-swap-v2 — swapped gnu compositor for vendored musl binary')
-          } else {
-            console.warn(`[motion-renderer] musl swap skipped: vendored=${fs.existsSync(vendored)} gnuDir=${fs.existsSync(gnuDir)}`)
-          }
-        } catch (e) {
-          console.warn('[motion-renderer] musl compositor swap failed:', (e as Error).message)
-        }
+        await patchSandboxCompositorGlibc(gnuDir)
       }
       const sandboxFlags = process.env.SANDBOX
         ? ` --offthreadvideo-cache-size-in-bytes=536870912 --binaries-directory="${gnuDir}"`
