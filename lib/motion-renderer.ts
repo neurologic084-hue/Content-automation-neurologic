@@ -1536,14 +1536,15 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
       await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
-      // Sandbox VM is Amazon Linux 2023 (glibc 2.34), but Remotion's default
-      // Linux compositor is the -gnu build that needs glibc 2.35+ → it can't
-      // load and every frame extraction dies ("Compositor quit: GLIBC_2.35
-      // not found"). The MUSL compositor is statically linked and runs on any
-      // libc; the bootstrap installs it and we point Remotion at it here.
+      // Sandbox VM is Amazon Linux 2023 (glibc 2.34). Remotion's default -gnu
+      // COMPOSITOR needs glibc 2.35+ and can't load there ("Compositor quit:
+      // GLIBC_2.35 not found"), but the -gnu ffmpeg/ffprobe run fine on 2.34.
+      // The bootstrap swaps ONLY the compositor binary in the gnu package for
+      // the statically-linked musl build (verified to run on AL2023), leaving
+      // ffmpeg/ffprobe as gnu — so this one dir has a working set of all three.
       const sandboxFlags = process.env.SANDBOX
         ? ` --offthreadvideo-cache-size-in-bytes=536870912` +
-          ` --binaries-directory="${path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-musl')}"`
+          ` --binaries-directory="${path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')}"`
         : ''
       await run(
         // 360s delayRender timeout: on a busy machine (user apps + dev server +

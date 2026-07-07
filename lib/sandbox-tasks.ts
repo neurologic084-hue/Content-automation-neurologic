@@ -94,11 +94,19 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
       ? [
           CHROME_DEPS,
           'cd remotion && npm ci --no-audit --no-fund',
-          // AL2023's glibc (2.34) is older than Remotion's default -gnu
-          // compositor needs (2.35). Force-install the statically-linked musl
-          // compositor (pinned to the installed renderer version) — it runs on
-          // any libc, and the render points --binaries-directory at it.
-          'npm install @remotion/compositor-linux-x64-musl@"$(node -p "require(\'@remotion/renderer/package.json\').version")" --no-save --force --no-audit --no-fund',
+          // AL2023's glibc (2.34) < the 2.35 Remotion's default -gnu COMPOSITOR
+          // needs. The -gnu ffmpeg/ffprobe run fine on 2.34, only the compositor
+          // binary is the problem. Download the musl compositor tarball (npm
+          // won't install a musl pkg on a glibc host even with --force) and
+          // overwrite JUST the compositor binary in the gnu package with the
+          // static musl one. Verified on AL2023: musl compositor + gnu
+          // ffmpeg/ffprobe all execute from that one dir.
+          'GNUDIR=node_modules/@remotion/compositor-linux-x64-gnu',
+          'VER="$(node -p "require(\'@remotion/renderer/package.json\').version")"',
+          'curl -sL "https://registry.npmjs.org/@remotion/compositor-linux-x64-musl/-/compositor-linux-x64-musl-$VER.tgz" -o /tmp/musl.tgz',
+          'mkdir -p /tmp/muslc && tar xzf /tmp/musl.tgz -C /tmp/muslc --strip-components=1',
+          'cp /tmp/muslc/remotion "$GNUDIR/remotion" && chmod +x "$GNUDIR/remotion"',
+          'echo "[bootstrap] swapped in musl compositor ($VER)"',
           'npx remotion browser ensure',
           'cd ..',
         ]
