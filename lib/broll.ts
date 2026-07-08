@@ -295,11 +295,19 @@ async function download(url: string, dest: string): Promise<boolean> {
 // same query (variation 1 starts from the 2nd result, etc.).
 function rotated<T>(arr: T[], offset: number): T[] {
   if (!arr.length) return arr
-  const n = offset % arr.length
+  const n = ((offset % arr.length) + arr.length) % arr.length
   return [...arr.slice(n), ...arr.slice(0, n)]
 }
 
-async function fetchPexelsVideo(query: string, dest: string, offset = 0): Promise<boolean> {
+// Media already claimed by an earlier slot in THIS render, keyed by stable
+// provider id. Two slots whose queries collapse to the same ladder term used to
+// receive byte-identical footage: the rotation offset was the render's single
+// `variation` value, so "same query + same offset" always resolved to the same
+// result. Threading one set through every fetcher makes a repeat impossible
+// rather than merely unlikely.
+export type UsedMedia = Set<string>
+
+async function fetchPexelsVideo(query: string, dest: string, offset = 0, used?: UsedMedia): Promise<boolean> {
   const key = process.env.PEXELS_API_KEY
   if (!key) return false
   try {
@@ -309,12 +317,17 @@ async function fetchPexelsVideo(query: string, dest: string, offset = 0): Promis
     )
     if (!res.ok) return false
     const data = await res.json()
-    type PexelsVideo = { video_files?: Array<{ width: number; height: number; link: string }> }
+    type PexelsVideo = { id?: number; video_files?: Array<{ width: number; height: number; link: string }> }
     for (const video of rotated<PexelsVideo>(data.videos ?? [], offset)) {
+      const id = `pexels-video:${video.id ?? ''}`
+      if (video.id && used?.has(id)) continue
       const file = (video.video_files ?? [])
         .filter((f: { width: number; height: number; link: string }) => f.height >= 1000 && f.height <= 2200)
         .sort((a: { height: number }, b: { height: number }) => a.height - b.height)[0]
-      if (file?.link && await download(file.link, dest)) return true
+      if (file?.link && await download(file.link, dest)) {
+        if (video.id) used?.add(id)
+        return true
+      }
     }
     return false
   } catch {
@@ -322,7 +335,7 @@ async function fetchPexelsVideo(query: string, dest: string, offset = 0): Promis
   }
 }
 
-async function fetchPexelsPhoto(query: string, dest: string, offset = 0): Promise<boolean> {
+async function fetchPexelsPhoto(query: string, dest: string, offset = 0, used?: UsedMedia): Promise<boolean> {
   const key = process.env.PEXELS_API_KEY
   if (!key) return false
   try {
@@ -332,10 +345,15 @@ async function fetchPexelsPhoto(query: string, dest: string, offset = 0): Promis
     )
     if (!res.ok) return false
     const data = await res.json()
-    type PexelsPhoto = { src?: { large2x?: string; large?: string } }
+    type PexelsPhoto = { id?: number; src?: { large2x?: string; large?: string } }
     for (const photo of rotated<PexelsPhoto>(data.photos ?? [], offset)) {
+      const id = `pexels-photo:${photo.id ?? ''}`
+      if (photo.id && used?.has(id)) continue
       const url = photo?.src?.large2x ?? photo?.src?.large
-      if (url && await download(url, dest)) return true
+      if (url && await download(url, dest)) {
+        if (photo.id) used?.add(id)
+        return true
+      }
     }
     return false
   } catch {
@@ -344,7 +362,7 @@ async function fetchPexelsPhoto(query: string, dest: string, offset = 0): Promis
 }
 
 // Keyless fallback: Openverse, cc0/public-domain only (no attribution needed).
-async function fetchOpenverseImage(query: string, dest: string, offset = 0): Promise<boolean> {
+async function fetchOpenverseImage(query: string, dest: string, offset = 0, used?: UsedMedia): Promise<boolean> {
   try {
     const res = await fetch(
       `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=8&license=cc0,pdm&category=photograph`,
@@ -352,8 +370,14 @@ async function fetchOpenverseImage(query: string, dest: string, offset = 0): Pro
     )
     if (!res.ok) return false
     const data = await res.json()
-    for (const result of rotated<{ url?: string }>(data.results ?? [], offset)) {
-      if (result?.url && await download(result.url, dest)) return true
+    for (const result of rotated<{ id?: string; url?: string }>(data.results ?? [], offset)) {
+      if (!result?.url) continue
+      const id = `openverse:${result.id ?? result.url}`
+      if (used?.has(id)) continue
+      if (await download(result.url, dest)) {
+        used?.add(id)
+        return true
+      }
     }
     return false
   } catch {
@@ -384,12 +408,18 @@ export async function resolveBrollMedia(
   // 'viral' = full-screen video covers, except the designed poster card which
   //           wants a PHOTO to float on its gradient canvas.
   media: BrollFlavor = 'mixed',
+  // Shared across every slot of one render so no clip is ever used twice. The
+  // caller may pass its own set to also exclude media used elsewhere.
+  used: UsedMedia = new Set(),
 ): Promise<BrollItem[]> {
   fs.mkdirSync(stageDir, { recursive: true })
   const items: BrollItem[] = []
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i]
     let resolved = false
+    // Per-SLOT rotation offset. `variation` alone is constant for the whole
+    // render, so every slot started at the same index of its result list.
+    const offset = variation + i
 
     for (const query of queryLadder(slot.query)) {
       // Mixed mode: covers are always video; cards flip a seeded coin so a
@@ -399,14 +429,14 @@ export async function resolveBrollMedia(
         || (media === 'mixed' && (slot.layout === 'cover' || (variation + i) % 2 === 0))
       if (wantsVideo) {
         const videoDest = path.join(stageDir, `broll-${i}.mp4`)
-        if (await fetchPexelsVideo(query, videoDest, variation)) {
+        if (await fetchPexelsVideo(query, videoDest, offset, used)) {
           items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.mp4`, kind: 'video', layout: slot.layout, design: slot.design, query: slot.query })
           resolved = true
           break
         }
       }
       const photoDest = path.join(stageDir, `broll-${i}.jpg`)
-      if (await fetchPexelsPhoto(query, photoDest, variation) || await fetchOpenverseImage(query, photoDest, variation)) {
+      if (await fetchPexelsPhoto(query, photoDest, offset, used) || await fetchOpenverseImage(query, photoDest, offset, used)) {
         items.push({ start: slot.start, duration: slot.duration, file: `${publicPrefix}/broll-${i}.jpg`, kind: 'image', layout: slot.layout, design: slot.design, query: slot.query })
         resolved = true
         break
@@ -423,7 +453,7 @@ export async function resolveBrollMedia(
       }
     }
   }
-  console.log(`[broll] resolved ${items.length}/${slots.length} slot(s) (${media})`)
+  console.log(`[broll] resolved ${items.length}/${slots.length} slot(s) (${media}), ${used.size} distinct media`)
   return items
 }
 
@@ -438,12 +468,14 @@ export async function resolveExtraImages(
   baseName: string,
   count: number,
   variation = 0,
+  // Pass the render's set so a carousel pane can't repeat a cover's photo.
+  used: UsedMedia = new Set(),
 ): Promise<string[]> {
   fs.mkdirSync(stageDir, { recursive: true })
   const out: string[] = []
   for (let k = 0; k < count; k++) {
     const dest = path.join(stageDir, `${baseName}-x${k}.jpg`)
-    if (await fetchPexelsPhoto(query, dest, variation + k + 1) || await fetchOpenverseImage(query, dest, variation + k + 1)) {
+    if (await fetchPexelsPhoto(query, dest, variation + k + 1, used) || await fetchOpenverseImage(query, dest, variation + k + 1, used)) {
       out.push(`${publicPrefix}/${baseName}-x${k}.jpg`)
     }
   }

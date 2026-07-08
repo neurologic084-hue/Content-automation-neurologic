@@ -1389,8 +1389,11 @@ async function renderRemotionEdit(
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
+        // One set for the whole render: cover slots, carousel panes and every
+        // query-ladder fallback all draw from it, so no clip appears twice.
+        const usedMedia = new Set<string>()
         const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
-        broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
+        broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
         if (viral) {
           // Pages over covers go big/centered; pages under the designed poster
           // are dropped (the card carries its own headline).
@@ -1429,6 +1432,7 @@ async function renderRemotionEdit(
                   `carousel-${bi}`,
                   2,
                   kit.variation,
+                  usedMedia,
                 ).catch(() => [] as string[])
                 if (extras.length >= 1) {
                   b.extraFiles = extras
