@@ -31,6 +31,7 @@ const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = 
 
 export function VideoStudio({ script, existingJobId }: Props) {
   const [driveUrl, setDriveUrl] = useState('')
+  const [customBrollText, setCustomBrollText] = useState('')
   const [musicMode, setMusicMode] = useState<MusicMode>('smart')
   const [jobId, setJobId] = useState<string | null>(existingJobId)
   // 'loading': have an existing job but haven't fetched its real status yet
@@ -141,7 +142,12 @@ export function VideoStudio({ script, existingJobId }: Props) {
     const res = await fetch('/api/video/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scriptId: script.id, driveUrl, musicMode }),
+      body: JSON.stringify({
+        scriptId: script.id,
+        driveUrl,
+        musicMode,
+        customBroll: customBrollText.split('\n').map(l => l.trim()).filter(Boolean),
+      }),
     })
     const data = await res.json()
 
@@ -300,6 +306,22 @@ export function VideoStudio({ script, existingJobId }: Props) {
             onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
             onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
           />
+
+          {/* Custom B-roll (optional) */}
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-[#71717A] mb-1.5">Your own B-roll <span className="font-normal text-[#A1A1AA]">(optional)</span></p>
+            <textarea
+              placeholder={"Google Drive links to your own B-roll clips, one per line.\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
+              value={customBrollText}
+              onChange={e => setCustomBrollText(e.target.value)}
+              rows={3}
+              className="w-full px-4 py-3 rounded-xl border border-[#E4E4E0] text-sm outline-none resize-y"
+              style={{ background: '#FAFAFA' }}
+              onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
+              onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
+            />
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the Edit variants (Concept Pro, Viral Energy, Cinematic). Leave empty to use auto-picked stock B-roll.</p>
+          </div>
 
           {/* Background music */}
           <div className="mb-4">

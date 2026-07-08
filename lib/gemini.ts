@@ -81,9 +81,9 @@ export async function geminiGenerate(opts: GenerateOptions): Promise<string> {
     messages: [{ role: 'user', content }],
     temperature: opts.temperature ?? 0.3,
     max_tokens: opts.maxOutputTokens ?? 1024,
-    reasoning: (opts.thinkingBudget ?? 0) > 0
-      ? { max_tokens: opts.thinkingBudget }
-      : { enabled: false },
+    // Only steer reasoning when a budget is requested — some Gemini endpoints
+    // reject {enabled:false} outright ("Reasoning is mandatory").
+    ...((opts.thinkingBudget ?? 0) > 0 ? { reasoning: { max_tokens: opts.thinkingBudget } } : {}),
     ...(opts.responseSchema
       ? {
           response_format: {

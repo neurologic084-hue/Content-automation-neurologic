@@ -23,7 +23,8 @@ import { applyVisualTransitions } from './visual-transitions'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, type BrollItem } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, type BrollItem, type CustomClip } from './broll'
+import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
@@ -1272,6 +1273,74 @@ async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
   fs.writeFileSync(scriptPath, script)
   await run(`bash "${scriptPath}"`, 300_000)
 }
+// Downloads, normalizes, and describes the creator's OWN B-roll clips (Drive
+// links stored on the job). Descriptions are written back to the job row so
+// each clip is watched once per JOB, not once per variant. Returns clips
+// ready for the custom planner; a clip that fails is skipped, never fatal.
+async function stageCustomBroll(
+  jobId: string,
+  entries: { url: string; description?: string | null }[],
+  cacheDir: string,
+  publicPrefix: string,
+): Promise<CustomClip[]> {
+  fs.mkdirSync(cacheDir, { recursive: true })
+  const clips: CustomClip[] = []
+  let descriptionsChanged = false
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]
+    try {
+      const fileName = `custom-${jobId.slice(0, 8)}-${i}.mp4`
+      const outPath = path.join(cacheDir, fileName)
+      if (!fs.existsSync(outPath)) {
+        const rawPath = outPath + '.raw'
+        await downloadFile(entry.url, rawPath)
+        // Normalize to h264/yuv420p 30fps, audio stripped — OffthreadVideo-safe
+        // regardless of what the phone/Drive produced (HEVC, odd rotation).
+        await run(
+          `ffmpeg -y -i "${rawPath}" -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
+          300_000,
+        )
+        try { fs.unlinkSync(rawPath) } catch { /* best-effort */ }
+      }
+      const duration = await getVideoDuration(outPath)
+
+      let description = entry.description?.trim() || ''
+      if (!description) {
+        // One short look per clip so the planner can match content to the
+        // transcript. Described from a tiny low-res sample, never the full
+        // file (keeps the request small no matter how big the upload was).
+        const samplePath = outPath + '.sample.mp4'
+        await run(`ffmpeg -y -i "${outPath}" -t 8 -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 -an "${samplePath}"`, 120_000)
+        try {
+          const media = { mimeType: 'video/mp4', data: fs.readFileSync(samplePath).toString('base64') }
+          description = (await geminiGenerate({
+            prompt: 'Describe what this clip shows in ONE short line (max 15 words): the subject and the action. No opinions, no style words.',
+            media: [media],
+            model: 'google/gemini-2.5-flash-lite',
+            maxOutputTokens: 200,
+            temperature: 0.2,
+          })).trim()
+          entry.description = description
+          descriptionsChanged = true
+        } finally {
+          try { fs.unlinkSync(samplePath) } catch { /* best-effort */ }
+        }
+      }
+
+      clips.push({ file: `${publicPrefix}/${fileName}`, description: description || `creator clip ${i + 1}`, duration })
+      console.log(`[motion-renderer] custom B-roll ${i}: ${duration.toFixed(1)}s — "${description.slice(0, 70)}"`)
+    } catch (e) {
+      console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
+    }
+  }
+  if (descriptionsChanged) {
+    try {
+      await supabaseAdmin().from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
+    } catch { /* descriptions are a cache — losing them just re-describes next render */ }
+  }
+  return clips
+}
+
 async function renderRemotionEdit(
   jobId: string,
   variantId: string,
@@ -1405,11 +1474,20 @@ async function renderRemotionEdit(
       }
     }
 
+    const usingCustomBroll = !!opts.customBroll?.length
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
-        const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
-        broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
+        if (usingCustomBroll) {
+          // The creator supplied their own clips — stock sourcing is skipped
+          // entirely. Clips are matched to transcript moments by content.
+          const clips = await stageCustomBroll(jobId, opts.customBroll!, cacheDir, 'edit-cache')
+          for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
+          broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion)
+        } else {
+          const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
+          broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
+        }
         if (viral) {
           // Pages over covers go big/centered; pages under the designed poster
           // are dropped (the card carries its own headline).
@@ -1441,7 +1519,9 @@ async function renderRemotionEdit(
               if (b.layout !== 'cover') continue
               let pick = LAYOUTS[(bi + kit.variation) % LAYOUTS.length]
               if (pick === 'panel') {
-                const extras = await resolveExtraImages(
+                // Custom-clip mode never fetches stock extras — the carousel
+                // falls back to a side panel (same clip) or a plain cover.
+                const extras = usingCustomBroll ? [] : await resolveExtraImages(
                   b.query ?? 'city skyline golden hour',
                   path.join(REMOTION_DIR, 'public', brollPrefix),
                   brollPrefix,
@@ -1769,6 +1849,10 @@ export interface RenderVariantOptions {
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
   musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
+  // Creator-supplied B-roll (Drive links stored on the job). When present,
+  // stock B-roll is skipped entirely and these clips are matched to
+  // transcript moments instead.
+  customBroll?: { url: string; description?: string | null }[]
 }
 
 // Main pipeline (no Descript anywhere in this app):
@@ -2023,5 +2107,6 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
     submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
     musicMode: variant.music_mode as MusicMode | undefined,
+    customBroll: (job.custom_broll as { url: string; description?: string | null }[] | null) ?? undefined,
   })
 }
