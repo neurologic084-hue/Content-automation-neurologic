@@ -54,6 +54,22 @@ export function VideoStudio({ script, existingJobId }: Props) {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [jobId])
 
+  // Background tabs throttle setInterval, and a long render can finish while the
+  // tab is hidden — leaving the progress bar frozen at its last value. Re-poll
+  // the moment the tab is focused again so the UI catches up to reality.
+  useEffect(() => {
+    function refresh() {
+      if (jobId && document.visibilityState === 'visible') pollStatus(jobId)
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId])
+
   // Preview cards crop (object-cover) to fill a compact thumbnail, but that
   // same crop looks wrong blown up to native fullscreen -- it zooms into the
   // footage instead of showing the whole vertical frame. Force the fullscreen
