@@ -32,7 +32,6 @@ in-process on your machine exactly as before.
        SUBMAGIC_API_KEY
        ELEVENLABS_API_KEY
        PEXELS_API_KEY
-       AUPHONIC_API_TOKEN
        R2_ACCOUNT_ID
        R2_ACCESS_KEY_ID
        R2_SECRET_ACCESS_KEY

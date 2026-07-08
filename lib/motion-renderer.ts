@@ -17,6 +17,7 @@ import { patchVariant } from './job-lock'
 import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
+import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
@@ -589,6 +590,25 @@ async function libraryMusicContextFromDb(
 // finished previews sometimes went black hours later.
 const activeSubmagicFinalizes = (g.__olySubmagicFinalizes ??= new Set<string>())
 
+// True when this variant rendered through Submagic's fully-autonomous
+// aiEditTemplate mode, whose request body omits cleanAudio entirely. Defaults
+// to false (assume Submagic cleaned it) — a failed lookup must not trigger a
+// needless ElevenLabs spend on audio that is already clean.
+async function submagicSkippedCleanAudio(jobId: string, variantId: string): Promise<boolean> {
+  try {
+    const { data: job } = await supabaseAdmin()
+      .from('video_jobs')
+      .select('variants')
+      .eq('id', jobId)
+      .single()
+    const variantRow = ((job?.variants ?? []) as VideoVariant[]).find(v => v.id === variantId)
+    return Boolean(variantRow?.submagicPreset?.aiEditTemplate)
+  } catch (e) {
+    console.warn(`[motion-renderer] could not read submagicPreset for ${jobId}:${variantId}, assuming cleanAudio ran:`, (e as Error).message)
+    return false
+  }
+}
+
 export async function finalizeSubmagicVariant(
   jobId: string,
   variantId: string,
@@ -632,9 +652,14 @@ export async function finalizeSubmagicVariant(
   }
   try {
     const musicCtx = music ?? await libraryMusicContextFromDb(jobId, variantId)
+    // aiEditTemplate renders never receive cleanAudio (submitSubmagicJob sends
+    // only the base fields in that mode), so their audio needs the ElevenLabs
+    // safety net. Every other Submagic render is cleaned in-render and is left
+    // exactly as Submagic returned it.
+    const skippedCleanAudio = await submagicSkippedCleanAudio(jobId, variantId)
     let finalUrl: string
     try {
-      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx)
+      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio)
       console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
     } catch (e) {
       // Fall back to Submagic's own URL rather than failing the variant —
@@ -675,6 +700,7 @@ export async function retrieveAndStoreSubmagicResult(
   variantId: string,
   downloadUrl: string,
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
+  skippedCleanAudio: boolean = false,
 ): Promise<string> {
   const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
@@ -682,16 +708,27 @@ export async function retrieveAndStoreSubmagicResult(
   await downloadFile(downloadUrl, localPath)
 
   await enqueueAudioPostSteps(async () => {
-    // Voice polish on the dialogue BEFORE music goes under it: Auphonic
-    // denoise/level (ElevenLabs isolation as fallback) evens the voice out so
-    // the voice-aware music mix below can trust its level. Submagic's own
-    // cleaner is skipped — this file just came out of Submagic with cleanAudio
-    // already applied, and re-running it would spend another render for nothing.
-    try {
-      const cleaner = await cleanAudioInPlace(localPath, { skipSubmagic: true })
-      if (cleaner !== 'none') console.log(`[motion-renderer] post-Submagic voice polish via ${cleaner} for ${jobId}:${variantId}`)
-    } catch (e) {
-      console.warn('[motion-renderer] post-Submagic voice polish failed, keeping original audio:', (e as Error).message)
+    // The Submagic variants keep Submagic's dialogue verbatim — no Auphonic,
+    // no second cleaning pass. Their render already ran with cleanAudio
+    // (SUBMAGIC_ALWAYS_ON), and mixBackgroundMusic below measures this file's
+    // real voice loudness rather than assuming a normalized level, so nothing
+    // downstream needs the audio pre-levelled.
+    //
+    // The one exception is the fully-autonomous aiEditTemplate path: that
+    // request body carries only title/language/videoUrl/aiEditTemplate (see
+    // submitSubmagicJob), so cleanAudio is never sent and the footage comes
+    // back unprocessed. ElevenLabs isolation is the safety net there only.
+    if (skippedCleanAudio) {
+      try {
+        const isolated = await isolateVoiceInPlace(localPath)
+        console.log(
+          isolated
+            ? `[motion-renderer] aiEditTemplate render had no cleanAudio — isolated voice via ElevenLabs for ${jobId}:${variantId}`
+            : `[motion-renderer] aiEditTemplate render had no cleanAudio and ElevenLabs is unavailable — keeping original audio for ${jobId}:${variantId}`
+        )
+      } catch (e) {
+        console.warn('[motion-renderer] ElevenLabs isolation failed, keeping original audio:', (e as Error).message)
+      }
     }
 
     // Backstop cut: Submagic's extra-fast silence removal still leaves the
