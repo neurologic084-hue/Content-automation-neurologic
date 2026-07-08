@@ -112,20 +112,40 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
     `tail -c 3000 /tmp/task.log ; ` +
     `node --import tsx worker/upload-task-log.ts '${payload.jobId}' '${label}' /tmp/task.log || true`
 
-  const sandbox = await Sandbox.create({
-    source: {
-      type: 'git',
-      url: repoUrl,
-      ...(process.env.SANDBOX_GIT_TOKEN
-        ? { username: 'x-access-token', password: process.env.SANDBOX_GIT_TOKEN }
-        : {}),
-      depth: 1,
-    },
-    resources: { vcpus: needsRemotion ? 4 : 2 },
-    // Hobby caps sandboxes at 45 minutes; renders finish well inside that.
-    timeout: 40 * 60 * 1000,
-    runtime: 'node22',
-  })
+  // Sandbox creation can fail transiently (Vercel rate-limit, brief capacity /
+  // concurrency pressure — especially when several renders launch at once via
+  // "Generate all"). Retry a couple times with backoff before giving up, and
+  // surface the REAL Vercel error to the caller (it's stored on the variant so
+  // it's visible without VM access — a bare "could not start" hides whether it's
+  // a quota cap, a plan limit, or a blip).
+  let sandbox
+  let lastErr: Error | null = null
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      sandbox = await Sandbox.create({
+        source: {
+          type: 'git',
+          url: repoUrl,
+          ...(process.env.SANDBOX_GIT_TOKEN
+            ? { username: 'x-access-token', password: process.env.SANDBOX_GIT_TOKEN }
+            : {}),
+          depth: 1,
+        },
+        resources: { vcpus: needsRemotion ? 4 : 2 },
+        // Hobby caps sandboxes at 45 minutes; renders finish well inside that.
+        timeout: 40 * 60 * 1000,
+        runtime: 'node22',
+      })
+      break
+    } catch (e) {
+      lastErr = e as Error
+      console.warn(`[sandbox-tasks] Sandbox.create attempt ${attempt}/3 failed for ${payload.task}: ${lastErr.message}`)
+      if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 5000))
+    }
+  }
+  if (!sandbox) {
+    throw new Error(`Vercel Sandbox launch failed: ${lastErr?.message ?? 'unknown error'}`)
+  }
 
   // Detached: the command keeps running inside the VM after this function
   // returns its HTTP response. The VM stops itself when the script exits.

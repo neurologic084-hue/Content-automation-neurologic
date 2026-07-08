@@ -121,10 +121,27 @@ export async function POST(req: NextRequest) {
     try {
       await dispatchPipelineTask({ task: 'render-variant', jobId, variantId })
     } catch (e) {
-      console.error(`[start-variant] could not launch render for ${jobId}:${variantId}:`, (e as Error).message)
-      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: 'Could not start the render. Please retry this variant.', progress: null })
+      const detail = (e as Error).message || 'unknown error'
+      console.error(`[start-variant] could not launch render for ${jobId}:${variantId}:`, detail)
+      // Store the REAL reason (truncated) so it's diagnosable from the DB without
+      // VM/Vercel-log access — this is almost always a Vercel Sandbox limit blip.
+      await patchVariant(supabase, jobId, variantId, {
+        status: 'failed',
+        error: `Could not start the render — please retry. (${detail.slice(0, 200)})`,
+        progress: null,
+      })
       return NextResponse.json({ error: 'Could not start the render.' }, { status: 500 })
     }
+
+    // The VM launched. Stamp a progress marker NOW so (a) the card shows movement
+    // during the multi-minute bootstrap (npm ci ×2 + Chrome deps + browser
+    // download, which emit no progress of their own) and (b) the fast
+    // "never reported in" sweep can't false-fail a slow-but-alive bootstrap — it
+    // only ever catches a variant that never got this far. The render task
+    // overrides this with real steps as soon as it runs.
+    await patchVariant(supabase, jobId, variantId, {
+      progress: { step: 1, total: 6, label: 'Setting up render environment' },
+    })
 
     return NextResponse.json({ ok: true })
   }
