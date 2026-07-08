@@ -482,6 +482,18 @@ export async function prepareJobSource(
   return { localPath }
 }
 
+// A Remotion delayRender failure quotes the component's props back at you, and
+// the fonts are embedded as base64 data URIs — so an untruncated message wrote
+// ~10KB of font bytes into the variant's `error` field, once per failure. Strip
+// data URIs first (they carry no diagnostic value), then hard-cap the rest.
+const MAX_ERROR_CHARS = 600
+
+function tidyError(error: string | null): string | null {
+  if (!error) return error
+  const stripped = error.replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[data-uri]')
+  return stripped.length > MAX_ERROR_CHARS ? `${stripped.slice(0, MAX_ERROR_CHARS)}… (truncated)` : stripped
+}
+
 async function markVariant(
   jobId: string,
   variantId: string,
@@ -493,7 +505,7 @@ async function markVariant(
     supabaseAdmin(),
     jobId,
     variantId,
-    { status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null },
+    { status, download_url: downloadUrl, preview_url: downloadUrl, error: tidyError(error), progress: null },
     { completeWhenAllDone: true },
   )
 }
@@ -782,8 +794,13 @@ export async function retrieveAndStoreSubmagicResult(
   return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
 }
 
+// Intermediates only. `${variantId}.mp4` — the FINISHED render — is deliberately
+// not in this list: deleting it up front meant a re-render that later failed
+// (Remotion delayRender timeout, a hung LLM call) destroyed the previous good
+// preview and left the variant with nothing. Remotion overwrites the output on
+// success anyway, so keeping the old file costs nothing and survives a failure.
 function cleanTempFiles(outDir: string, variantId: string): void {
-  for (const suffix of ['.mp4', '_captions.ass', '_mx.mp4', '_broll.mp4', '_mg.mp4']) {
+  for (const suffix of ['_captions.ass', '_mx.mp4', '_broll.mp4', '_mg.mp4']) {
     const p = path.join(outDir, `${variantId}${suffix}`)
     try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch { /* best-effort */ }
   }
