@@ -42,6 +42,7 @@ export interface VideoVariantDef {
   motionGraphicsStyle?: 'minimal' | 'bold'  // which Remotion visual treatment to render
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll (our-v4/v5's edit-tool path)
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins (our-v4/v5's edit-tool path)
+  hidden?: boolean     // internal/experimental — never shown to or created for the client
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -59,6 +60,10 @@ export interface VideoVariant extends VideoVariantDef {
   // Per-render music choice for this job (same for every variant). Read by the
   // render path to decide source / whether to add music at all.
   music_mode?: MusicMode
+  // ISO timestamp stamped when the variant enters 'processing', cleared when it
+  // reaches ready/failed. Lets the status route detect a variant whose worker
+  // VM was killed before it could write its own failure (a silent forever-spin).
+  processing_started_at?: string | null
 }
 
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
@@ -145,6 +150,9 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     order: 7,
     autoStart: false,
     remotionEdit: true,
+    // Experimental — kept in code for internal testing, but hidden from the
+    // client: excluded from new jobs and filtered out of the studio display.
+    hidden: true,
   },
 ]
 

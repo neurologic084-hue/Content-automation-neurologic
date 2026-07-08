@@ -5,6 +5,7 @@ import type { VideoVariant } from '@/lib/video-pipeline'
 import { releaseJobSource } from '@/lib/motion-renderer'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
 import { rendersDir } from '@/lib/paths'
+import { patchVariant } from '@/lib/job-lock'
 import fs from 'fs'
 import path from 'path'
 
@@ -29,10 +30,18 @@ const healAttempted = new Set<string>()
 // (status/urls/progress) stays from the stored row. Display-only: never
 // written back to the DB.
 function withCurrentDefinitions(variants: VideoVariant[]): VideoVariant[] {
-  return variants.map(v => {
-    const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
-    return def ? { ...v, ...def } : v
-  })
+  return variants
+    // Drop experimental/hidden variants (e.g. the v7 collage test) so they
+    // never surface in the client's studio, even on jobs created while the
+    // variant was still visible.
+    .filter(v => {
+      const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
+      return !def?.hidden
+    })
+    .map(v => {
+      const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
+      return def ? { ...v, ...def } : v
+    })
 }
 
 export async function GET(
@@ -50,6 +59,34 @@ export async function GET(
 
   if (error || !job) {
     return NextResponse.json({ error: 'Job not found.' }, { status: 404 })
+  }
+
+  // Stale sweep: a variant whose worker VM was killed mid-render (OOM, Vercel
+  // hard-kill) never gets to write its own 'failed', so it spins forever. The
+  // sandbox itself caps at 40 min, so anything 'processing' past 45 min from
+  // its start stamp is definitively dead — fail it so the UI stops spinning and
+  // the retry button appears. No false positives: real renders finish well
+  // under the cap, and the stamp is per-variant (not job-age), so a variant
+  // started hours after the job was created is timed from when IT started.
+  {
+    const STALE_MS = 45 * 60 * 1000
+    const now = Date.now()
+    const stale = ((job.variants ?? []) as VideoVariant[]).filter(v =>
+      v.status === 'processing' && v.processing_started_at &&
+      now - new Date(v.processing_started_at).getTime() > STALE_MS
+    )
+    for (const v of stale) {
+      console.warn(`[video-status] variant ${jobId}:${v.id} stuck processing past ${STALE_MS / 60000}m — marking failed`)
+      await patchVariant(supabase, jobId, v.id, {
+        status: 'failed',
+        error: 'The render stopped unexpectedly (the worker was interrupted). Please retry this variant.',
+        progress: null,
+      }, { completeWhenAllDone: true })
+    }
+    if (stale.length) {
+      const { data: refreshed } = await supabase.from('video_jobs').select('*').eq('id', jobId).single()
+      if (refreshed) Object.assign(job, refreshed)
+    }
   }
 
   // Heal: any ready variant still pointing at Submagic's expiring URL gets

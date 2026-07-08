@@ -20,10 +20,12 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
+import { applyColorGrade } from './color-grade'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, type BrollItem } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, type BrollItem, type CustomClip } from './broll'
+import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
@@ -422,7 +424,35 @@ export async function ensureContentProfile(jobId: string, sourceUrl: string): Pr
         }
       }
 
-      const profile = await analyzeVideoFile(localPath, { transcript: transcript ?? undefined })
+      // Size-safe analysis input: Gemini's inline (base64) request path is only
+      // documented safe under ~20MB, and a long source can hit 58MB (→ ~77MB
+      // as base64). Above ~14MB, analyze a low-res sample instead — Gemini
+      // reads video at 1fps + the audio track, so a 480p/10fps copy with mono
+      // audio carries the same signal at ~2MB. Full-file behavior is unchanged
+      // for the common (small) case.
+      // Two-tier compression: the GOOD compressed copy is for editing; analysis
+      // always reads a very-low proxy (480p / 10fps / mono audio, ~1-2MB).
+      // Gemini samples video at 1fps + the audio track, so the proxy carries
+      // the same signal at a fraction of the encode+upload time — and stays
+      // safely under the ~20MB inline-request limit no matter the source.
+      let analysisPath = localPath
+      let samplePath: string | null = null
+      try {
+        samplePath = path.join(outDir, 'analysis-sample.mp4')
+        await run(
+          `ffmpeg -y -i "${localPath}" -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 ` +
+          `-c:a aac -b:a 64k -ac 1 "${samplePath}"`,
+          180_000,
+        )
+        analysisPath = samplePath
+      } catch (e) {
+        console.warn('[content-profile] proxy creation failed, analyzing full file:', (e as Error).message)
+        analysisPath = localPath
+        samplePath = null
+      }
+
+      const profile = await analyzeVideoFile(analysisPath, { transcript: transcript ?? undefined })
+      if (samplePath) { try { fs.unlinkSync(samplePath) } catch { /* best-effort */ } }
       // Only persist a REAL profile — never cache the neutral fallback, so a
       // transient Gemini failure doesn't get baked in and can be re-attempted.
       if (profile !== FALLBACK_PROFILE) {
@@ -544,10 +574,16 @@ async function finishVariant(
   let url: string
   if (r2Url) {
     url = versioned(r2Url)
+  } else if (process.env.SANDBOX) {
+    // On Vercel the VM (and its /tmp) is destroyed after this run, so a local
+    // /renders/ URL would 404 forever — a variant that looks "ready" but plays
+    // black. Fail loudly instead so it shows as failed and can be retried.
+    await markVariant(jobId, variantId, 'failed', null, 'Could not upload the finished video to storage. Please retry this variant.')
+    return
   } else {
-    // R2 failed — copy the file into public/renders/ so the /renders/ URL is
-    // actually reachable. If this copy also fails, mark the variant failed rather
-    // than storing a dead path that will ENOENT at publish time.
+    // Long-lived server: R2 failed — copy the file into public/renders/ so the
+    // /renders/ URL is actually reachable. If this copy also fails, mark the
+    // variant failed rather than storing a dead path that ENOENTs at publish.
     const pubDir = rendersDir(jobId)
     const pubPath = path.join(pubDir, fileName)
     try {
@@ -752,6 +788,14 @@ export async function retrieveAndStoreSubmagicResult(
       console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
     }
 
+    // Warm & vibrant grade — phone footage out of Submagic reads flat/cold.
+    // Best-effort; a grade failure never loses the video.
+    try {
+      await applyColorGrade(localPath)
+    } catch (e) {
+      console.warn('[motion-renderer] color grade failed, keeping as-is:', (e as Error).message)
+    }
+
     // Visual accents (white flash / glow-up / black dip) on a smart subset of
     // the edit's cuts — the layer Submagic's API can't provide. Runs before
     // the SFX pass so the whooshes land on the same cuts the eyes see flash.
@@ -791,6 +835,11 @@ export async function retrieveAndStoreSubmagicResult(
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
+  // On Vercel a local /renders/ URL 404s once the VM is gone — surface the
+  // failure instead of returning a dead URL. Long-lived servers keep the file.
+  if (!r2Url && process.env.SANDBOX) {
+    throw new Error('Could not upload the finished video to storage. Please retry this variant.')
+  }
   return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
 }
 
@@ -955,17 +1004,25 @@ export async function mixBackgroundMusic(
   const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
   console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
+  // ── Music level knobs (tune here) ──────────────────────────────────────────
+  // MUSIC_BED_BELOW_LU: how far under the voice the music bed sits. Bigger =
+  //   quieter music. 18 read as too low; 14 keeps the voice clearly on top while
+  //   letting the bed actually be heard.
+  // DUCK_RATIO: how hard music drops WHILE the voice talks. In a talking-head
+  //   video the voice is nearly constant, so a deep duck (6) made the bed vanish
+  //   for almost the whole video. 3.5 keeps music present under speech.
+  const MUSIC_BED_BELOW_LU = 10
+  const DUCK_RATIO = 2.5
+
   // VOICE-AWARE leveling: measure how loud the dialogue in THIS video actually
-  // is and place the music bed a fixed distance (18 LU) below it, instead of
-  // trusting a constant that assumed studio-level voice. The duck trigger
-  // scales with the voice too — a fixed threshold never fired on quiet takes,
-  // which is exactly when music "covers the voice". Falls back to the audited
-  // constants when measurement fails.
+  // is and place the music bed MUSIC_BED_BELOW_LU below it, instead of trusting
+  // a constant that assumed studio-level voice. Falls back to an audited
+  // constant when measurement fails.
   const voiceI = await measureIntegratedLoudness(videoPath)
   const musicI = await measureIntegratedLoudness(musicPath)
-  let bedVolume = 'volume=0.13'
+  let bedVolume = 'volume=0.20'
   if (voiceI !== null && musicI !== null) {
-    const gainDb = Math.max(-40, Math.min(0, voiceI - 18 - musicI))
+    const gainDb = Math.max(-40, Math.min(0, voiceI - MUSIC_BED_BELOW_LU - musicI))
     bedVolume = `volume=${gainDb.toFixed(1)}dB`
     console.log(`[motion-renderer] voice ${voiceI.toFixed(1)} LUFS, music ${musicI.toFixed(1)} LUFS -> bed gain ${gainDb.toFixed(1)} dB`)
   }
@@ -988,7 +1045,7 @@ export async function mixBackgroundMusic(
       `-filter_complex ` +
       `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
       `equalizer=f=2500:width_type=q:w=1.4:g=-5,${bedVolume}[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=${duckThreshold.toFixed(4)}:ratio=6:attack=15:release=700[ducked];` +
+      `[bgfade][0:a]sidechaincompress=threshold=${duckThreshold.toFixed(4)}:ratio=${DUCK_RATIO}:attack=15:release=700[ducked];` +
       `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
@@ -1270,6 +1327,74 @@ async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
   fs.writeFileSync(scriptPath, script)
   await run(`bash "${scriptPath}"`, 300_000)
 }
+// Downloads, normalizes, and describes the creator's OWN B-roll clips (Drive
+// links stored on the job). Descriptions are written back to the job row so
+// each clip is watched once per JOB, not once per variant. Returns clips
+// ready for the custom planner; a clip that fails is skipped, never fatal.
+async function stageCustomBroll(
+  jobId: string,
+  entries: { url: string; description?: string | null }[],
+  cacheDir: string,
+  publicPrefix: string,
+): Promise<CustomClip[]> {
+  fs.mkdirSync(cacheDir, { recursive: true })
+  const clips: CustomClip[] = []
+  let descriptionsChanged = false
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]
+    try {
+      const fileName = `custom-${jobId.slice(0, 8)}-${i}.mp4`
+      const outPath = path.join(cacheDir, fileName)
+      if (!fs.existsSync(outPath)) {
+        const rawPath = outPath + '.raw'
+        await downloadFile(entry.url, rawPath)
+        // Normalize to h264/yuv420p 30fps, audio stripped — OffthreadVideo-safe
+        // regardless of what the phone/Drive produced (HEVC, odd rotation).
+        await run(
+          `ffmpeg -y -i "${rawPath}" -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
+          300_000,
+        )
+        try { fs.unlinkSync(rawPath) } catch { /* best-effort */ }
+      }
+      const duration = await getVideoDuration(outPath)
+
+      let description = entry.description?.trim() || ''
+      if (!description) {
+        // One short look per clip so the planner can match content to the
+        // transcript. Described from a tiny low-res sample, never the full
+        // file (keeps the request small no matter how big the upload was).
+        const samplePath = outPath + '.sample.mp4'
+        await run(`ffmpeg -y -i "${outPath}" -t 8 -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 -an "${samplePath}"`, 120_000)
+        try {
+          const media = { mimeType: 'video/mp4', data: fs.readFileSync(samplePath).toString('base64') }
+          description = (await geminiGenerate({
+            prompt: 'Describe what this clip shows in ONE short line (max 15 words): the subject and the action. No opinions, no style words.',
+            media: [media],
+            model: 'google/gemini-2.5-flash-lite',
+            maxOutputTokens: 200,
+            temperature: 0.2,
+          })).trim()
+          entry.description = description
+          descriptionsChanged = true
+        } finally {
+          try { fs.unlinkSync(samplePath) } catch { /* best-effort */ }
+        }
+      }
+
+      clips.push({ file: `${publicPrefix}/${fileName}`, description: description || `creator clip ${i + 1}`, duration })
+      console.log(`[motion-renderer] custom B-roll ${i}: ${duration.toFixed(1)}s — "${description.slice(0, 70)}"`)
+    } catch (e) {
+      console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
+    }
+  }
+  if (descriptionsChanged) {
+    try {
+      await supabaseAdmin().from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
+    } catch { /* descriptions are a cache — losing them just re-describes next render */ }
+  }
+  return clips
+}
+
 async function renderRemotionEdit(
   jobId: string,
   variantId: string,
@@ -1403,14 +1528,26 @@ async function renderRemotionEdit(
       }
     }
 
+    const usingCustomBroll = !!opts.customBroll?.length
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
-        // One set for the whole render: cover slots, carousel panes and every
-        // query-ladder fallback all draw from it, so no clip appears twice.
+        // One set for the whole render: stock cover slots, carousel panes and
+        // every query-ladder fallback all draw from it, so no clip appears
+        // twice. Declared outside the branch because the eubank carousel below
+        // (resolveExtraImages) shares it. Custom-clip renders never source
+        // stock, so the set simply stays empty for them.
         const usedMedia = new Set<string>()
-        const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
-        broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
+        if (usingCustomBroll) {
+          // The creator supplied their own clips — stock sourcing is skipped
+          // entirely. Clips are matched to transcript moments by content.
+          const clips = await stageCustomBroll(jobId, opts.customBroll!, cacheDir, 'edit-cache')
+          for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
+          broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion)
+        } else {
+          const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
+          broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
+        }
         if (viral) {
           // Pages over covers go big/centered; pages under the designed poster
           // are dropped (the card carries its own headline).
@@ -1442,7 +1579,9 @@ async function renderRemotionEdit(
               if (b.layout !== 'cover') continue
               let pick = LAYOUTS[(bi + kit.variation) % LAYOUTS.length]
               if (pick === 'panel') {
-                const extras = await resolveExtraImages(
+                // Custom-clip mode never fetches stock extras — the carousel
+                // falls back to a side panel (same clip) or a plain cover.
+                const extras = usingCustomBroll ? [] : await resolveExtraImages(
                   b.query ?? 'city skyline golden hour',
                   path.join(REMOTION_DIR, 'public', brollPrefix),
                   brollPrefix,
@@ -1708,6 +1847,11 @@ async function renderRemotionEdit(
       // first font/asset load need real room before the render is declared dead.
       const renderTimeout = process.env.SANDBOX ? 900000 : 600000
       await run(
+        // Generous delayRender timeout: headless-Chrome startup + asset loads
+        // can crawl on a busy/constrained machine and fail renders that would
+        // otherwise succeed. sandboxFlags carries the glibc-patched compositor
+        // (--binaries-directory), concurrency cap, and cache cap; fonts are
+        // embedded (data URIs) so they never fetch from the render server.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
         `--props="${propsPath}" --codec=h264 --crf=19 --timeout=${renderTimeout}${sandboxFlags}`,
         1_500_000,
@@ -1766,6 +1910,10 @@ export interface RenderVariantOptions {
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
   musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
+  // Creator-supplied B-roll (Drive links stored on the job). When present,
+  // stock B-roll is skipped entirely and these clips are matched to
+  // transcript moments instead.
+  customBroll?: { url: string; description?: string | null }[]
 }
 
 // Main pipeline (no Descript anywhere in this app):
@@ -2020,5 +2168,6 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
     submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
     musicMode: variant.music_mode as MusicMode | undefined,
+    customBroll: (job.custom_broll as { url: string; description?: string | null }[] | null) ?? undefined,
   })
 }

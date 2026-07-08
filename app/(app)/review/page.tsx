@@ -132,27 +132,32 @@ export default async function ReviewPage() {
   const supabase = await createClient()
   const slot = await getActiveSlot(supabase)
 
-  const { data: pending } = await supabase
-    .from('scripts')
-    .select('id, hook, status, mood_tag, created_at, filming_plan, idea:ideas(confirmed_lane, raw_idea)')
-    .eq('status', 'pending_review')
-    .eq('profile_slot', slot)
-    .order('created_at', { ascending: false })
-
-  const { data: needsRevision } = await supabase
-    .from('scripts')
-    .select('id, hook, status, mood_tag, created_at, filming_plan, idea:ideas(confirmed_lane, raw_idea)')
-    .eq('status', 'needs_revision')
-    .eq('profile_slot', slot)
-    .order('created_at', { ascending: false })
-
-  const { data: recentApproved } = await supabase
-    .from('scripts')
-    .select('id, hook, status, mood_tag, approved_at, created_at, idea:ideas(confirmed_lane)')
-    .eq('status', 'approved')
-    .eq('profile_slot', slot)
-    .order('approved_at', { ascending: false })
-    .limit(5)
+  // These three are independent — fire them together so the page waits for the
+  // slowest single query, not the sum of all three round trips.
+  const [pendingRes, needsRevisionRes, recentApprovedRes] = await Promise.all([
+    supabase
+      .from('scripts')
+      .select('id, hook, status, mood_tag, created_at, filming_plan, idea:ideas(confirmed_lane, raw_idea)')
+      .eq('status', 'pending_review')
+      .eq('profile_slot', slot)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('scripts')
+      .select('id, hook, status, mood_tag, created_at, filming_plan, idea:ideas(confirmed_lane, raw_idea)')
+      .eq('status', 'needs_revision')
+      .eq('profile_slot', slot)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('scripts')
+      .select('id, hook, status, mood_tag, approved_at, created_at, idea:ideas(confirmed_lane)')
+      .eq('status', 'approved')
+      .eq('profile_slot', slot)
+      .order('approved_at', { ascending: false })
+      .limit(5),
+  ])
+  const pending = pendingRes.data
+  const needsRevision = needsRevisionRes.data
+  const recentApproved = recentApprovedRes.data
 
   const pendingCount = pending?.length ?? 0
   const revisionCount = needsRevision?.length ?? 0

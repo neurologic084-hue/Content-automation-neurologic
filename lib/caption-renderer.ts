@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { exec } from 'child_process'
 import path from 'path'
 import os from 'os'
 
@@ -335,16 +336,33 @@ export async function transcribeLocalFile(filePath: string): Promise<WordTimesta
 
   console.log(`[caption-renderer] transcribing ${path.basename(filePath)}...`)
 
+  // Upload ONLY the audio track: ElevenLabs never reads the pixels, and the
+  // audio-only file is ~1MB/min vs 16-58MB for the video — much faster upload,
+  // identical word timestamps. Falls back to the original file if extraction
+  // fails for any reason.
+  let uploadPath = filePath
+  let uploadType = 'video/mp4'
+  let uploadName = 'video.mp4'
+  const audioPath = filePath + '.stt.m4a'
+  try {
+    await new Promise<void>((resolve, reject) => {
+      exec(`ffmpeg -y -i "${filePath}" -vn -c:a aac -b:a 96k -ac 1 "${audioPath}"`, { timeout: 120_000 }, (err) => err ? reject(err) : resolve())
+    })
+    if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 1024) {
+      uploadPath = audioPath
+      uploadType = 'audio/mp4'
+      uploadName = 'audio.m4a'
+    }
+  } catch { /* fall back to full video upload */ }
+
   // Native FormData + Blob, not the npm form-data package — fetch() doesn't
-  // reliably serialize form-data's stream-based body for real file uploads
-  // (it can silently work for small text-only fields, then break on actual
-  // files).
-  const fileBuffer = fs.readFileSync(filePath)
+  // reliably serialize form-data's stream-based body for real file uploads.
+  const fileBuffer = fs.readFileSync(uploadPath)
   const form = new globalThis.FormData()
   form.append('model_id', 'scribe_v1')
   form.append('timestamps_granularity', 'word')
   form.append('language_code', 'en')
-  form.append('file', new Blob([fileBuffer], { type: 'video/mp4' }), 'video.mp4')
+  form.append('file', new Blob([fileBuffer], { type: uploadType }), uploadName)
 
   const res = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
     method: 'POST',
@@ -367,6 +385,7 @@ export async function transcribeLocalFile(filePath: string): Promise<WordTimesta
       end: w.end,
     }))
 
+  try { if (uploadPath === audioPath) fs.unlinkSync(audioPath) } catch { /* best-effort */ }
   console.log(`[caption-renderer] transcribed ${words.length} words`)
   return words
 }

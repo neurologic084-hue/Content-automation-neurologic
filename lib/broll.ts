@@ -278,6 +278,128 @@ export async function planBrollSlots(
   return slots
 }
 
+// ── Custom B-roll (user-provided clips) ──────────────────────────────────────
+// When the creator supplies their OWN clips (Drive links on the job), stock
+// sourcing is skipped entirely. The planner reads the timed transcript plus a
+// one-line description of each clip (Gemini watched them) and assigns the
+// best-fitting clip to each cutaway moment. Same timing guardrails as the
+// stock planner: breathing room between cutaways, nothing over graphics,
+// nothing at the very start or end.
+
+export interface CustomClip {
+  file: string          // staged filename relative to remotion/public/
+  description: string   // one line of what the clip shows (Gemini)
+  duration: number      // seconds
+}
+
+export async function planCustomBrollSlots(
+  editedWords: EditedWord[],
+  duration: number,
+  profile: ContentProfile | null,
+  clips: CustomClip[],
+  avoid: Array<{ start: number; duration: number }> = [],
+  dense = false,
+): Promise<BrollItem[]> {
+  if (!clips.length || duration < 8 || editedWords.length < 10) return []
+
+  // Same adaptive cadence as stock covers; each clip may appear up to twice
+  // so short clip lists still cover a long video without going stale.
+  const CADENCE: Record<ContentProfile['brollableRichness'], number> = dense
+    ? { none: 4, some: 3.5, rich: 3 }
+    : { none: 12, some: 9, rich: 6.5 }
+  const targetCount = Math.min(
+    clips.length * 2,
+    Math.max(1, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
+  )
+  const minGap = dense ? 1.2 : 2.0
+
+  const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
+  const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
+
+  let candidates: Array<{ start?: number; duration?: number; clip?: number }> = []
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      temperature: 0.3,
+      max_tokens: 600,
+      json: true,
+      messages: [{
+        role: 'user',
+        content: [
+          "Place the creator's OWN B-roll clips as full-screen cutaways on a talking-head video.",
+          `Video duration: ${duration.toFixed(1)}s. Place up to ${targetCount} cutaway(s).`,
+          'Available clips (index: length, what it shows):',
+          ...clipLines,
+          '',
+          'Transcript with word start times:',
+          timed,
+          '',
+          'Rules:',
+          '- Assign each cutaway the clip whose CONTENT best matches what the speaker is',
+          '  saying at that moment. Only place a cutaway where a clip genuinely fits —',
+          '  fewer well-matched cutaways beat forced ones.',
+          '- Each clip may be used at most twice; prefer using every clip once first.',
+          '- duration: 1.8 to 3.8 seconds, and never longer than the clip itself.',
+          '- Never start before 2.5s, never end within the last 1.5s of the video.',
+          `- At least ${minGap} seconds of talking-head between cutaways. No overlaps.`,
+          '- Return JSON only: {"items":[{"start":number,"duration":number,"clip":number}]}',
+        ].join('\n'),
+      }],
+    })
+    const parsed = parseJsonLoose<{ items?: Array<{ start?: number; duration?: number; clip?: number }> }>(raw)
+    candidates = Array.isArray(parsed.items) ? parsed.items : []
+  } catch (e) {
+    console.warn('[broll] custom-clip planning failed:', (e as Error).message)
+    candidates = []
+  }
+
+  // Enforce the rules in code (the model proposes, the code disposes), then
+  // fall back to an even spread if the model under-delivers badly — the
+  // creator gave us clips, so clips should appear.
+  const items: BrollItem[] = []
+  const uses = new Map<number, number>()
+  let lastEnd = 0
+  for (const c of candidates
+    .filter(c => typeof c.start === 'number' && typeof c.duration === 'number' && typeof c.clip === 'number')
+    .sort((a, b) => (a.start as number) - (b.start as number))) {
+    const idx = Math.max(0, Math.min(clips.length - 1, Math.round(c.clip as number)))
+    if ((uses.get(idx) ?? 0) >= 2) continue
+    const clip = clips[idx]
+    const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
+    const dur = Math.min(3.8, Math.min(clip.duration, Math.max(1.8, c.duration as number)))
+    if (start + dur > duration - 1.5) continue
+    if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
+    items.push({
+      start: Number(start.toFixed(2)),
+      duration: Number(dur.toFixed(2)),
+      file: clip.file,
+      kind: 'video',
+      layout: 'cover',
+      query: clip.description.slice(0, 60),
+    })
+    uses.set(idx, (uses.get(idx) ?? 0) + 1)
+    lastEnd = start + dur
+    if (items.length >= targetCount) break
+  }
+
+  // Fallback spread: at minimum, each clip lands once, evenly spaced.
+  if (!items.length) {
+    const usable = Math.min(clips.length, Math.max(1, Math.floor((duration - 6) / (3 + minGap))))
+    const step = (duration - 6) / usable
+    for (let i = 0; i < usable; i++) {
+      const clip = clips[i]
+      const start = Number((3 + i * step).toFixed(2))
+      const dur = Math.min(3.2, clip.duration)
+      if (start + dur > duration - 1.5) break
+      items.push({ start, duration: Number(dur.toFixed(2)), file: clip.file, kind: 'video', layout: 'cover', query: clip.description.slice(0, 60) })
+    }
+    console.log(`[broll] custom-clip fallback spread: ${items.length} cutaway(s)`)
+  }
+
+  console.log(`[broll] ${items.length} custom cutaway(s): ${items.map(i => `${i.start}s`).join(', ')}`)
+  return items
+}
+
 // ── Sourcing ──────────────────────────────────────────────────────────────────
 
 async function download(url: string, dest: string): Promise<boolean> {
