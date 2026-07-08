@@ -590,6 +590,16 @@ function versioned(url: string): string {
   return `${url}${url.includes('?') ? '&' : '?'}v=${Date.now()}`
 }
 
+// True when the render runs on an EPHEMERAL host whose disk dies after the run
+// (Vercel Sandbox VM or a GitHub Actions runner). On those, a local /renders/
+// URL 404s once the machine is gone, so a finished video MUST reach R2 — a
+// failed upload has to fail the variant, not return a dead local URL. (Distinct
+// from process.env.SANDBOX alone, which also means "Amazon Linux → patch glibc";
+// GitHub runners are Ubuntu and need no glibc patch, just the R2 requirement.)
+function isEphemeralHost(): boolean {
+  return process.env.SANDBOX === '1' || process.env.GITHUB_ACTIONS === 'true'
+}
+
 async function finishVariant(
   jobId: string,
   variantId: string,
@@ -604,10 +614,11 @@ async function finishVariant(
   let url: string
   if (r2Url) {
     url = versioned(r2Url)
-  } else if (process.env.SANDBOX) {
-    // On Vercel the VM (and its /tmp) is destroyed after this run, so a local
-    // /renders/ URL would 404 forever — a variant that looks "ready" but plays
-    // black. Fail loudly instead so it shows as failed and can be retried.
+  } else if (isEphemeralHost()) {
+    // On an ephemeral host (Vercel VM or GitHub runner) the disk is destroyed
+    // after this run, so a local /renders/ URL would 404 forever — a variant
+    // that looks "ready" but plays black. Fail loudly instead so it shows as
+    // failed and can be retried.
     await markVariant(jobId, variantId, 'failed', null, 'Could not upload the finished video to storage. Please retry this variant.')
     return
   } else {
@@ -896,9 +907,10 @@ export async function retrieveAndStoreSubmagicResult(
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
-  // On Vercel a local /renders/ URL 404s once the VM is gone — surface the
-  // failure instead of returning a dead URL. Long-lived servers keep the file.
-  if (!r2Url && process.env.SANDBOX) {
+  // On an ephemeral host (Vercel VM / GitHub runner) a local /renders/ URL 404s
+  // once the machine is gone — surface the failure instead of returning a dead
+  // URL. Long-lived servers keep the file on disk.
+  if (!r2Url && isEphemeralHost()) {
     throw new Error('Could not upload the finished video to storage. Please retry this variant.')
   }
   return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
