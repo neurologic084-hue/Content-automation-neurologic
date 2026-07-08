@@ -42,7 +42,6 @@ export interface VideoVariantDef {
   motionGraphicsStyle?: 'minimal' | 'bold'  // which Remotion visual treatment to render
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll (our-v4/v5's edit-tool path)
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins (our-v4/v5's edit-tool path)
-  musicOnly?: boolean  // no editing — raw footage + a mood-matched background track
   hidden?: boolean     // internal/experimental — never shown to or created for the client
 }
 
@@ -150,18 +149,6 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     // Experimental — kept in code for internal testing, but hidden from the
     // client: excluded from new jobs and filtered out of the studio display.
     hidden: true,
-  },
-  // Music Only — no editing at all: the raw footage with a mood-matched
-  // background track mixed under the voice. The fastest, lightest option for
-  // when the clip just needs music and nothing else.
-  {
-    id: 'our-v8',
-    name: 'Music Only',
-    description: 'Your footage untouched — no cuts, captions, or B-roll — with just a mood-matched background track mixed under your voice.',
-    tool: 'edit',
-    order: 8,
-    autoStart: false,
-    musicOnly: true,
   },
 ]
 
