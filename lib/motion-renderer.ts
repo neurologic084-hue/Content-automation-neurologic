@@ -1500,9 +1500,6 @@ async function renderRemotionEdit(
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
-    await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
-    await cleanAudioInPlace(workPath)
-
     // The render kit: the variant's FIXED identity (caption style, B-roll
     // flavor) plus smart-randomized style (transition weighted by footage
     // energy, shuffled B-roll/caption/zoom seeds) — so every rerun of the same
@@ -1510,10 +1507,11 @@ async function renderRemotionEdit(
     const kit = buildRenderKit(variantId, profile)
     console.log(`[motion-renderer] kit for ${variantId}: captions=${kit.captionStyle} broll=${kit.brollMedia} transition=${kit.transitionStyle} seed=${kit.variation}`)
 
-    // Transcribe AFTER cleaning — better audio, better word timings. Energy-
-    // detected silences ride along as the second cut signal (word timings can
-    // stretch across real pauses and hide them from gap-based cutting).
-    await setVariantProgress(jobId, variantId, 3, STEPS, 'Planning cuts and captions')
+    // Audio cleaning (Submagic -> Auphonic -> ElevenLabs) is DEFERRED to after a
+    // successful render (see below), so a render that fails never spends a
+    // Submagic/Auphonic call. Transcription here runs on the raw dialogue —
+    // Scribe handles background noise fine for word timings.
+    await setVariantProgress(jobId, variantId, 2, STEPS, 'Planning cuts and captions')
     // These four all read workPath and don't depend on each other — run them
     // together instead of serially (overlaps the slow Scribe call with the
     // ffmpeg/ffprobe passes).
@@ -1593,7 +1591,7 @@ async function renderRemotionEdit(
       graphics = graphics.filter(g => g.kind !== 'title')
     }
 
-    await setVariantProgress(jobId, variantId, 4, STEPS, kit.collageScenes ? 'Generating collage scenes and B-roll' : 'Finding B-roll')
+    await setVariantProgress(jobId, variantId, 3, STEPS, kit.collageScenes ? 'Generating collage scenes and B-roll' : 'Finding B-roll')
     const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
     const brollPrefix = `edit-cache/${variantId}-${jobId.slice(0, 8)}-broll`
     // The hook is a top-band overlay — B-roll can run under it, so it
@@ -1909,9 +1907,9 @@ async function renderRemotionEdit(
     }))
     staged.push(propsPath)
 
-    await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
+    await setVariantProgress(jobId, variantId, 4, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
-      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering your edit')
+      await setVariantProgress(jobId, variantId, 4, STEPS, 'Rendering your edit')
       // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
       // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
       // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
@@ -1953,6 +1951,19 @@ async function renderRemotionEdit(
       )
     })
     if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
+
+    // Clean the dialogue NOW — only after the render has actually succeeded, so a
+    // failed render never burns a Submagic/Auphonic call. Runs on the finished
+    // cut video: cleanAudioInPlace remuxes the cleaned track over the picture
+    // (c:v copy, same duration), so captions/graphics are untouched. Best-effort
+    // through the audio queue so it doesn't fight the next variant's render.
+    await setVariantProgress(jobId, variantId, 5, STEPS, 'Cleaning audio')
+    try {
+      const cleaner = await enqueueAudioPostSteps(() => cleanAudioInPlace(outputPath))
+      console.log(`[motion-renderer] audio cleaned via ${cleaner} for ${jobId}:${variantId}`)
+    } catch (e) {
+      console.warn('[motion-renderer] audio cleaning failed, keeping original dialogue:', (e as Error).message)
+    }
 
     if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, 6, STEPS, 'Adding background music')
