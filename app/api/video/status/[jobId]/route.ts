@@ -29,10 +29,18 @@ const healAttempted = new Set<string>()
 // (status/urls/progress) stays from the stored row. Display-only: never
 // written back to the DB.
 function withCurrentDefinitions(variants: VideoVariant[]): VideoVariant[] {
-  return variants.map(v => {
-    const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
-    return def ? { ...v, ...def } : v
-  })
+  return variants
+    // Drop experimental/hidden variants (e.g. the v7 collage test) so they
+    // never surface in the client's studio, even on jobs created while the
+    // variant was still visible.
+    .filter(v => {
+      const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
+      return !def?.hidden
+    })
+    .map(v => {
+      const def = VARIANT_DEFINITIONS.find(d => d.id === v.id)
+      return def ? { ...v, ...def } : v
+    })
 }
 
 export async function GET(

@@ -42,6 +42,7 @@ export interface VideoVariantDef {
   motionGraphicsStyle?: 'minimal' | 'bold'  // which Remotion visual treatment to render
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll (our-v4/v5's edit-tool path)
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins (our-v4/v5's edit-tool path)
+  hidden?: boolean     // internal/experimental — never shown to or created for the client
 }
 
 export interface VideoVariant extends VideoVariantDef {
@@ -131,6 +132,23 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     order: 6,
     autoStart: false,
     remotionEdit: true,
+  },
+  // v7 is a TEST variant: the exact v6 Cinematic identity, plus AI-GENERATED
+  // collage scenes (Vox-style layered cutouts, generated via kie.ai and keyed/
+  // stylized in-render) replacing some stock B-roll covers. Once the look is
+  // proven on real footage, the collage system folds into v6 and this entry
+  // goes away — see lib/collage-scenes.ts.
+  {
+    id: 'our-v7',
+    name: 'Cinematic Collage (Test)',
+    description: 'The v6 Cinematic edit with AI-generated editorial collage scenes — halftone cutouts springing in over a dark canvas — in place of some stock B-roll.',
+    tool: 'edit',
+    order: 7,
+    autoStart: false,
+    remotionEdit: true,
+    // Experimental — kept in code for internal testing, but hidden from the
+    // client: excluded from new jobs and filtered out of the studio display.
+    hidden: true,
   },
 ]
 

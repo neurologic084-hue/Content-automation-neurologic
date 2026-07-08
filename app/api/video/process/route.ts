@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
     } catch { /* best-effort */ }
   }
 
-  const variants = VARIANT_DEFINITIONS.map((def) => ({
+  const variants = VARIANT_DEFINITIONS.filter((def) => !def.hidden).map((def) => ({
     ...def,
     status: 'pending',
     external_id: null,
