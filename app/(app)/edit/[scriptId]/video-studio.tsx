@@ -511,10 +511,16 @@ export function VideoStudio({ script, existingJobId }: Props) {
               const isReady = v?.status === 'ready'
               const isSelected = selectedVariant === v?.id
               const isStarting = v?.id ? startingVariants.has(v.id) : false
-              // Submagic variants included: retry sends force=true so the
-              // backend submits a fresh project instead of reusing the old one.
+              // retry sends force=true so the backend submits a fresh project
+              // instead of reusing the old one.
               const canRetryReady = true
               const toolMeta = v ? TOOL_COLOR[v.tool] : null
+              // Honest progress: a step-based bar otherwise pins at 100% the
+              // whole time the last (long-running) step is still working, which
+              // reads as "stuck at 100%". Cap at 95% until the variant is truly
+              // ready so 100% always means done.
+              const rawPct = v?.progress ? (v.progress.step / v.progress.total) * 100 : 0
+              const shownPct = isReady ? 100 : Math.min(95, Math.round(rawPct))
 
               return (
                 <div
@@ -572,14 +578,14 @@ export function VideoStudio({ script, existingJobId }: Props) {
                               </span>
                             </div>
                             <span className="text-[13px] font-bold tabular-nums" style={{ color: '#FF4F17' }}>
-                              {v?.progress ? `${Math.round((v.progress.step / v.progress.total) * 100)}%` : '0%'}
+                              {`${shownPct}%`}
                             </span>
                           </div>
                           <div className="w-full bg-[#E4E4E0] rounded-full overflow-hidden" style={{ height: 4 }}>
                             <div
                               className="h-full rounded-full transition-all duration-700"
                               style={{
-                                width: v?.progress ? `${(v.progress.step / v.progress.total) * 100}%` : '0%',
+                                width: `${shownPct}%`,
                                 background: '#FF4F17',
                               }}
                             />

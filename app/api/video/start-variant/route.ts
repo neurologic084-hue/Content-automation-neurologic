@@ -114,8 +114,17 @@ export async function POST(req: NextRequest) {
     )
 
     // The whole render (option building included) is a pipeline task —
-    // in-process here on a long-lived server, in a Sandbox VM on Vercel.
-    await dispatchPipelineTask({ task: 'render-variant', jobId, variantId })
+    // in-process here on a long-lived server, in a Sandbox VM on Vercel. If the
+    // launch itself fails (sandbox quota, git clone, missing env), surface it as
+    // a failed variant immediately — otherwise it sits 'processing' with no
+    // progress until the 45-min sweep, with no Retry available meanwhile.
+    try {
+      await dispatchPipelineTask({ task: 'render-variant', jobId, variantId })
+    } catch (e) {
+      console.error(`[start-variant] could not launch render for ${jobId}:${variantId}:`, (e as Error).message)
+      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: 'Could not start the render. Please retry this variant.', progress: null })
+      return NextResponse.json({ error: 'Could not start the render.' }, { status: 500 })
+    }
 
     return NextResponse.json({ ok: true })
   }
@@ -148,7 +157,7 @@ export async function POST(req: NextRequest) {
         variantId,
         // external_id cleared so the status poller never polls a stale
         // Submagic project between this reset and the new projectId write.
-        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Sending footage to the editing engine' } },
+        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 4, label: 'Sending your footage' } },
         { jobStatus: 'processing' },
       )
 
@@ -320,7 +329,9 @@ export async function POST(req: NextRequest) {
       await patchVariant(supabase, jobId, variantId, {
         status: 'processing',
         external_id: projectId,
-        progress: { step: 2, total: 2, label: 'Processing in Submagic' },
+        // v1-v3 are already cut by our own planner before this point, so the
+        // engine here only adds captions + styling — say exactly that.
+        progress: { step: 2, total: 4, label: 'Adding captions & styling' },
       })
 
       // Fire-and-forget poll loop. For v1-v3 the post step also mixes our library

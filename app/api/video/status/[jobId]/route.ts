@@ -70,16 +70,27 @@ export async function GET(
   // started hours after the job was created is timed from when IT started.
   {
     const STALE_MS = 45 * 60 * 1000
+    // A much shorter cap for variants that have reported NO progress at all
+    // (progress still null). That means the render task never checked in — the
+    // Sandbox VM failed to launch or died during bootstrap — so there's no
+    // reason to wait the full 45 min. A real render emits its first progress
+    // ('Preparing footage' / 'Downloading footage') within a minute or two.
+    const NEVER_STARTED_MS = 12 * 60 * 1000
     const now = Date.now()
-    const stale = ((job.variants ?? []) as VideoVariant[]).filter(v =>
-      v.status === 'processing' && v.processing_started_at &&
-      now - new Date(v.processing_started_at).getTime() > STALE_MS
-    )
+    const stale = ((job.variants ?? []) as VideoVariant[]).filter(v => {
+      if (v.status !== 'processing' || !v.processing_started_at) return false
+      const age = now - new Date(v.processing_started_at).getTime()
+      const neverStarted = !v.progress && age > NEVER_STARTED_MS
+      return age > STALE_MS || neverStarted
+    })
     for (const v of stale) {
-      console.warn(`[video-status] variant ${jobId}:${v.id} stuck processing past ${STALE_MS / 60000}m — marking failed`)
+      const neverStarted = !v.progress
+      console.warn(`[video-status] variant ${jobId}:${v.id} ${neverStarted ? `never reported progress in ${NEVER_STARTED_MS / 60000}m` : `stuck processing past ${STALE_MS / 60000}m`} — marking failed`)
       await patchVariant(supabase, jobId, v.id, {
         status: 'failed',
-        error: 'The render stopped unexpectedly (the worker was interrupted). Please retry this variant.',
+        error: neverStarted
+          ? 'The render didn\'t start (the worker never came up). Please retry this variant.'
+          : 'The render stopped unexpectedly (the worker was interrupted). Please retry this variant.',
         progress: null,
       }, { completeWhenAllDone: true })
     }
@@ -155,10 +166,28 @@ export async function GET(
         // polled every few seconds and must not launch a finisher each time
         // (on Vercel each launch would be a whole Sandbox VM). The in-process
         // lock inside finalizeSubmagicVariant stays as the second layer.
-        const FINALIZING_LABEL = 'Finalizing the edit'
-        if (target.progress?.label !== FINALIZING_LABEL) {
-          target.progress = { step: 2, total: 2, label: FINALIZING_LABEL }
+        // The engine is done; hand off to our finisher (download → grade →
+        // effects → music → save). Gate the dispatch on a TIMESTAMP, not the
+        // progress label: the finisher advances the label through its own steps
+        // (3→4), so a label check would misread that as "not dispatched" and
+        // re-launch it every poll. We dispatch once, then re-dispatch only if
+        // there's still no result after FINALIZE_RETRY_MS — the finisher can die
+        // (a Sandbox VM on Vercel) before writing 'ready', which otherwise leaves
+        // the variant stuck until the 45-min sweep falsely fails it.
+        // finalizeSubmagicVariant writes a fixed R2 path and self-dedupes, so a
+        // retry is safe.
+        const FINALIZE_RETRY_MS = 6 * 60 * 1000
+        const nowMs = Date.now()
+        const at = (target as { finalize_at?: string }).finalize_at
+        const needsDispatch = !at || (nowMs - Date.parse(at)) > FINALIZE_RETRY_MS
+        if (needsDispatch) {
+          // Only reset the label on the FIRST dispatch (step 3); on a stale
+          // retry keep whatever step the previous finisher reached so the bar
+          // doesn't jump backwards.
+          if (!at) target.progress = { step: 3, total: 4, label: 'Color grading & effects' }
+          ;(target as { finalize_at?: string }).finalize_at = new Date(nowMs).toISOString()
           variantsChanged = true
+          if (at) console.warn(`[video-status] finalize for ${jobId}:${target.id} had no result in ${Math.round(FINALIZE_RETRY_MS / 60000)}min — re-dispatching`)
           dispatchPipelineTask({ task: 'finalize-submagic', jobId, variantId: target.id, downloadUrl: poll.downloadUrl }).catch((e) =>
             console.warn(`[video-status] finalize failed for ${jobId}:${target.id}:`, (e as Error).message)
           )

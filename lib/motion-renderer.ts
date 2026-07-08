@@ -748,14 +748,25 @@ export async function finalizeSubmagicVariant(
     // exactly as Submagic returned it.
     const skippedCleanAudio = await submagicSkippedCleanAudio(jobId, variantId)
     const gradeMode = await readVariantGradeMode(jobId, variantId)
-    let finalUrl: string
-    try {
-      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio, gradeMode)
-      console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
-    } catch (e) {
-      // Fall back to Submagic's own URL rather than failing the variant —
-      // still playable right now, just not pulled into our own storage.
-      console.warn(`[motion-renderer] could not retrieve Submagic result for ${key}, keeping their hosted URL:`, (e as Error).message)
+    // Retrieval runs the whole finish chain (download → grade → effects → music
+    // → SFX → R2 upload) and re-downloads fresh each attempt, so it's safe to
+    // retry. Most failures here are TRANSIENT (network / TLS "bad record mac" /
+    // R2 blip) — retrying instead of immediately falling back is what keeps a
+    // variant off the engine's EXPIRING url, which would play now but go black
+    // hours later. Only after retries exhaust do we accept the hosted url (still
+    // usable now; the status-route heal re-pulls it on later polls).
+    let finalUrl: string | null = null
+    for (let attempt = 1; attempt <= 3 && finalUrl === null; attempt++) {
+      try {
+        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio, gradeMode)
+        console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
+      } catch (e) {
+        console.warn(`[motion-renderer] retrieve attempt ${attempt}/3 failed for ${key}:`, (e as Error).message)
+        if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 4000))
+      }
+    }
+    if (finalUrl === null) {
+      console.warn(`[motion-renderer] all retrieve attempts failed for ${key}, falling back to the engine's hosted URL (heal will re-pull)`)
       finalUrl = submagicDownloadUrl
     }
     await patchVariant(
@@ -850,6 +861,11 @@ export async function retrieveAndStoreSubmagicResult(
     } catch (e) {
       console.warn('[motion-renderer] visual transitions failed, keeping as-is:', (e as Error).message)
     }
+
+    // Step 4/4 of the v1-v3 journey (see start-variant + status routes): grading
+    // and effects are done, now music + sound. setVariantProgress is best-effort
+    // internally, so a progress-write failure never affects the render.
+    await setVariantProgress(jobId, variantId, 4, 4, 'Adding music & finishing')
 
     // Add our own library music on top of the finished Submagic video, so v1-v3
     // share the exact v4/v5 music system (mood match, best-part offset, ducking,
@@ -1478,10 +1494,22 @@ async function renderRemotionEdit(
     // detected silences ride along as the second cut signal (word timings can
     // stretch across real pauses and hide them from gap-based cutting).
     await setVariantProgress(jobId, variantId, 3, STEPS, 'Planning cuts and captions')
-    const words = await transcribeLocalFile(workPath)
-    const silences = await detectSilences(workPath)
-    const duration = await getVideoDuration(workPath)
-    const dimensions = await probeVideoDimensions(workPath)
+    // These four all read workPath and don't depend on each other — run them
+    // together instead of serially (overlaps the slow Scribe call with the
+    // ffmpeg/ffprobe passes).
+    const [words, silences, duration, dimensions] = await Promise.all([
+      transcribeLocalFile(workPath),
+      detectSilences(workPath),
+      getVideoDuration(workPath),
+      probeVideoDimensions(workPath),
+    ])
+    // A talking-head clip that comes back with almost no words means the
+    // transcription failed (empty 200 from Scribe, wrong audio track) — NOT a
+    // silent video. Shipping it anyway produces a "ready" edit with no cuts, no
+    // captions, and no B-roll. Fail loudly instead so the user retries.
+    if (words.length < 5 && duration > 8) {
+      throw new Error('Transcription came back empty — could not read the speech in this clip. Please retry this variant.')
+    }
 
     // Pace, page length, and casing all come from the variant's template —
     // every variant shares this same engine underneath.
@@ -2096,7 +2124,14 @@ export async function runSingleVariant(
   try {
     await launch()
   } catch (e) {
+    // MUST mark the variant failed here — not just log. renderRemotionEdit and
+    // the caption/motion-graphics test paths can throw before they set up their
+    // own error handling (e.g. empty transcription), and renderEditVariantTask
+    // has no catch of its own. Without this the variant sits 'processing' with
+    // no progress ("Connecting to pipeline…") until the 45-min sweep, and the UI
+    // offers no Retry while processing — a frozen, unrecoverable card.
     console.error('[motion-renderer] runSingleVariant fatal:', e)
+    await markVariant(jobId, variantId, 'failed', null, (e as Error).message || 'The render failed to start. Please retry this variant.').catch(() => {})
   } finally {
     clearTimeout(timeoutId)
     active.delete(key)

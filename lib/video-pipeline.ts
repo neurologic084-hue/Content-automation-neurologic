@@ -721,7 +721,15 @@ export async function pollSubmagicJob(projectId: string): Promise<{
     headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
   })
 
-  if (!res.ok) return { status: 'failed', previewUrl: null, downloadUrl: null, error: 'Poll failed' }
+  // A non-OK status here is almost always a TRANSIENT blip — a 429/5xx/gateway
+  // hiccup during frequent polling of a project that's still rendering fine.
+  // Reporting 'failed' would kill a healthy render and burn a fresh re-run, so
+  // treat it as still-processing; a genuinely dead project is caught later by
+  // the poll-loop timeout / 45-min stale sweep instead of on one bad response.
+  if (!res.ok) {
+    console.warn(`[submagic] poll got HTTP ${res.status} for ${projectId} — treating as still-processing`)
+    return { status: 'processing', previewUrl: null, downloadUrl: null, error: null }
+  }
 
   const data = await res.json()
 
