@@ -34,14 +34,20 @@ export default async function LibraryPage({
   // Approved scripts for the ACTIVE profile only — switching profiles swaps
   // the whole library. Falls back to folder-less select if that column is missing.
   let allScripts: { id: string; idea_id: string; hook: string; body: string; cta: string; mood_tag: string | null; approved_at: string | null; folder_id: string | null }[] | null = null
-  const { data: withFolder, error: folderColError } = await supabase
-    .from('scripts')
-    .select('id, idea_id, hook, body, cta, mood_tag, approved_at, folder_id')
-    .eq('status', 'approved')
-    .eq('profile_slot', slot)
-    .order('approved_at', { ascending: false })
+  // Scripts and folders are independent — fetch together (one round trip, not two).
+  const [scriptsRes, foldersRes] = await Promise.all([
+    supabase
+      .from('scripts')
+      .select('id, idea_id, hook, body, cta, mood_tag, approved_at, folder_id')
+      .eq('status', 'approved')
+      .eq('profile_slot', slot)
+      .order('approved_at', { ascending: false }),
+    supabase.from('folders').select('id, name').order('name'),
+  ])
+  const { data: withFolder, error: folderColError } = scriptsRes
 
   if (folderColError) {
+    // Rare: the folder_id column isn't there yet — retry without it.
     const { data: withoutFolder } = await supabase
       .from('scripts')
       .select('id, idea_id, hook, body, cta, mood_tag, approved_at')
@@ -53,7 +59,7 @@ export default async function LibraryPage({
     allScripts = withFolder
   }
 
-  const { data: folders } = await supabase.from('folders').select('id, name').order('name')
+  const folders = foldersRes.data
 
   const total = allScripts?.length ?? 0
   const unfiledCount = allScripts?.filter(s => !s.folder_id).length ?? 0
