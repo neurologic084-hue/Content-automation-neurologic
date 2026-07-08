@@ -945,8 +945,8 @@ export async function mixBackgroundMusic(
   // DUCK_RATIO: how hard music drops WHILE the voice talks. In a talking-head
   //   video the voice is nearly constant, so a deep duck (6) made the bed vanish
   //   for almost the whole video. 3.5 keeps music present under speech.
-  const MUSIC_BED_BELOW_LU = 12
-  const DUCK_RATIO = 3
+  const MUSIC_BED_BELOW_LU = 10
+  const DUCK_RATIO = 2.5
 
   // VOICE-AWARE leveling: measure how loud the dialogue in THIS video actually
   // is and place the music bed MUSIC_BED_BELOW_LU below it, instead of trusting
