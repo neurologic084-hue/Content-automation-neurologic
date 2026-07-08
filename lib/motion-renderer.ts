@@ -1102,6 +1102,41 @@ async function addMotionGraphics(
   }
 }
 
+// Music-only path: the footage untouched (no cuts, captions, B-roll, or
+// Submagic) with just a mood-matched background track mixed under the voice.
+// The lightest, fastest variant — literally "add music to my clip".
+async function renderMusicOnly(
+  jobId: string,
+  variantId: string,
+  sourceUrl: string,
+  outDir: string,
+  opts: RenderVariantOptions,
+): Promise<void> {
+  const STEPS = 2
+  try {
+    cleanTempFiles(outDir, variantId)
+    const outputPath = path.join(outDir, `${variantId}.mp4`)
+
+    await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
+    const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
+    fs.copyFileSync(compressedPath, outputPath)
+
+    if (MUSIC_ENABLED && opts.musicMode !== 'off') {
+      await setVariantProgress(jobId, variantId, 2, STEPS, 'Adding background music')
+      // No content profile needed — the track is picked by the script's mood
+      // tag. Runs through the audio queue like every other mix.
+      await enqueueAudioPostSteps(() =>
+        mixBackgroundMusic(outputPath, opts.hook, opts.moodTag ?? null, opts.scriptFormat, opts.musicMode ?? DEFAULT_MUSIC_MODE, null, null, variantId),
+      )
+    }
+
+    console.log('[motion-renderer] music-only output ready')
+    await finishVariant(jobId, variantId, outputPath)
+  } catch (e) {
+    await markVariant(jobId, variantId, 'failed', null, (e as Error).message)
+  }
+}
+
 // Caption-only test path: downloads the raw source footage and burns in
 // captions directly — no Submagic. For iterating on caption styles without
 // spending a Submagic job on every test run.
@@ -1711,6 +1746,7 @@ export interface RenderVariantOptions {
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
   musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
+  musicOnly?: boolean              // no editing at all — raw footage + background music
 }
 
 // Main pipeline (no Descript anywhere in this app):
@@ -1827,6 +1863,10 @@ export async function runSingleVariant(
   }, TIMEOUT_MS)
 
   const launch = async () => {
+    if (opts.musicOnly) {
+      await renderMusicOnly(jobId, variantId, sourceUrl, outDir, opts)
+      return
+    }
     if (opts.captionTestOnly) {
       await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, opts.moodTag, opts.scriptFormat)
       return
@@ -1945,7 +1985,7 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
   // so they read as a real side-by-side comparison rather than two random picks.
   // our-v6 never touches Submagic (Remotion-only edit), so it needs no template.
   let submagicTemplateName: string | undefined
-  if (!variant.motionGraphicsTestOnly && !variant.remotionEdit) {
+  if (!variant.motionGraphicsTestOnly && !variant.remotionEdit && !variant.musicOnly) {
     const [tplA, tplB] = await pickPremiumTemplates()
     submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
   }
@@ -1965,5 +2005,6 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
     submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
     musicMode: variant.music_mode as MusicMode | undefined,
+    musicOnly: variant.musicOnly as boolean | undefined,
   })
 }
