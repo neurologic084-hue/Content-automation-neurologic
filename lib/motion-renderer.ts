@@ -20,6 +20,7 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
+import { applyColorGrade } from './color-grade'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -745,6 +746,14 @@ export async function retrieveAndStoreSubmagicResult(
       await trimResidualSilences(localPath)
     } catch (e) {
       console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
+    }
+
+    // Warm & vibrant grade — phone footage out of Submagic reads flat/cold.
+    // Best-effort; a grade failure never loses the video.
+    try {
+      await applyColorGrade(localPath)
+    } catch (e) {
+      console.warn('[motion-renderer] color grade failed, keeping as-is:', (e as Error).message)
     }
 
     // Visual accents (white flash / glow-up / black dip) on a smart subset of

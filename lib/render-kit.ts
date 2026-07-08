@@ -40,7 +40,7 @@ export interface RemotionVariantIdentity {
   textBehindHook: boolean         // subject matte behind the hook caption
   designedCards: boolean          // Ryan's poster-card covers (viral B-roll only)
   graphics?: 'koe' | 'eubank'     // context-driven Remotion animation pack
-  grade?: 'cinematic'             // subtle segment-level color grade
+  grade?: 'cinematic' | 'warm'    // subtle segment-level color grade
   hookSpotlight?: boolean         // Julie's opening focus: dark edges, bright subject
   handheld?: boolean              // organic position/rotation drift on every shot
   // AI-generated editorial collage scenes (Vox-style layered cutouts, kie.ai)
@@ -68,7 +68,7 @@ export const REMOTION_IDENTITIES: Record<string, RemotionVariantIdentity> = {
     captionStyle: 'eubank', brollMedia: 'viral',
     pace: 'punchy', maxPageWords: 5, captionCase: 'sentence',
     insets: false, textBehindHook: false, designedCards: false,
-    graphics: 'eubank', grade: 'cinematic', handheld: true,
+    graphics: 'eubank', grade: 'warm', handheld: true,
   },
   // RYAN — viral podcast (modeled on "NEWEST viral editing style"): two-tier
   // captions (white sans + big gold italic serif / heavy block numbers),
@@ -78,7 +78,7 @@ export const REMOTION_IDENTITIES: Record<string, RemotionVariantIdentity> = {
     captionStyle: 'viral', brollMedia: 'viral', lockedTransition: 'slide',
     pace: 'punchy', maxPageWords: 6, captionCase: 'title',
     insets: true, textBehindHook: true, designedCards: true,
-    grade: 'cinematic',
+    grade: 'warm',
   },
   // DAN KOE — cinematic (modeled on "Dan Koe Sample.mp4"): dark moody grade,
   // tiny sentence-case captions, red-line name/CTA tag, full-screen video
