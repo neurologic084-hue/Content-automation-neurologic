@@ -21,7 +21,7 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
-import { applyColorGrade } from './color-grade'
+import { applyColorGrade, resolveEditGrade, type GradeMode } from './color-grade'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -658,6 +658,18 @@ async function submagicSkippedCleanAudio(jobId: string, variantId: string): Prom
   }
 }
 
+// The job's color look is stored per-variant in the variants jsonb (same slot
+// as music_mode), so it needs no schema migration. 'smart' when unset.
+async function readVariantGradeMode(jobId: string, variantId: string): Promise<GradeMode> {
+  try {
+    const { data: job } = await supabaseAdmin().from('video_jobs').select('variants').eq('id', jobId).single()
+    const v = ((job?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
+    return ((v?.grade_mode as GradeMode | undefined)) ?? 'smart'
+  } catch {
+    return 'smart'
+  }
+}
+
 export async function finalizeSubmagicVariant(
   jobId: string,
   variantId: string,
@@ -706,9 +718,10 @@ export async function finalizeSubmagicVariant(
     // safety net. Every other Submagic render is cleaned in-render and is left
     // exactly as Submagic returned it.
     const skippedCleanAudio = await submagicSkippedCleanAudio(jobId, variantId)
+    const gradeMode = await readVariantGradeMode(jobId, variantId)
     let finalUrl: string
     try {
-      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio)
+      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio, gradeMode)
       console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
     } catch (e) {
       // Fall back to Submagic's own URL rather than failing the variant —
@@ -750,6 +763,7 @@ export async function retrieveAndStoreSubmagicResult(
   downloadUrl: string,
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
   skippedCleanAudio: boolean = false,
+  gradeMode: GradeMode = 'smart',
 ): Promise<string> {
   const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
@@ -789,10 +803,11 @@ export async function retrieveAndStoreSubmagicResult(
       console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
     }
 
-    // Warm & vibrant grade — phone footage out of Submagic reads flat/cold.
-    // Best-effort; a grade failure never loses the video.
+    // Color grade — phone footage out of Submagic reads flat/cold. The look is
+    // the job's chosen mode ('smart' default). Best-effort; a grade failure
+    // never loses the video.
     try {
-      await applyColorGrade(localPath)
+      await applyColorGrade(localPath, gradeMode)
     } catch (e) {
       console.warn('[motion-renderer] color grade failed, keeping as-is:', (e as Error).message)
     }
@@ -1807,7 +1822,7 @@ async function renderRemotionEdit(
       matte: matte ?? undefined,
       graphics: graphics.length ? graphics : undefined,
       tag,
-      grade: kit.grade,
+      grade: resolveEditGrade(opts.gradeMode, kit.grade),
       hookSpotlight: kit.hookSpotlight,
       handheld: kit.handheld,
       splits: broll.filter(b => b.layout === 'split').map(b => ({ start: b.start, end: b.start + b.duration })),
@@ -1913,6 +1928,7 @@ export interface RenderVariantOptions {
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
   musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
+  gradeMode?: GradeMode            // per-job color look (smart / golden / clean / moody / off)
   // Creator-supplied B-roll (Drive links stored on the job). When present,
   // stock B-roll is skipped entirely and these clips are matched to
   // transcript moments instead.
@@ -2236,6 +2252,7 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
     submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
     musicMode: variant.music_mode as MusicMode | undefined,
+    gradeMode: (variant.grade_mode as GradeMode | undefined),
     customBroll: (job.custom_broll as { url: string; description?: string | null }[] | null) ?? undefined,
   })
 }

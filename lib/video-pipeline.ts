@@ -2,6 +2,7 @@ import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
 import type { CaptionLane } from './variant-specs'
 import type { ContentProfile } from './video-analysis'
+import type { GradeMode } from './color-grade'
 
 // Per-render background-music choice, picked in the video studio and stored on
 // each variant. 'smart' = pick a mood-matched track from the curated library
@@ -73,6 +74,10 @@ export interface VideoVariant extends VideoVariantDef {
   // Per-render music choice for this job (same for every variant). Read by the
   // render path to decide source / whether to add music at all.
   music_mode?: MusicMode
+  // Color-grade look for this job (same for every variant). 'smart' = each
+  // variant's signature look; otherwise a single look forced across all.
+  // Stored per-variant in this jsonb so it needs no schema migration.
+  grade_mode?: GradeMode
   // ISO timestamp stamped when the variant enters 'processing', cleared when it
   // reaches ready/failed. Lets the status route detect a variant whose worker
   // VM was killed before it could write its own failure (a silent forever-spin).

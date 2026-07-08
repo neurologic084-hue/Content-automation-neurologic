@@ -40,7 +40,7 @@ export interface RemotionVariantIdentity {
   textBehindHook: boolean         // subject matte behind the hook caption
   designedCards: boolean          // Ryan's poster-card covers (viral B-roll only)
   graphics?: 'koe' | 'eubank'     // context-driven Remotion animation pack
-  grade?: 'cinematic' | 'warm'    // subtle segment-level color grade
+  grade?: 'cinematic' | 'warm' | 'clean'    // subtle segment-level color grade
   hookSpotlight?: boolean         // Julie's opening focus: dark edges, bright subject
   handheld?: boolean              // organic position/rotation drift on every shot
   // AI-generated editorial collage scenes (Vox-style layered cutouts, kie.ai)
