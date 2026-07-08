@@ -229,6 +229,39 @@ export function isRestartedBy(words: WordTimestamp[], a: number, b: number): boo
   return matched / span.length >= 0.6
 }
 
+const normWord = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
+
+// Stutter duplicates ("matter of fact... fact, if"): the same word said twice
+// across a real pause is a restart, not emphasis — drop the FIRST take.
+//
+// Compares each word to the next word that SURVIVES `dropped`, never merely the
+// next token. The old adjacent-only check could not see the single most common
+// shape of a spoken stutter, because the hesitation sits between the two takes:
+//
+//   [272] "enough,"  74.60-74.90
+//   [273] "uh,"      74.98-75.34   <- already dropped as filler
+//   [274] "enough"   75.38-75.74
+//
+// It compared "enough" to "uh", found no match, and shipped "enough ... enough"
+// into every render. On the demo transcript the adjacent rule never fired once.
+//
+// The gap is measured end-of-first to start-of-second, so it spans the filler.
+// Under 0.25s with nothing between them stays put: "no, no!" is emphasis.
+// Exported for tests/cut-plan.test.ts.
+export function findStutterDrops(words: WordTimestamp[], dropped: ReadonlySet<number>): number[] {
+  const survivors = words.map((_, i) => i).filter(i => !dropped.has(i))
+  const out: number[] = []
+  for (let k = 0; k + 1 < survivors.length; k++) {
+    const i = survivors[k]
+    const j = survivors[k + 1]
+    const a = normWord(words[i].text)
+    if (a.length < 3 || a !== normWord(words[j].text)) continue
+    if (words[j].start - words[i].end < 0.25) continue
+    out.push(i)
+  }
+  return out
+}
+
 export interface CutOptions {
   tight?: boolean
   // Energy-detected silence intervals in SOURCE time (ffmpeg silencedetect on
@@ -264,16 +297,7 @@ export async function planKeepSegments(
     if (FILLER_RE.test(t) || /^\(.+\)$/.test(t) || /^\S+-$/.test(t)) dropped.add(i)
   })
 
-  // Stutter duplicates ("matter of fact... fact, if"): the same word repeated
-  // across a real pause is a restart, not emphasis — drop the FIRST take.
-  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
-  for (let i = 0; i + 1 < words.length; i++) {
-    if (dropped.has(i) || dropped.has(i + 1)) continue
-    const a = norm(words[i].text)
-    if (a.length >= 3 && a === norm(words[i + 1].text) && words[i + 1].start - words[i].end >= 0.25) {
-      dropped.add(i)
-    }
-  }
+  for (const i of findStutterDrops(words, dropped)) dropped.add(i)
 
   const kept = words.filter((_, i) => !dropped.has(i))
   if (!kept.length) return [{ start: 0, end: sourceDuration }]
