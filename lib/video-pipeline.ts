@@ -60,6 +60,10 @@ export interface VideoVariant extends VideoVariantDef {
   // Per-render music choice for this job (same for every variant). Read by the
   // render path to decide source / whether to add music at all.
   music_mode?: MusicMode
+  // ISO timestamp stamped when the variant enters 'processing', cleared when it
+  // reaches ready/failed. Lets the status route detect a variant whose worker
+  // VM was killed before it could write its own failure (a silent forever-spin).
+  processing_started_at?: string | null
 }
 
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [

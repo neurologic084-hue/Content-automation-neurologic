@@ -41,7 +41,18 @@ export async function patchVariant(
   await withJobLock(jobId, async () => {
     const { data: job } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     if (!job?.variants) return
-    const variants = (job.variants as VideoVariant[]).map(v => v.id === variantId ? { ...v, ...patch } : v)
+    const variants = (job.variants as VideoVariant[]).map(v => {
+      if (v.id !== variantId) return v
+      const merged = { ...v, ...patch }
+      // Stamp when the variant first enters processing; clear it on ready/failed.
+      // The status route sweeps on this to catch a worker VM killed mid-render.
+      if (patch.status === 'processing' && v.status !== 'processing') {
+        merged.processing_started_at = new Date().toISOString()
+      } else if (patch.status === 'ready' || patch.status === 'failed') {
+        merged.processing_started_at = null
+      }
+      return merged
+    })
     const update: Record<string, unknown> = { variants }
     if (opts.completeWhenAllDone && variants.every(v => v.status === 'ready' || v.status === 'failed')) {
       update.status = 'complete'

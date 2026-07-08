@@ -532,10 +532,16 @@ async function finishVariant(
   let url: string
   if (r2Url) {
     url = versioned(r2Url)
+  } else if (process.env.SANDBOX) {
+    // On Vercel the VM (and its /tmp) is destroyed after this run, so a local
+    // /renders/ URL would 404 forever — a variant that looks "ready" but plays
+    // black. Fail loudly instead so it shows as failed and can be retried.
+    await markVariant(jobId, variantId, 'failed', null, 'Could not upload the finished video to storage. Please retry this variant.')
+    return
   } else {
-    // R2 failed — copy the file into public/renders/ so the /renders/ URL is
-    // actually reachable. If this copy also fails, mark the variant failed rather
-    // than storing a dead path that will ENOENT at publish time.
+    // Long-lived server: R2 failed — copy the file into public/renders/ so the
+    // /renders/ URL is actually reachable. If this copy also fails, mark the
+    // variant failed rather than storing a dead path that ENOENTs at publish.
     const pubDir = rendersDir(jobId)
     const pubPath = path.join(pubDir, fileName)
     try {
@@ -779,6 +785,11 @@ export async function retrieveAndStoreSubmagicResult(
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
+  // On Vercel a local /renders/ URL 404s once the VM is gone — surface the
+  // failure instead of returning a dead URL. Long-lived servers keep the file.
+  if (!r2Url && process.env.SANDBOX) {
+    throw new Error('Could not upload the finished video to storage. Please retry this variant.')
+  }
   return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
 }
 
