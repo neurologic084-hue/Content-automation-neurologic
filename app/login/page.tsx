@@ -4,6 +4,68 @@ import { useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 
+// The engine-room stack, shown as a quiet monochrome trust bar on the brand
+// panel. Icons are simplified marks drawn inline (no external fetches).
+const POWERED_BY: { name: string; icon: React.ReactNode }[] = [
+  {
+    name: 'Gemini',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M12 24A14.304 14.304 0 0 0 0 12 14.304 14.304 0 0 0 12 0a14.305 14.305 0 0 0 12 12 14.305 14.305 0 0 0-12 12" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Remotion',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M7 4.8v14.4L19.5 12 7 4.8z" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Submagic',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M12 2l2.2 7.8L22 12l-7.8 2.2L12 22l-2.2-7.8L2 12l7.8-2.2L12 2z" />
+      </svg>
+    ),
+  },
+  {
+    name: 'ElevenLabs',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M8 4h3.2v16H8zM12.8 4H16v16h-3.2z" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Pexels',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+        <rect x="3" y="3" width="18" height="18" rx="4.5" stroke="currentColor" strokeWidth="2" />
+        <path d="M9.6 8.4h3a2.7 2.7 0 0 1 0 5.4h-1.2v3.2H9.6V8.4z" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Supabase',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M13.4 2 3.8 13.6h6.4l-.9 8.4 9.6-11.6h-6.4l.9-8.4z" />
+      </svg>
+    ),
+  },
+  {
+    name: 'Vercel',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M12 3l10 17.3H2L12 3z" />
+      </svg>
+    ),
+  },
+]
+
 export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -137,8 +199,27 @@ export default function LoginPage() {
           </div>
         </div>
 
-        {/* Bottom   phase label */}
+        {/* Bottom   powered-by stack + phase label */}
         <div className="relative z-10 text-center">
+          <p
+            className="uppercase font-semibold mb-3.5"
+            style={{ color: 'rgba(255,255,255,0.22)', fontSize: 9, letterSpacing: '0.25em' }}
+          >
+            Powered by
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2.5 mx-auto mb-5" style={{ maxWidth: 420 }}>
+            {POWERED_BY.map(({ name, icon }) => (
+              <span
+                key={name}
+                className="flex items-center gap-1.5 transition-opacity duration-150 hover:opacity-100"
+                style={{ color: 'rgba(255,255,255,0.38)' }}
+                title={name}
+              >
+                {icon}
+                <span style={{ fontSize: 11.5, fontWeight: 500, letterSpacing: '0.02em' }}>{name}</span>
+              </span>
+            ))}
+          </div>
           <p style={{ color: 'rgba(255,255,255,0.2)', fontSize: 11, letterSpacing: '0.5px' }}>
             Phase 1 · Creator Mode
           </p>

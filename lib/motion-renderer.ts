@@ -1819,7 +1819,7 @@ async function renderRemotionEdit(
 
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
-      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
+      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering your edit')
       // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
       // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
       // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
@@ -1940,7 +1940,7 @@ async function renderSmartCinematic(
     cleanTempFiles(outDir, variantId)
     const outputPath = path.join(outDir, `${variantId}.mp4`)
 
-    await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
+    await setVariantProgress(jobId, variantId, step++, STEPS, 'AI editing engine at work')
     const submagicSourceUrl = await getSubmagicSourceUrl(jobId, sourceUrl)
 
     // V2: one Gemini read of the footage (shared/cached across variants) drives

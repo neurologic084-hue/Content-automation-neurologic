@@ -30,8 +30,9 @@ interface Props {
 }
 
 const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = {
-  submagic:    { bg: '#EEF2FF', text: '#6366F1', label: 'Submagic' },
-  edit:        { bg: '#FFF3EF', text: '#FF4F17', label: 'Edit' },
+  // White-label names — vendor tools stay behind the curtain in the client UI.
+  submagic:    { bg: '#EEF2FF', text: '#6366F1', label: 'Edit Engine' },
+  edit:        { bg: '#FFF3EF', text: '#FF4F17', label: 'Motion Lab' },
 }
 
 export function VideoStudio({ script, existingJobId }: Props) {
@@ -354,7 +355,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                 )
               })}
             </div>
-            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Source choice applies to the Edit variants. Submagic variants use their own music (this only toggles it on/off for those).</p>
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Source choice applies to the Motion Lab variants. Edit Engine variants pick their own matching track (this only toggles music on/off for those).</p>
           </div>
 
           {error && <p className="text-xs text-[#EF4444] mb-3">{error}</p>}

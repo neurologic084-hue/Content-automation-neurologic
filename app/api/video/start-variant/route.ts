@@ -56,14 +56,14 @@ async function pollSubmagicUntilDone(
       db,
       jobId,
       variantId,
-      { status: 'failed', error: result.error ?? 'Submagic failed', progress: null },
+      { status: 'failed', error: result.error ?? 'The editing engine hit an error. Please retry this variant.', progress: null },
       { completeWhenAllDone: true },
     )
     return
   }
 
   // Timeout
-  await patchVariant(db, jobId, variantId, { status: 'failed', error: 'Submagic timed out after 10 minutes', progress: null })
+  await patchVariant(db, jobId, variantId, { status: 'failed', error: 'The edit took too long and timed out. Please retry this variant.', progress: null })
 }
 
 export async function POST(req: NextRequest) {
@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
         variantId,
         // external_id cleared so the status poller never polls a stale
         // Submagic project between this reset and the new projectId write.
-        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } },
+        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Sending footage to the editing engine' } },
         { jobStatus: 'processing' },
       )
 
