@@ -901,17 +901,25 @@ export async function mixBackgroundMusic(
   const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
   console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
+  // ── Music level knobs (tune here) ──────────────────────────────────────────
+  // MUSIC_BED_BELOW_LU: how far under the voice the music bed sits. Bigger =
+  //   quieter music. 18 read as too low; 14 keeps the voice clearly on top while
+  //   letting the bed actually be heard.
+  // DUCK_RATIO: how hard music drops WHILE the voice talks. In a talking-head
+  //   video the voice is nearly constant, so a deep duck (6) made the bed vanish
+  //   for almost the whole video. 3.5 keeps music present under speech.
+  const MUSIC_BED_BELOW_LU = 14
+  const DUCK_RATIO = 3.5
+
   // VOICE-AWARE leveling: measure how loud the dialogue in THIS video actually
-  // is and place the music bed a fixed distance (18 LU) below it, instead of
-  // trusting a constant that assumed studio-level voice. The duck trigger
-  // scales with the voice too — a fixed threshold never fired on quiet takes,
-  // which is exactly when music "covers the voice". Falls back to the audited
-  // constants when measurement fails.
+  // is and place the music bed MUSIC_BED_BELOW_LU below it, instead of trusting
+  // a constant that assumed studio-level voice. Falls back to an audited
+  // constant when measurement fails.
   const voiceI = await measureIntegratedLoudness(videoPath)
   const musicI = await measureIntegratedLoudness(musicPath)
-  let bedVolume = 'volume=0.13'
+  let bedVolume = 'volume=0.20'
   if (voiceI !== null && musicI !== null) {
-    const gainDb = Math.max(-40, Math.min(0, voiceI - 18 - musicI))
+    const gainDb = Math.max(-40, Math.min(0, voiceI - MUSIC_BED_BELOW_LU - musicI))
     bedVolume = `volume=${gainDb.toFixed(1)}dB`
     console.log(`[motion-renderer] voice ${voiceI.toFixed(1)} LUFS, music ${musicI.toFixed(1)} LUFS -> bed gain ${gainDb.toFixed(1)} dB`)
   }
@@ -934,7 +942,7 @@ export async function mixBackgroundMusic(
       `-filter_complex ` +
       `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
       `equalizer=f=2500:width_type=q:w=1.4:g=-5,${bedVolume}[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=${duckThreshold.toFixed(4)}:ratio=6:attack=15:release=700[ducked];` +
+      `[bgfade][0:a]sidechaincompress=threshold=${duckThreshold.toFixed(4)}:ratio=${DUCK_RATIO}:attack=15:release=700[ducked];` +
       `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
