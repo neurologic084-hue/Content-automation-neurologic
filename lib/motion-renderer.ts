@@ -513,6 +513,18 @@ export async function prepareJobSource(
   return { localPath }
 }
 
+// A Remotion delayRender failure quotes the component's props back at you, and
+// the fonts are embedded as base64 data URIs — so an untruncated message wrote
+// ~10KB of font bytes into the variant's `error` field, once per failure. Strip
+// data URIs first (they carry no diagnostic value), then hard-cap the rest.
+const MAX_ERROR_CHARS = 600
+
+function tidyError(error: string | null): string | null {
+  if (!error) return error
+  const stripped = error.replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[data-uri]')
+  return stripped.length > MAX_ERROR_CHARS ? `${stripped.slice(0, MAX_ERROR_CHARS)}… (truncated)` : stripped
+}
+
 async function markVariant(
   jobId: string,
   variantId: string,
@@ -524,7 +536,7 @@ async function markVariant(
     supabaseAdmin(),
     jobId,
     variantId,
-    { status, download_url: downloadUrl, preview_url: downloadUrl, error, progress: null },
+    { status, download_url: downloadUrl, preview_url: downloadUrl, error: tidyError(error), progress: null },
     { completeWhenAllDone: true },
   )
 }
@@ -832,8 +844,13 @@ export async function retrieveAndStoreSubmagicResult(
   return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
 }
 
+// Intermediates only. `${variantId}.mp4` — the FINISHED render — is deliberately
+// not in this list: deleting it up front meant a re-render that later failed
+// (Remotion delayRender timeout, a hung LLM call) destroyed the previous good
+// preview and left the variant with nothing. Remotion overwrites the output on
+// success anyway, so keeping the old file costs nothing and survives a failure.
 function cleanTempFiles(outDir: string, variantId: string): void {
-  for (const suffix of ['.mp4', '_captions.ass', '_mx.mp4', '_broll.mp4', '_mg.mp4']) {
+  for (const suffix of ['_captions.ass', '_mx.mp4', '_broll.mp4', '_mg.mp4']) {
     const p = path.join(outDir, `${variantId}${suffix}`)
     try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch { /* best-effort */ }
   }
@@ -1518,6 +1535,12 @@ async function renderRemotionEdit(
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
+        // One set for the whole render: stock cover slots, carousel panes and
+        // every query-ladder fallback all draw from it, so no clip appears
+        // twice. Declared outside the branch because the eubank carousel below
+        // (resolveExtraImages) shares it. Custom-clip renders never source
+        // stock, so the set simply stays empty for them.
+        const usedMedia = new Set<string>()
         if (usingCustomBroll) {
           // The creator supplied their own clips — stock sourcing is skipped
           // entirely. Clips are matched to transcript moments by content.
@@ -1526,7 +1549,7 @@ async function renderRemotionEdit(
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion)
         } else {
           const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
-          broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
+          broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
         }
         if (viral) {
           // Pages over covers go big/centered; pages under the designed poster
@@ -1568,6 +1591,7 @@ async function renderRemotionEdit(
                   `carousel-${bi}`,
                   2,
                   kit.variation,
+                  usedMedia,
                 ).catch(() => [] as string[])
                 if (extras.length >= 1) {
                   b.extraFiles = extras

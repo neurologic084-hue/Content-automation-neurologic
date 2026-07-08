@@ -171,6 +171,17 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
       if (!Array.isArray(r) || r.length !== 2) continue
       const [a, b] = r as [number, number]
       if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b >= words.length || b < a) continue
+      // The semantic precondition the prompt states but the model does not
+      // reliably obey: an abandoned attempt is a near-duplicate of the words
+      // that IMMEDIATELY FOLLOW it. Observed failure — "You should hear some
+      // music. [You should,] uh, see some captions." Haiku marked the LATER
+      // "You should," (5/5 runs), which is a new sentence, not a false start;
+      // its own instruction says to keep the final take. Rejecting the single
+      // offending range, not the whole pass, keeps the genuine retakes.
+      if (!isRestartedBy(words, a, b)) {
+        console.warn(`[edit-plan] rejecting retake range [${a}-${b}] "${words.slice(a, b + 1).map(w => w.text).join(' ')}" — not restarted by the words that follow`)
+        continue
+      }
       dropped += b - a + 1
       valid.push([a, b])
     }
@@ -184,6 +195,71 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
     console.warn('[edit-plan] retake detection failed, keeping all takes:', (e as Error).message)
     return []
   }
+}
+
+// True when the span [a,b] looks like an abandoned attempt at the speech that
+// follows it: its content words reappear, in order, near the top of the words
+// after b. Deliberately lenient on the tail (a false start is usually cut off
+// mid-phrase) and strict on the head (a restart repeats how the phrase BEGAN).
+// Exported for the regression test in tests/cut-plan.test.ts.
+export function isRestartedBy(words: WordTimestamp[], a: number, b: number): boolean {
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
+  const isNoise = (t: string) => FILLER_RE.test(t.trim()) || /^\(.+\)$/.test(t.trim()) || /^\S+-$/.test(t.trim())
+
+  const span = words.slice(a, b + 1).map(w => norm(w.text)).filter(t => t && !isNoise(t))
+  if (!span.length) return true   // pure filler/sound-event span: nothing to verify
+
+  // Compare against a window twice the span's length — a restart begins right
+  // after the abandoned attempt, allowing for an interposed "uh" or two.
+  const after = words.slice(b + 1, b + 1 + Math.max(6, span.length * 2))
+    .map(w => norm(w.text)).filter(t => t && !isNoise(t))
+  if (!after.length) return false // nothing follows: it is the final take, keep it
+
+  // The restart must reuse the span's FIRST content word early on.
+  const anchor = after.indexOf(span[0])
+  if (anchor === -1 || anchor > 2) return false
+
+  // …and a majority of the span's content words must reappear in order from there.
+  let matched = 0
+  let cursor = anchor
+  for (const t of span) {
+    const at = after.indexOf(t, cursor)
+    if (at !== -1) { matched++; cursor = at + 1 }
+  }
+  return matched / span.length >= 0.6
+}
+
+const normWord = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
+
+// Stutter duplicates ("matter of fact... fact, if"): the same word said twice
+// across a real pause is a restart, not emphasis — drop the FIRST take.
+//
+// Compares each word to the next word that SURVIVES `dropped`, never merely the
+// next token. The old adjacent-only check could not see the single most common
+// shape of a spoken stutter, because the hesitation sits between the two takes:
+//
+//   [272] "enough,"  74.60-74.90
+//   [273] "uh,"      74.98-75.34   <- already dropped as filler
+//   [274] "enough"   75.38-75.74
+//
+// It compared "enough" to "uh", found no match, and shipped "enough ... enough"
+// into every render. On the demo transcript the adjacent rule never fired once.
+//
+// The gap is measured end-of-first to start-of-second, so it spans the filler.
+// Under 0.25s with nothing between them stays put: "no, no!" is emphasis.
+// Exported for tests/cut-plan.test.ts.
+export function findStutterDrops(words: WordTimestamp[], dropped: ReadonlySet<number>): number[] {
+  const survivors = words.map((_, i) => i).filter(i => !dropped.has(i))
+  const out: number[] = []
+  for (let k = 0; k + 1 < survivors.length; k++) {
+    const i = survivors[k]
+    const j = survivors[k + 1]
+    const a = normWord(words[i].text)
+    if (a.length < 3 || a !== normWord(words[j].text)) continue
+    if (words[j].start - words[i].end < 0.25) continue
+    out.push(i)
+  }
+  return out
 }
 
 export interface CutOptions {
@@ -221,16 +297,7 @@ export async function planKeepSegments(
     if (FILLER_RE.test(t) || /^\(.+\)$/.test(t) || /^\S+-$/.test(t)) dropped.add(i)
   })
 
-  // Stutter duplicates ("matter of fact... fact, if"): the same word repeated
-  // across a real pause is a restart, not emphasis — drop the FIRST take.
-  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
-  for (let i = 0; i + 1 < words.length; i++) {
-    if (dropped.has(i) || dropped.has(i + 1)) continue
-    const a = norm(words[i].text)
-    if (a.length >= 3 && a === norm(words[i + 1].text) && words[i + 1].start - words[i].end >= 0.25) {
-      dropped.add(i)
-    }
-  }
+  for (const i of findStutterDrops(words, dropped)) dropped.add(i)
 
   const kept = words.filter((_, i) => !dropped.has(i))
   if (!kept.length) return [{ start: 0, end: sourceDuration }]

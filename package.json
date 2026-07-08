@@ -16,7 +16,8 @@
     "music:trim": "node --import tsx lib/music-library/trim-snippets.ts",
     "music:upload": "node --env-file=.env.local --import tsx lib/music-library/upload-supabase.ts",
     "music:preview": "node --env-file=.env.local --import tsx lib/music-library/preview.ts",
-    "music:test-mix": "node --env-file=.env.local --import tsx lib/music-library/test-mix.ts"
+    "music:test-mix": "node --env-file=.env.local --import tsx lib/music-library/test-mix.ts",
+    "test:cut": "node --import tsx tests/cut-plan.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1076.0",
