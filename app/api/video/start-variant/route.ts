@@ -18,7 +18,7 @@ import {
 import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
 import { patchVariant } from '@/lib/job-lock'
 import type { ContentProfile } from '@/lib/video-analysis'
-import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
+import type { MusicMode, VideoVariant, CustomBrollEntry } from '@/lib/video-pipeline'
 
 function supabaseAdmin() {
   return createAdminClient(
@@ -222,17 +222,37 @@ export async function POST(req: NextRequest) {
           // ALWAYS_ON first, then the resolved knobs — so resolved.magicZooms
           // (a per-variant/guardrail decision now) wins over the baseline's
           // magicZooms:true instead of being forced back on.
+          // Creator-supplied B-roll: the prepare-source task uploaded each
+          // clip to Submagic user-media and planned transcript-matched
+          // placements. Turn those into timed items and turn STOCK B-roll
+          // off — the creator's clips fully replace generated footage.
+          const customEntries = (job.custom_broll ?? null) as CustomBrollEntry[] | null
+          const customItems = (customEntries ?? [])
+            .filter(e => e.submagicMediaId && e.placements?.length)
+            .flatMap(e => e.placements!.map(p => ({
+              type: 'user-media' as const,
+              startTime: p.start,
+              endTime: p.end,
+              userMediaId: e.submagicMediaId!,
+              layout: 'full',
+            })))
+            .sort((a, b) => a.startTime - b.startTime)
+          if (customItems.length) {
+            console.log(`[start-variant] using ${customItems.length} custom B-roll item(s), stock B-roll off`)
+          }
+
           projectId = await submitSubmagicJob(videoUrlForSubmagic, {
             title: `${variantId}-${jobId.slice(0, 8)}`,
             ...SUBMAGIC_ALWAYS_ON,
             templateName: resolved.templateName,
             userThemeId: resolved.userThemeId,
-            magicBrolls: resolved.magicBrolls,
-            magicBrollsPercentage: resolved.magicBrollsPercentage,
+            magicBrolls: customItems.length ? false : resolved.magicBrolls,
+            magicBrollsPercentage: customItems.length ? undefined : resolved.magicBrollsPercentage,
             magicZooms: resolved.magicZooms,
             hookTitle: resolved.hookTitle,
             removeSilencePace: resolved.removeSilencePace,
             musicTrackId,
+            ...(customItems.length ? { items: customItems } : {}),
           })
 
           // Music comes from our library AFTER Submagic returns — same matcher

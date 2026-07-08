@@ -12,6 +12,19 @@ export type MusicMode = 'smart' | 'off'
 
 export const DEFAULT_MUSIC_MODE: MusicMode = 'smart'
 
+// One creator-supplied B-roll clip attached to a job. Enriched in the
+// prepare-source task: normalized copy in R2, Submagic user-media id, a
+// one-line description (Gemini), and transcript-matched placements shared by
+// all Submagic variants.
+export interface CustomBrollEntry {
+  url: string
+  description?: string | null
+  r2Url?: string | null
+  duration?: number | null
+  submagicMediaId?: string | null
+  placements?: { start: number; end: number }[]
+}
+
 export interface SubmagicPreset {
   // Fully autonomous mode   Submagic handles everything (music, B-roll, cuts, style)
   aiEditTemplate?: 'kelly' | 'karl' | 'ella'
@@ -213,6 +226,10 @@ export interface SubmagicJobOptions {
   removeBadTakes?: boolean
   cleanAudio?: boolean
   musicTrackId?: string
+  // Timed creator B-roll: clips previously uploaded to Submagic user-media,
+  // placed at source-timeline seconds. Layouts: full, split-50-50,
+  // pip-top-right, pip-bottom-right, split-35-65 (+ -bordered variants).
+  items?: Array<{ type: 'user-media'; startTime: number; endTime: number; userMediaId: string; layout: string }>
 }
 
 interface SubmagicTemplateOption {
@@ -605,6 +622,30 @@ export async function fetchSubmagicAudioTrack(
   }
 }
 
+// Upload a hosted clip (e.g. its R2 public URL) into Submagic's user-media
+// library so timed items can reference it. Returns the userMediaId, or null
+// on failure (custom B-roll then degrades to no cutaways, never a dead render).
+export async function createSubmagicUserMedia(url: string): Promise<string | null> {
+  try {
+    const res = await fetch('https://api.submagic.co/v1/user-media', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      console.warn(`[submagic] user-media upload failed (${res.status}): ${text.slice(0, 200)}`)
+      return null
+    }
+    const data = JSON.parse(text) as { userMediaId?: string; id?: string }
+    return data.userMediaId ?? data.id ?? null
+  } catch (e) {
+    console.warn('[submagic] user-media upload error:', (e as Error).message)
+    return null
+  }
+}
+
 export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
@@ -624,6 +665,7 @@ export async function submitSubmagicJob(
         templateName: opts.templateName,
         magicBrolls: opts.magicBrolls ?? false,
         magicZooms: opts.magicZooms ?? false,
+        ...(opts.items?.length ? { items: opts.items } : {}),
         cleanAudio: opts.cleanAudio ?? true,
         removeSilencePace: opts.removeSilencePace ?? 'extra-fast',
         removeBadTakes: opts.removeBadTakes ?? false,

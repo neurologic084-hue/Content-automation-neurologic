@@ -6,7 +6,8 @@ import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS, createSubmagicUserMedia } from './video-pipeline'
+import type { CustomBrollEntry } from './video-pipeline'
 import type { VideoVariant } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { getLibraryMusic } from './music-library'
@@ -1330,7 +1331,9 @@ async function stageCustomBroll(
       const outPath = path.join(cacheDir, fileName)
       if (!fs.existsSync(outPath)) {
         const rawPath = outPath + '.raw'
-        await downloadFile(entry.url, rawPath)
+        // Prefer the normalized R2 copy from a previous prep — faster and immune
+        // to Drive's confirm-page quirks on re-renders.
+        await downloadFile((entry as CustomBrollEntry).r2Url ?? entry.url, rawPath)
         // Normalize to h264/yuv420p 30fps, audio stripped — OffthreadVideo-safe
         // regardless of what the phone/Drive produced (HEVC, odd rotation).
         await run(
@@ -2052,6 +2055,61 @@ export function startSingleVariant(
 // Downloads + compresses the job's footage and uploads it to R2, writing prep
 // progress onto the pending variants; marks the whole job failed if the
 // footage can't be fetched.
+// Once-per-job custom B-roll prep. Enriches each video_jobs.custom_broll
+// entry with: a normalized copy hosted in R2 (deleted with the job), the
+// Submagic user-media id, a one-line description, and transcript-matched
+// placements. v1-v3 turn those into timed Submagic items; v4-v6 reuse the
+// R2 copies + descriptions for their own per-variant planning.
+async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string): Promise<void> {
+  const db = supabaseAdmin()
+  const { data: job } = await db.from('video_jobs').select('custom_broll').eq('id', jobId).single()
+  const entries = (job?.custom_broll ?? null) as CustomBrollEntry[] | null
+  if (!entries?.length) return
+
+  console.log(`[custom-broll] preparing ${entries.length} clip(s) for job ${jobId.slice(0, 8)}`)
+  const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
+  const clips = await stageCustomBroll(jobId, entries, cacheDir, 'edit-cache')
+  if (!clips.length) return
+
+  // Host each normalized clip in R2 ({jobId}/custom-broll-i.mp4 — cleaned up
+  // by deleteJobStorage) and register it with Submagic.
+  for (let i = 0; i < clips.length; i++) {
+    const entry = entries[i]
+    if (!entry) continue
+    entry.duration = clips[i].duration
+    if (!entry.r2Url) {
+      try {
+        entry.r2Url = await uploadToStorage(path.join(REMOTION_DIR, 'public', clips[i].file), `custom-broll-${i}.mp4`, jobId)
+      } catch (e) {
+        console.warn(`[custom-broll] R2 upload failed for clip ${i}:`, (e as Error).message)
+      }
+    }
+    if (entry.r2Url && !entry.submagicMediaId) {
+      entry.submagicMediaId = await createSubmagicUserMedia(entry.r2Url)
+    }
+  }
+
+  // Transcript-matched placements from the SOURCE timeline (items are placed
+  // on the source video Submagic receives, before its silence cuts).
+  try {
+    const words = await transcribeLocalFile(sourceLocalPath)
+    const duration = await getVideoDuration(sourceLocalPath)
+    const placed = await planCustomBrollSlots(words.map(w => ({ ...w, segmentIndex: 0 })), duration, null, clips, [], false)
+    for (const entry of entries) entry.placements = []
+    for (const item of placed) {
+      const idx = clips.findIndex(c => c.file === item.file)
+      if (idx >= 0 && entries[idx]) {
+        entries[idx].placements!.push({ start: item.start, end: Number((item.start + item.duration).toFixed(2)) })
+      }
+    }
+    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${clips.length} clip(s)`)
+  } catch (e) {
+    console.warn('[custom-broll] placement planning failed (v1-v3 will render without items):', (e as Error).message)
+  }
+
+  await db.from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
+}
+
 export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
   const db = supabaseAdmin()
 
@@ -2073,6 +2131,16 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
   try {
     const prepared = await prepareJobSource(jobId, sourceUrl, writePrepProgress)
     console.log(`[motion-renderer] source prepared job=${jobId} local=${prepared.localPath}`)
+
+    // Custom B-roll prep (once per job, best-effort): normalize + describe the
+    // creator's clips, host them in R2, register them with Submagic, and plan
+    // transcript-matched placements that every Submagic variant will reuse.
+    try {
+      await prepareCustomBrollForJob(jobId, prepared.localPath)
+    } catch (e) {
+      console.warn(`[motion-renderer] custom B-roll prep failed (renders proceed without it):`, (e as Error).message)
+    }
+
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
       v.status === 'pending' ? { ...v, progress: null } : v
