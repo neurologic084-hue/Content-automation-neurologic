@@ -338,43 +338,46 @@ export function planEubankSfxCues(graphics: EubankGraphic[]): SfxCue[] {
   const cues: SfxCue[] = []
   for (const g of graphics) {
     if (g.kind === 'notes') {
-      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.12, category: 'pop', volume: 0.3 })
-      g.items?.forEach((_, i) => {
+      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.12, category: 'pop', volume: 0.18 })
+      // Item reveals were a 'ding' each — cut from the library, and a sparkle
+      // chime per bullet was the least subtle thing in a v4 render. A tiny tap
+      // now, on the first four items only.
+      g.items?.slice(0, 4).forEach((_, i) => {
         const at = g.start + (g.itemAt?.[i] ?? 0)
-        cues.push({ start: at, peakAt: at + 0.05, category: 'ding', volume: 0.14 })
+        cues.push({ start: at, peakAt: at + 0.05, category: 'click-digital', volume: 0.10 })
       })
     } else if (g.kind === 'equation') {
-      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.1, category: 'click-digital', volume: 0.2 })
+      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.1, category: 'click-digital', volume: 0.12 })
       // The ">" pops at ~0.5s in (renderer rhythm) — a soft boom under it.
-      cues.push({ start: g.start + 0.3, peakAt: g.start + 0.55, category: 'boom-soft', volume: 0.26 })
+      cues.push({ start: g.start + 0.3, peakAt: g.start + 0.55, category: 'boom-soft', volume: 0.16 })
     } else if (g.kind === 'crossout') {
-      // Method scene: white-flash cut-in, shing as the strike draws (~32%),
-      // a click as the replacement lands (~58%).
-      cues.push({ start: Math.max(0, g.start - 0.08), peakAt: g.start + 0.06, category: 'flash-pop', volume: 0.3 })
-      const strikeAt = g.start + g.duration * 0.32
-      cues.push({ start: strikeAt - 0.15, peakAt: strikeAt + 0.1, category: 'shing', volume: 0.3 })
+      // Method scene: white-flash cut-in, then a click as the replacement lands
+      // (~58%). The strike used to draw a metallic 'shing' — cut from the
+      // library, and left unreplaced: the line drawing itself carries the beat.
+      cues.push({ start: Math.max(0, g.start - 0.08), peakAt: g.start + 0.06, category: 'flash-pop', volume: 0.18 })
       const swapAt = g.start + g.duration * 0.58
-      cues.push({ start: swapAt - 0.05, peakAt: swapAt + 0.05, category: 'click-digital', volume: 0.22 })
+      cues.push({ start: swapAt - 0.05, peakAt: swapAt + 0.05, category: 'click-digital', volume: 0.12 })
     } else if (g.kind === 'cards') {
-      // Framework scene: boom on the blur-in, a pop per glowing label, a ding
-      // as the winner card lands (~1.5s, matching the renderer's spring).
-      cues.push({ start: Math.max(0, g.start - 0.1), peakAt: g.start + 0.15, category: 'boom-soft', volume: 0.32 })
+      // Framework scene: soft boom on the blur-in, a pop per glowing label, and
+      // a final pop as the winner card lands (~1.5s, matching the renderer's
+      // spring) — that landing was a 'ding' before the library cut.
+      cues.push({ start: Math.max(0, g.start - 0.1), peakAt: g.start + 0.15, category: 'boom-soft', volume: 0.18 })
       g.items?.slice(0, 3).forEach((_, i) => {
         const at = g.start + 0.25 + i * 0.75
         if (at < g.start + g.duration - 0.4) {
-          cues.push({ start: at, peakAt: at + 0.06, category: 'pop', volume: 0.22 })
+          cues.push({ start: at, peakAt: at + 0.06, category: 'pop', volume: 0.12 })
         }
       })
       const cardAt = g.start + 1.5
       if (cardAt < g.start + g.duration - 0.5) {
-        cues.push({ start: cardAt - 0.05, peakAt: cardAt + 0.08, category: 'ding', volume: 0.14 })
+        cues.push({ start: cardAt - 0.05, peakAt: cardAt + 0.08, category: 'pop', volume: 0.14 })
       }
     } else if (g.kind === 'keyword') {
       // Quote panel: airy whoosh in; the words carry themselves.
-      cues.push({ start: Math.max(0, g.start - 0.08), peakAt: g.start + 0.12, category: 'whoosh-airy', volume: 0.24 })
+      cues.push({ start: Math.max(0, g.start - 0.08), peakAt: g.start + 0.12, category: 'whoosh-airy', volume: 0.16 })
     } else if (g.kind === 'hook') {
       // Opening title: a soft sparkle pop as the doubled word lands.
-      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.15, category: 'flash-pop', volume: 0.2 })
+      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.15, category: 'flash-pop', volume: 0.14 })
     }
   }
   return cues

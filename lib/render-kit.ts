@@ -201,9 +201,31 @@ export function transitionSoundFamily(style: TransitionStyle): SfxCategory[] {
   return COVER_IN[style]
 }
 
-const COVER_OUT: SfxCategory[] = ['whoosh-airy', 'whoosh']
-const CARD_IN: SfxCategory[] = ['shutter', 'shutter-soft', 'pop']
+// A B-roll beat gets ONE sound, on the way in. The exit gets none: returning to
+// the talking head is not an event the viewer needs announced, and the old exit
+// whoosh was on its own roughly a third of every render's cue count.
+//
+// CARD_IN is down to 'pop' — 'shutter' and 'shutter-soft' were cut from the
+// library, and a mechanical shutter never suited a card that simply fades up.
+const CARD_IN: SfxCategory[] = ['pop']
 const EMPHASIS: SfxCategory[] = ['pop', 'flash-pop']
+
+// Every authored volume below is an APPARENT level: sfx-stage.ts trims each
+// file toward LOUDNESS_TARGET_DB before applying it, so 0.20 sounds like 0.20
+// whichever file the allocator happens to pick.
+const VOL = {
+  coverIn: 0.20,      // the single B-roll entrance accent
+  designedIn: 0.20,   // designed poster card / v7 collage scene landing
+  splitIn: 0.16,
+  panelIn: 0.16,
+  cardIn: 0.20,
+  insetIn: 0.14,
+  click: 0.10,        // accent-word taps
+  emphasis: 0.10,
+} as const
+
+const MAX_CLICKS = 3        // accent-word clicks per video (was 8)
+const CLICK_MIN_GAP = 2.5   // seconds between them (was 1.2)
 
 // Where each cover style's motion actually peaks, relative to the cover start.
 // These mirror the easings in ShortEdit.tsx: the slide's strong ease-out moves
@@ -216,7 +238,8 @@ const COVER_IN_PEAK: Record<TransitionStyle, number> = {
   zoom: 0.06,
   whip: 0.04,
 }
-const COVER_OUT_FRAMES = 7 / 30   // exit animation length in ShortEdit
+// (COVER_OUT_FRAMES lived here to back-time the cover EXIT whoosh. Exits are
+// silent now, so nothing needs the exit animation's length.)
 const INSET_PEAK = 0.15           // 9-frame ease-in-out: max velocity mid-way
 
 export function planSfxCues(
@@ -238,56 +261,49 @@ export function planSfxCues(
     const style = b.transition ?? transitionStyle
     const inPeak = COVER_IN_PEAK[style]
     if (b.layout === 'cover') {
-      const end = b.start + b.duration
       if (b.design || b.collage) {
-        // Stage 3 payoff: riser builds INTO the poster card / collage scene
-        // (its peak IS the landing), released by a soft hit with a click
-        // blended on top to sharpen the riser's rough peak.
-        cues.push({ start: Math.max(0, b.start - 1.8), peakAt: b.start, category: 'riser', volume: 0.16 })
-        cues.push({ start: Math.max(0, b.start - 0.05), peakAt: b.start + 0.05, category: 'boom-soft', volume: 0.32 })
-        cues.push({ start: b.start, peakAt: b.start + 0.03, category: 'click-digital', volume: 0.18 })
+        // The poster card / collage scene lands on a single soft hit. This used
+        // to be a three-sound stack (riser + boom + click) firing on one frame —
+        // the riser alone measured ~15 dB hotter than anything else in the mix.
+        cues.push({ start: Math.max(0, b.start - 0.05), peakAt: b.start + 0.05, category: 'boom-soft', volume: VOL.designedIn })
       } else {
-        cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + inPeak, category: pick(COVER_IN[style]), volume: 0.3 })
+        cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + inPeak, category: pick(COVER_IN[style]), volume: VOL.coverIn })
       }
-      cues.push({ start: end - 0.3, peakAt: end - COVER_OUT_FRAMES + inPeak, category: pick(COVER_OUT), volume: 0.2 })
     } else if (b.layout === 'split') {
-      // The stage slide + media rising from below: airy swish in, softer out.
-      cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + 0.17, category: 'whoosh-airy', volume: 0.26 })
-      cues.push({ start: b.start + b.duration - 0.4, peakAt: b.start + b.duration - 0.15, category: pick(COVER_OUT), volume: 0.16 })
+      // The stage slide + media rising from below: one airy swish on the way in.
+      cues.push({ start: Math.max(0, b.start - 0.08), peakAt: b.start + 0.17, category: 'whoosh-airy', volume: VOL.splitIn })
     } else if (b.layout === 'panel') {
-      // Translucent panel: a soft shutter/pop on arrival — one per pane when
-      // the beat is a carousel, staggered with the panes' entrances.
-      const panes = 1 + Math.min(2, b.extraFiles?.length ?? 0)
-      for (let k = 0; k < panes; k++) {
-        cues.push({ start: Math.max(0, b.start - 0.04 + k * 0.18), peakAt: b.start + 0.1 + k * 0.18, category: pick(CARD_IN), volume: 0.26 })
-      }
+      // Translucent panel: one soft pop as the beat arrives. Carousels used to
+      // fire a pop per pane — three taps in half a second read as a rattle.
+      cues.push({ start: Math.max(0, b.start - 0.04), peakAt: b.start + 0.1, category: pick(CARD_IN), volume: VOL.panelIn })
     } else {
-      cues.push({ start: Math.max(0, b.start - 0.04), category: pick(CARD_IN), volume: 0.38 })
+      cues.push({ start: Math.max(0, b.start - 0.04), category: pick(CARD_IN), volume: VOL.cardIn })
     }
   }
 
+  // Viral insets: a whisper of air on the scale-in, nothing on the way out.
   for (const inset of insets) {
-    cues.push({ start: Math.max(0, inset.start - 0.1), peakAt: inset.start + INSET_PEAK, category: 'whoosh-airy', volume: 0.22 })
-    cues.push({ start: Math.max(0, inset.end - 0.4), peakAt: inset.end - INSET_PEAK, category: 'whoosh-airy', volume: 0.16 })
+    cues.push({ start: Math.max(0, inset.start - 0.1), peakAt: inset.start + INSET_PEAK, category: 'whoosh-airy', volume: VOL.insetIn })
   }
 
   if (flavor === 'viral') {
-    // Stage 2 texture: a tiny digital click riding the accent-word scale pop —
-    // only on the pages that already carry a visual beat (poster pages over
-    // covers, block-font times/numbers, the hook), never on every page. Kept
-    // clear of transition whooshes so two sounds never fight, min 1.2s apart,
-    // capped at six per video.
+    // Texture: a tiny digital click riding the accent-word scale pop — only on
+    // pages that already carry a visual beat (poster pages over covers,
+    // block-font times/numbers, the hook), never on every page. Kept clear of
+    // transition whooshes so two sounds never fight, min 2.5s apart, capped at
+    // three per video. It was eight, which made the click the most-repeated
+    // sound in a v5 render and the reason the texture stopped reading as texture.
     const beatPages = pages
       .filter(p => p.accentRange && (p.big || p.accentFont === 'block' || p.behind))
       .sort((a, b) => a.start - b.start)
     let lastClick = -Infinity
     let clicks = 0
     for (const p of beatPages) {
-      if (clicks >= 8) break
+      if (clicks >= MAX_CLICKS) break
       const accentAt = p.start + (p.accentRange![0] * 2) / 30
-      if (accentAt - lastClick < 1.2) continue
+      if (accentAt - lastClick < CLICK_MIN_GAP) continue
       if (cues.some(c => Math.abs((c.peakAt ?? c.start) - accentAt) < 0.4)) continue
-      cues.push({ start: accentAt, peakAt: accentAt + 0.02, category: 'click-digital', volume: 0.15 })
+      cues.push({ start: accentAt, peakAt: accentAt + 0.02, category: 'click-digital', volume: VOL.click })
       lastClick = accentAt
       clicks++
     }
@@ -296,7 +312,7 @@ export function planSfxCues(
     // (the stats that deserve a beat), capped at three per video.
     const numberPages = pages.filter(p => p.words.some(w => w.accent && /\d/.test(w.t)))
     for (const p of numberPages.slice(0, 3)) {
-      cues.push({ start: p.start, category: pick(EMPHASIS), volume: 0.12 })
+      cues.push({ start: p.start, category: pick(EMPHASIS), volume: VOL.emphasis })
     }
   }
 

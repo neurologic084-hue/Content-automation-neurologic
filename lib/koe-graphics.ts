@@ -196,18 +196,19 @@ export function planKoeSfxCues(graphics: KoeGraphic[]): SfxCue[] {
   const cues: SfxCue[] = []
   for (const g of graphics) {
     if (g.kind === 'title') {
-      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.15, category: 'whoosh-airy', volume: 0.24 })
+      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.15, category: 'whoosh-airy', volume: 0.16 })
     } else if (g.kind === 'list') {
-      // Clicks land exactly on each item's spoken reveal.
-      g.items?.forEach((_, i) => {
+      // Clicks land exactly on each item's spoken reveal — first four only, so a
+      // long list never turns into a typewriter.
+      g.items?.slice(0, 4).forEach((_, i) => {
         const at = g.start + (g.itemAt?.[i] ?? 0)
-        cues.push({ start: at, peakAt: at + 0.02, category: 'click-digital', volume: 0.16 })
+        cues.push({ start: at, peakAt: at + 0.02, category: 'click-digital', volume: 0.10 })
       })
     } else if (g.kind === 'venn') {
-      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.2, category: 'whoosh-airy', volume: 0.22 })
+      cues.push({ start: Math.max(0, g.start - 0.05), peakAt: g.start + 0.2, category: 'whoosh-airy', volume: 0.14 })
       // The merge lands at ~62% through (see KoeVenn timing in ShortEdit).
       const mergeAt = g.start + g.duration * 0.62
-      cues.push({ start: mergeAt - 0.3, peakAt: mergeAt, category: 'whoosh-deep', volume: 0.26 })
+      cues.push({ start: mergeAt - 0.3, peakAt: mergeAt, category: 'whoosh-deep', volume: 0.16 })
     }
   }
   return cues

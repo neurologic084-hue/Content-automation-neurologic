@@ -17,14 +17,17 @@ interface SfxDef {
   durationSeconds: number
 }
 
-// Small fixed category library — the AI picks WHICH category fits a given
-// sentence's content, never invents new bespoke audio per sentence. Each
-// category is generated once and reused across every video forever after.
+// Small fixed category library — the planners pick WHICH category fits a given
+// moment, never invent bespoke audio per sentence. Each category is generated
+// once and reused across every video forever after.
+//
+// Hand-auditioned down to eight categories. Cut after listening to every
+// generated take: riser (by far the loudest thing in any render), shutter,
+// shutter-soft, ding, shing, and the four that no planner ever requested
+// (impact, boom-808, glitch, tape-stop).
 export type SfxCategory =
-  | 'whoosh' | 'impact' | 'ding' | 'riser' | 'shutter'
-  | 'whoosh-snap' | 'flash-pop' | 'shutter-soft' | 'pop'
-  | 'whoosh-airy' | 'whoosh-deep' | 'boom-soft' | 'click-digital'
-  | 'boom-808' | 'glitch' | 'tape-stop' | 'shing'
+  | 'whoosh' | 'whoosh-snap' | 'whoosh-airy' | 'whoosh-deep'
+  | 'pop' | 'flash-pop' | 'boom-soft' | 'click-digital'
 
 const SFX_DEFS: Record<SfxCategory, SfxDef> = {
   // Trending short-form grammar: the tight whip-whoosh every viral editor cuts
@@ -34,64 +37,9 @@ const SFX_DEFS: Record<SfxCategory, SfxDef> = {
     prompt: 'fast tight whip whoosh transition sound effect, sharp air rip with a crisp snap at the end, viral short-form video editing style, punchy and modern, no music, no voice, no reverb tail',
     durationSeconds: 1,
   },
-  // B-roll photo cards: the modern "photo pops on screen" grammar — a single
-  // crisp mechanical shutter snap, professional and tight.
-  shutter: {
-    name: 'camera-shutter',
-    prompt: 'single professional DSLR camera shutter click sound effect, crisp tight mechanical snap, fast attack, clean and modern, no beep, no music, no voice, no reverb tail',
-    durationSeconds: 1,
-  },
-  impact: {
-    name: 'impact-hit',
-    prompt: 'deep punchy trap impact hit sound effect, tight 808 sub bass thud with a hard transient attack, weighty and cinematic like a viral video emphasis hit, no music, no voice, no long rumble tail',
-    durationSeconds: 1,
-  },
-  ding: {
-    name: 'positive-ding',
-    prompt: 'bright sparkle shimmer ding sound effect, glassy magical chime with a fast attack, satisfying and premium like a success notification in a viral edit, no music, no voice, short tail',
-    durationSeconds: 1,
-  },
-  riser: {
-    name: 'tension-riser',
-    prompt: 'cinematic sub bass riser sound effect, dark rising tension sweep that builds anticipation fast, modern short-form editing style, no music, no voice, no cymbal crash at the end',
-    durationSeconds: 2,
-  },
-  // Trending additions — the current viral-edit staples.
-  'boom-808': {
-    name: 'boom-808',
-    prompt: 'hard hitting 808 bass boom sound effect, deep sub drop with instant attack and fast decay, the classic viral short-form video emphasis boom, powerful but tight, no music, no voice, no long tail',
-    durationSeconds: 1,
-  },
-  glitch: {
-    name: 'glitch-stutter',
-    prompt: 'short digital glitch stutter sound effect, quick electronic data zap with granular texture, modern viral edit style, tight and punchy, no music, no voice, no reverb tail',
-    durationSeconds: 1,
-  },
-  'tape-stop': {
-    name: 'tape-stop',
-    prompt: 'vinyl tape stop sound effect, quick pitch-down record brake like the music suddenly slowing to a halt, short and clean, viral video transition style, no voice, no reverb tail',
-    durationSeconds: 1,
-  },
-  // Variation kit — multi-version renders pair each transition style with its
-  // own join sound and each run with its own B-roll entrance sound.
   'whoosh-snap': {
     name: 'whoosh-snap',
     prompt: 'very fast tight whip swish transition sound effect, snappy with a crisp transient at the end, modern short-form editing style, no music, no voice, no reverb tail',
-    durationSeconds: 1,
-  },
-  'flash-pop': {
-    name: 'flash-pop',
-    prompt: 'bright quick camera flash pop sound effect, soft airy burst with a subtle sparkle transient, clean and modern, no music, no voice, no reverb tail',
-    durationSeconds: 1,
-  },
-  'shutter-soft': {
-    name: 'shutter-soft',
-    prompt: 'soft mirrorless camera shutter sound effect, gentle quick double click, quiet and refined, no beep, no music, no voice, no reverb',
-    durationSeconds: 1,
-  },
-  pop: {
-    name: 'ui-pop',
-    prompt: 'minimal soft pop click sound effect, like a clean modern UI element appearing, subtle and satisfying, no music, no voice, no reverb tail',
     durationSeconds: 1,
   },
   'whoosh-airy': {
@@ -104,26 +52,45 @@ const SFX_DEFS: Record<SfxCategory, SfxDef> = {
     prompt: 'deep cinematic swoosh transition sound effect, low sub-heavy air movement with a smooth body, powerful but short, no music, no voice, no long tail',
     durationSeconds: 1,
   },
+  pop: {
+    name: 'ui-pop',
+    prompt: 'minimal soft pop click sound effect, like a clean modern UI element appearing, subtle and satisfying, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
+  'flash-pop': {
+    name: 'flash-pop',
+    prompt: 'bright quick camera flash pop sound effect, soft airy burst with a subtle sparkle transient, clean and modern, no music, no voice, no reverb tail',
+    durationSeconds: 1,
+  },
   'boom-soft': {
     name: 'boom-soft',
     prompt: 'soft cinematic boom hit sound effect, muffled low thump with a quick decay, subtle and modern, no music, no voice, no long rumble tail',
     durationSeconds: 1,
   },
-  // Eubank cross-out: the sharp metallic slice that lands as a line strikes
-  // through the "wrong" option — the reference pairs every cross-out with it.
-  shing: {
-    name: 'metal-shing',
-    prompt: 'sharp quick metallic slice shing sound effect, like a blade swipe crossing something out, bright fast transient with a very short tail, modern viral edit style, no music, no voice, no long ring',
-    durationSeconds: 1,
-  },
-  // Textured layer (stage two of the sound-design system): a tiny UI tap that
-  // rides on accent-word pops and blends the riser's landing on the poster
-  // card. Directs attention without ever reading as a "sound effect".
+  // Textured layer: a tiny UI tap that rides accent-word pops and list-item
+  // reveals. Directs attention without ever reading as a "sound effect".
   'click-digital': {
     name: 'click-digital',
     prompt: 'single soft digital user interface click sound effect, tiny rounded tap like a modern app button press, very short and subtle, clean, no beep, no music, no voice, no reverb tail',
     durationSeconds: 1,
   },
+}
+
+// Which generated takes of each category are allowed to play. ElevenLabs is
+// nondeterministic, so takes of one prompt genuinely differ — these are the
+// ones that survived a listen-through; the rest are never staged.
+//
+// Do NOT bump SFX_CACHE_VERSION to "refresh" the library: regeneration would
+// produce different-sounding takes and silently invalidate every choice below.
+export const ALLOWED_TAKES: Record<SfxCategory, number[]> = {
+  whoosh: [2],
+  'whoosh-snap': [0, 1],
+  'whoosh-airy': [0],
+  'whoosh-deep': [1, 2],
+  pop: [0, 1, 2],
+  'flash-pop': [0, 1, 2],
+  'boom-soft': [0, 1],
+  'click-digital': [1],
 }
 
 // Bumping this regenerates the library with peak normalization applied — old
@@ -138,10 +105,12 @@ function execP(cmd: string, opts: { maxBuffer?: number; encoding?: 'buffer' } = 
   })
 }
 
-// Peak-normalize a freshly generated SFX to -3 dBFS so the planner's volume
-// multipliers mean the same thing for every category — ElevenLabs output
-// loudness varies a lot between generations. Best-effort: on any failure the
-// raw file is kept.
+// Peak-normalize a freshly generated SFX to -3 dBFS. This equalizes PEAKS, not
+// perceived loudness: measured across the cached library, files sitting at an
+// identical -3 dBFS peak spanned 25 dB of mean level. Perceived loudness is
+// evened out at staging time instead (see LOUDNESS_TARGET_DB in sfx-stage.ts),
+// which is what makes a cue's `volume` number comparable across categories.
+// Best-effort: on any failure the raw file is kept.
 async function normalizeSfx(filePath: string): Promise<void> {
   try {
     const probe = await execP(`ffmpeg -i "${filePath}" -af volumedetect -f null - 2>&1`) as string
@@ -197,6 +166,12 @@ async function generateSfx(def: SfxDef, take = 0): Promise<string> {
 export interface SfxTiming {
   durationSec: number
   peakSec: number   // offset of the loudest sample from the start of the file
+  rmsDb: number     // RMS level in dBFS — how loud the file actually SOUNDS.
+                    // Matches `ffmpeg -af volumedetect`'s mean_volume. Do not
+                    // "simplify" this to a mean of |sample|, and do not
+                    // downsample before measuring: whooshes carry real energy
+                    // above 11 kHz, and an 8 or 22 kHz decode reads them up to
+                    // 7 dB quiet — which silently mis-scales every loudness trim.
 }
 
 const timingCache = new Map<string, Promise<SfxTiming>>()
@@ -205,19 +180,29 @@ export function probeSfxTiming(filePath: string): Promise<SfxTiming> {
   let cached = timingCache.get(filePath)
   if (!cached) {
     cached = (async (): Promise<SfxTiming> => {
-      const RATE = 8000
+      // Full-band, and BOTH channels kept. Every generated SFX is stereo, and
+      // some (whoosh-snap) have near-out-of-phase channels: a `-ac 1` downmix
+      // cancels them and reads ~7 dB quiet. Measure each channel's samples, the
+      // way ffmpeg's volumedetect does. A 1s file is ~96k samples — free.
+      const RATE = 48000
       const pcm = await execP(
-        `ffmpeg -v error -i "${filePath}" -f s16le -ac 1 -ar ${RATE} -`,
+        `ffmpeg -v error -i "${filePath}" -f s16le -ac 2 -ar ${RATE} -`,
         { encoding: 'buffer' },
       ) as Buffer
-      const samples = Math.floor(pcm.length / 2)
+      const frames = Math.floor(pcm.length / 4)   // 2ch × int16
       let maxAbs = 0
       let maxAt = 0
-      for (let i = 0; i < samples; i++) {
-        const v = Math.abs(pcm.readInt16LE(i * 2))
-        if (v > maxAbs) { maxAbs = v; maxAt = i }
+      let sumSquares = 0
+      for (let i = 0; i < frames; i++) {
+        const l = pcm.readInt16LE(i * 4)
+        const r = pcm.readInt16LE(i * 4 + 2)
+        sumSquares += l * l + r * r
+        const a = Math.max(Math.abs(l), Math.abs(r))
+        if (a > maxAbs) { maxAbs = a; maxAt = i }
       }
-      return { durationSec: samples / RATE, peakSec: maxAt / RATE }
+      const rms = frames > 0 ? Math.sqrt(sumSquares / (frames * 2)) : 0
+      const rmsDb = rms > 0 ? 20 * Math.log10(rms / 32768) : -90
+      return { durationSec: frames / RATE, peakSec: maxAt / RATE, rmsDb }
     })().catch((e) => {
       timingCache.delete(filePath)
       throw e
@@ -246,15 +231,6 @@ export async function getSfx(category: SfxCategory, take = 0): Promise<string | 
     sfxAttempts.set(key, attempt)
   }
   return attempt
-}
-
-// Back-compat convenience for the existing transition call site.
-export async function getWhooshSfx(): Promise<string | null> {
-  return getSfx('whoosh')
-}
-
-export async function getShutterSfx(): Promise<string | null> {
-  return getSfx('shutter')
 }
 
 // 'slide' is the viral-podcast push (v5's locked style): covers shove in from
