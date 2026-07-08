@@ -171,6 +171,17 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
       if (!Array.isArray(r) || r.length !== 2) continue
       const [a, b] = r as [number, number]
       if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b >= words.length || b < a) continue
+      // The semantic precondition the prompt states but the model does not
+      // reliably obey: an abandoned attempt is a near-duplicate of the words
+      // that IMMEDIATELY FOLLOW it. Observed failure — "You should hear some
+      // music. [You should,] uh, see some captions." Haiku marked the LATER
+      // "You should," (5/5 runs), which is a new sentence, not a false start;
+      // its own instruction says to keep the final take. Rejecting the single
+      // offending range, not the whole pass, keeps the genuine retakes.
+      if (!isRestartedBy(words, a, b)) {
+        console.warn(`[edit-plan] rejecting retake range [${a}-${b}] "${words.slice(a, b + 1).map(w => w.text).join(' ')}" — not restarted by the words that follow`)
+        continue
+      }
       dropped += b - a + 1
       valid.push([a, b])
     }
@@ -184,6 +195,38 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
     console.warn('[edit-plan] retake detection failed, keeping all takes:', (e as Error).message)
     return []
   }
+}
+
+// True when the span [a,b] looks like an abandoned attempt at the speech that
+// follows it: its content words reappear, in order, near the top of the words
+// after b. Deliberately lenient on the tail (a false start is usually cut off
+// mid-phrase) and strict on the head (a restart repeats how the phrase BEGAN).
+// Exported for the regression test in tests/cut-plan.test.ts.
+export function isRestartedBy(words: WordTimestamp[], a: number, b: number): boolean {
+  const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
+  const isNoise = (t: string) => FILLER_RE.test(t.trim()) || /^\(.+\)$/.test(t.trim()) || /^\S+-$/.test(t.trim())
+
+  const span = words.slice(a, b + 1).map(w => norm(w.text)).filter(t => t && !isNoise(t))
+  if (!span.length) return true   // pure filler/sound-event span: nothing to verify
+
+  // Compare against a window twice the span's length — a restart begins right
+  // after the abandoned attempt, allowing for an interposed "uh" or two.
+  const after = words.slice(b + 1, b + 1 + Math.max(6, span.length * 2))
+    .map(w => norm(w.text)).filter(t => t && !isNoise(t))
+  if (!after.length) return false // nothing follows: it is the final take, keep it
+
+  // The restart must reuse the span's FIRST content word early on.
+  const anchor = after.indexOf(span[0])
+  if (anchor === -1 || anchor > 2) return false
+
+  // …and a majority of the span's content words must reappear in order from there.
+  let matched = 0
+  let cursor = anchor
+  for (const t of span) {
+    const at = after.indexOf(t, cursor)
+    if (at !== -1) { matched++; cursor = at + 1 }
+  }
+  return matched / span.length >= 0.6
 }
 
 export interface CutOptions {
