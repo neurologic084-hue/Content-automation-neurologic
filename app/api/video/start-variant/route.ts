@@ -16,6 +16,7 @@ import {
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
+import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
 import type { ContentProfile } from '@/lib/video-analysis'
 import type { MusicMode, VideoVariant, CustomBrollEntry } from '@/lib/video-pipeline'
@@ -56,7 +57,7 @@ async function pollSubmagicUntilDone(
       db,
       jobId,
       variantId,
-      { status: 'failed', error: result.error ?? 'The editing engine hit an error. Please retry this variant.', progress: null },
+      { status: 'failed', error: explainFailure(result.error ?? 'The editing engine hit an error. Please retry this variant.'), progress: null },
       { completeWhenAllDone: true },
     )
     return
@@ -123,11 +124,11 @@ export async function POST(req: NextRequest) {
     } catch (e) {
       const detail = (e as Error).message || 'unknown error'
       console.error(`[start-variant] could not launch render for ${jobId}:${variantId}:`, detail)
-      // Store the REAL reason (truncated) so it's diagnosable from the DB without
-      // VM/Vercel-log access — this is almost always a Vercel Sandbox limit blip.
+      // explainFailure turns the raw launch error into a clear cause (e.g. Vercel
+      // billing cap, GitHub dispatch/token issue). Full detail stays in the logs.
       await patchVariant(supabase, jobId, variantId, {
         status: 'failed',
-        error: `Could not start the render — please retry. (${detail.slice(0, 200)})`,
+        error: explainFailure(detail),
         progress: null,
       })
       return NextResponse.json({ error: 'Could not start the render.' }, { status: 500 })
@@ -360,7 +361,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({ ok: true })
     } catch (e) {
-      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: (e as Error).message, progress: null })
+      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: explainFailure(e), progress: null })
       return NextResponse.json({ error: (e as Error).message }, { status: 500 })
     } finally {
       activeSubmagicStarts.delete(lockKey)

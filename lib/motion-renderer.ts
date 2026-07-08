@@ -23,6 +23,7 @@ import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
 import { applyColorGrade, resolveEditGrade, type GradeMode } from './color-grade'
 import { buildSubmagicCutSource } from './precut'
+import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -550,7 +551,11 @@ const MAX_ERROR_CHARS = 600
 
 function tidyError(error: string | null): string | null {
   if (!error) return error
-  const stripped = error.replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[data-uri]')
+  const stripped = error
+    .replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[data-uri]')
+    // Raw base64 (fonts quoted in Remotion prop dumps) that isn't a data: URI —
+    // a 100+ char base64 run is binary, never a useful message.
+    .replace(/[A-Za-z0-9+/]{100,}={0,2}/g, '[binary]')
   return stripped.length > MAX_ERROR_CHARS ? `${stripped.slice(0, MAX_ERROR_CHARS)}… (truncated)` : stripped
 }
 
@@ -561,11 +566,14 @@ async function markVariant(
   downloadUrl: string | null,
   error: string | null
 ) {
+  // On failure, run the raw error through the explainer so the card shows WHY
+  // (out of credits, quota hit, bad key, storage blip) rather than a stack/code.
+  const finalError = status === 'failed' ? explainFailure(error) : error
   await patchVariant(
     supabaseAdmin(),
     jobId,
     variantId,
-    { status, download_url: downloadUrl, preview_url: downloadUrl, error: tidyError(error), progress: null },
+    { status, download_url: downloadUrl, preview_url: downloadUrl, error: tidyError(finalError), progress: null },
     { completeWhenAllDone: true },
   )
 }

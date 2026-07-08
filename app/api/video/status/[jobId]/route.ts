@@ -4,6 +4,7 @@ import { pollSubmagicJob, VARIANT_DEFINITIONS } from '@/lib/video-pipeline'
 import type { VideoVariant } from '@/lib/video-pipeline'
 import { releaseJobSource } from '@/lib/motion-renderer'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
+import { explainFailure } from '@/lib/error-explain'
 import { rendersDir } from '@/lib/paths'
 import { patchVariant } from '@/lib/job-lock'
 import fs from 'fs'
@@ -194,7 +195,7 @@ export async function GET(
         }
       } else if (poll.status === 'failed') {
         target.status = 'failed'
-        target.error = poll.error
+        target.error = explainFailure(poll.error)
         target.progress = null
         variantsChanged = true
       }
