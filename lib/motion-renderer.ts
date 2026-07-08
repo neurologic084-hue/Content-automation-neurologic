@@ -6,16 +6,20 @@ import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
+import type { VideoVariant } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { getLibraryMusic } from './music-library'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
+import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
-import { buildRenderKit, planSfxCues } from './render-kit'
+import { trimResidualSilences } from './post-trim'
+import { applyVisualTransitions } from './visual-transitions'
+import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
 import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, type BrollItem } from './broll'
@@ -32,7 +36,21 @@ const active = new Set<string>()
 
 const MUSIC_ENABLED = true
 
-const sourceFileCache = new Map<string, Promise<string>>()
+// ── Process-wide state, pinned on globalThis ─────────────────────────────────
+// In `next dev`, every hot reload creates a FRESH copy of this module — plain
+// module-level queues/locks/caches fork silently, so two renders started
+// across a reload stop being serialized against each other and dedup caches
+// stop deduping. globalThis survives reloads; module code does not.
+const g = globalThis as unknown as {
+  __olySourceFiles?: Map<string, Promise<string>>
+  __olySubmagicSources?: Map<string, Promise<string>>
+  __olyContentProfiles?: Map<string, Promise<ContentProfile>>
+  __olySubmagicFinalizes?: Set<string>
+  __olyAudioQueue?: Promise<unknown>
+  __olyRemotionQueue?: Promise<unknown>
+}
+
+const sourceFileCache = (g.__olySourceFiles ??= new Map<string, Promise<string>>())
 
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -45,7 +63,7 @@ function run(cmd: string, timeoutMs = 300_000): Promise<void> {
     let stderrBuf = ''
     const proc = exec(cmd, { timeout: timeoutMs, maxBuffer: 512 * 1024 * 1024 }, (err) => {
       if (err) {
-        const detail = stderrBuf.slice(-800).trim()
+        const detail = stderrBuf.slice(-2500).trim()
         reject(new Error(detail || err.message))
       } else {
         resolve()
@@ -306,7 +324,7 @@ async function getLocalCompressedSource(
   return result
 }
 
-const submagicSourceCache = new Map<string, Promise<string>>()
+const submagicSourceCache = (g.__olySubmagicSources ??= new Map<string, Promise<string>>())
 
 // Submagic-using variants (our-v1 through our-v5) always get the compressed,
 // normalized copy uploaded to Storage -- never the raw Drive file. Cached
@@ -318,7 +336,17 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   if (cached) return cached
 
   const promise = (async () => {
-    const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+    // A previous run may have already uploaded the compressed source — reuse
+    // that URL directly instead of downloading + re-uploading ~50MB. Matters
+    // most on Vercel, where this runs inside a request handler.
+    if (process.env.R2_PUBLIC_URL) {
+      const existingUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-compressed.mp4`
+      try {
+        const head = await fetch(existingUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+        if (head.ok) return existingUrl
+      } catch { /* not there or unreachable — fall through to the full path */ }
+    }
+    const outDir = rendersDir(jobId)
     const compressedPath = await getLocalCompressedSource(jobId, rawSourceUrl, outDir)
     return uploadToStorage(compressedPath, 'source-compressed.mp4', jobId)
   })()
@@ -343,7 +371,7 @@ export async function releaseJobSource(jobId: string): Promise<void> {
   await deleteStorageKey(`${jobId}/source-compressed.mp4`)
 }
 
-const contentProfileCache = new Map<string, Promise<ContentProfile>>()
+const contentProfileCache = (g.__olyContentProfiles ??= new Map<string, Promise<ContentProfile>>())
 
 // One Gemini read of the footage per job, cached on the job row and shared by
 // every variant (see lib/video-analysis.ts + lib/VARIANTS-V2-PLAN.md). Idempotent
@@ -376,7 +404,7 @@ export async function ensureContentProfile(jobId: string, sourceUrl: string): Pr
     if (cachedProfile) return cachedProfile
 
     try {
-      const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+      const outDir = rendersDir(jobId)
       const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
 
       // Transcribe once if we don't have it yet, from the LOCAL compressed file
@@ -428,14 +456,22 @@ export async function prepareJobSource(
   sourceUrl: string,
   onProgress?: ProgressCallback,
 ): Promise<{ localPath: string }> {
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const outDir = rendersDir(jobId)
   const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir, onProgress)
   // Back the compressed copy up to R2 right away rather than waiting for the
   // first Submagic variant to start -- so the job survives a server restart
   // without needing to re-pull from Drive, and every variant just reuses this
   // cached upload (getSubmagicSourceUrl) instead of re-uploading.
+  // BEST-EFFORT: the local file is what variants actually need to start.
+  // If the network flakes here (e.g. TLS "bad record mac" mid-upload), the
+  // job must NOT fail — Submagic variants re-attempt this exact upload when
+  // they start (the source-URL cache drops rejected promises).
   await onProgress?.(97, 'Backing up footage to storage')
-  await getSubmagicSourceUrl(jobId, sourceUrl)
+  try {
+    await getSubmagicSourceUrl(jobId, sourceUrl)
+  } catch (e) {
+    console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
+  }
   // Analyze the footage once now, while the compressed file is warm on disk, so
   // the content profile is ready before any variant starts. Best-effort — never
   // block source prep on it.
@@ -499,7 +535,7 @@ async function finishVariant(
     // R2 failed — copy the file into public/renders/ so the /renders/ URL is
     // actually reachable. If this copy also fails, mark the variant failed rather
     // than storing a dead path that will ENOENT at publish time.
-    const pubDir = path.join(process.cwd(), 'public', 'renders', jobId)
+    const pubDir = rendersDir(jobId)
     const pubPath = path.join(pubDir, fileName)
     try {
       fs.mkdirSync(pubDir, { recursive: true })
@@ -514,6 +550,123 @@ async function finishVariant(
   await markVariant(jobId, variantId, 'ready', url, null)
 }
 
+// Rebuilds the library-music context for a Submagic variant from the DB —
+// the status route's finisher calls arrive without the render's in-memory
+// context, and a race winner must never produce a music-less video. Returns
+// null for variants that shouldn't get library music (no spec / music off).
+async function libraryMusicContextFromDb(
+  jobId: string,
+  variantId: string,
+): Promise<{ hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null> {
+  const spec = VARIANT_SPECS[variantId]
+  if (!spec?.useMusic) return null
+  try {
+    const db = supabaseAdmin()
+    const { data: job } = await db.from('video_jobs').select('script_id, content_profile, variants').eq('id', jobId).single()
+    if (!job) return null
+    const variant = (job.variants as { id: string; music_mode?: string }[] | null)?.find(v => v.id === variantId)
+    if (variant?.music_mode === 'off') return null
+    let hook = ''
+    let moodTag: string | null = null
+    let scriptFormat: string | undefined
+    if (job.script_id) {
+      const { data: s } = await db.from('scripts').select('hook, mood_tag, filming_plan').eq('id', job.script_id).single()
+      hook = (s?.hook as string | null) ?? ''
+      moodTag = (s?.mood_tag as string | null) ?? null
+      scriptFormat = (s?.filming_plan as { script_format?: string } | null)?.script_format
+    }
+    return { hook, moodTag, scriptFormat, profile: (job.content_profile as ContentProfile | null) ?? null, transcript: null }
+  } catch {
+    return null
+  }
+}
+
+// One finisher at a time per variant: both the background poll loop
+// (start-variant route) and the status route can notice a Submagic project
+// completing — whichever gets here first does the retrieval + DB write and
+// the other is a no-op. Without this, the status route used to write
+// Submagic's EXPIRING hosted URL over the permanent R2 URL, which is why
+// finished previews sometimes went black hours later.
+const activeSubmagicFinalizes = (g.__olySubmagicFinalizes ??= new Set<string>())
+
+export async function finalizeSubmagicVariant(
+  jobId: string,
+  variantId: string,
+  submagicDownloadUrl: string,
+  music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
+): Promise<void> {
+  const key = `${jobId}:${variantId}`
+  if (activeSubmagicFinalizes.has(key)) return
+  activeSubmagicFinalizes.add(key)
+
+  // Callers that notice a finished Submagic project OUTSIDE the launch flow
+  // (the status route's poll, the heal pass) have no music context in hand —
+  // without this, whichever finisher won the race decided whether the video
+  // got its library music. Build the context from the DB so every path mixes
+  // the same way.
+  if (!music && VARIANT_SPECS[variantId]?.useMusic) {
+    try {
+      const db = supabaseAdmin()
+      const { data: job } = await db
+        .from('video_jobs')
+        .select('script_id, content_profile, transcript, variants')
+        .eq('id', jobId)
+        .single()
+      const variantRow = ((job?.variants ?? []) as VideoVariant[]).find(v => v.id === variantId)
+      const musicOff = (variantRow?.music_mode as MusicMode | undefined) === 'off'
+      if (job && !musicOff) {
+        const { data: s } = job.script_id
+          ? await db.from('scripts').select('hook, mood_tag, filming_plan').eq('id', job.script_id).single()
+          : { data: null }
+        music = {
+          hook: (s?.hook as string | undefined) ?? '',
+          moodTag: (s?.mood_tag as string | null | undefined) ?? null,
+          scriptFormat: (s?.filming_plan as { script_format?: string } | null)?.script_format,
+          profile: (job.content_profile as ContentProfile | null) ?? null,
+          transcript: (job.transcript as string | null) ?? null,
+        }
+      }
+    } catch (e) {
+      console.warn(`[motion-renderer] could not build music context for ${key}, finishing without music:`, (e as Error).message)
+    }
+  }
+  try {
+    const musicCtx = music ?? await libraryMusicContextFromDb(jobId, variantId)
+    let finalUrl: string
+    try {
+      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx)
+      console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
+    } catch (e) {
+      // Fall back to Submagic's own URL rather than failing the variant —
+      // still playable right now, just not pulled into our own storage.
+      console.warn(`[motion-renderer] could not retrieve Submagic result for ${key}, keeping their hosted URL:`, (e as Error).message)
+      finalUrl = submagicDownloadUrl
+    }
+    await patchVariant(
+      supabaseAdmin(),
+      jobId,
+      variantId,
+      { status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null },
+      { completeWhenAllDone: true },
+    )
+  } finally {
+    activeSubmagicFinalizes.delete(key)
+  }
+}
+
+// The ffmpeg-heavy finishing steps (voice polish, loudness measurement, music
+// mix, scene detection, SFX) run ONE variant at a time. Without this, several
+// Submagic variants finishing together each spin up multiple full-decode
+// ffmpeg passes in parallel — alongside a headless-Chrome Remotion render —
+// and the machine thrashes hard enough that renders die on delayRender
+// timeouts (fonts taking 4+ minutes to "load").
+function enqueueAudioPostSteps<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = g.__olyAudioQueue ?? Promise.resolve()
+  const p = prev.then(fn, fn)
+  g.__olyAudioQueue = p.catch(() => undefined)
+  return p
+}
+
 // Pulls a finished Submagic render down to a local file instead of just
 // linking to Submagic's hosted URL, so the video survives even if Submagic
 // later expires or removes the file from their end.
@@ -523,31 +676,64 @@ export async function retrieveAndStoreSubmagicResult(
   downloadUrl: string,
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
 ): Promise<string> {
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
   const localPath = path.join(outDir, `${variantId}_submagic.mp4`)
   await downloadFile(downloadUrl, localPath)
 
-  // Add our own library music on top of the finished Submagic video, so v1-v3
-  // share the exact v4/v5 music system (mood match, best-part offset, ducking,
-  // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
-  if (music) {
+  await enqueueAudioPostSteps(async () => {
+    // Voice polish on the dialogue BEFORE music goes under it: Auphonic
+    // denoise/level (ElevenLabs isolation as fallback) evens the voice out so
+    // the voice-aware music mix below can trust its level. Submagic's own
+    // cleaner is skipped — this file just came out of Submagic with cleanAudio
+    // already applied, and re-running it would spend another render for nothing.
     try {
-      await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart', music.profile ?? null, music.transcript ?? null, variantId)
-      console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
+      const cleaner = await cleanAudioInPlace(localPath, { skipSubmagic: true })
+      if (cleaner !== 'none') console.log(`[motion-renderer] post-Submagic voice polish via ${cleaner} for ${jobId}:${variantId}`)
     } catch (e) {
-      console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
+      console.warn('[motion-renderer] post-Submagic voice polish failed, keeping original audio:', (e as Error).message)
     }
-  }
 
-  // Transition whooshes on Submagic's own cuts. Submagic has no SFX API, so the
-  // cuts are recovered from the finished file via scene detection and a whoosh
-  // is peak-aligned onto each one — same sound grammar as the Remotion variants.
-  try {
-    await mixTransitionSfx(localPath)
-  } catch (e) {
-    console.warn('[motion-renderer] transition SFX pass failed, keeping video without it:', (e as Error).message)
-  }
+    // Backstop cut: Submagic's extra-fast silence removal still leaves the
+    // occasional long gap. Trim any residual dead air from the finished file
+    // BEFORE music/SFX so both land on the final timeline. Best-effort.
+    try {
+      await trimResidualSilences(localPath)
+    } catch (e) {
+      console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
+    }
+
+    // Visual accents (white flash / glow-up / black dip) on a smart subset of
+    // the edit's cuts — the layer Submagic's API can't provide. Runs before
+    // the SFX pass so the whooshes land on the same cuts the eyes see flash.
+    // Best-effort — a veil failure never loses the video.
+    try {
+      await applyVisualTransitions(localPath, music?.profile ?? null)
+    } catch (e) {
+      console.warn('[motion-renderer] visual transitions failed, keeping as-is:', (e as Error).message)
+    }
+
+    // Add our own library music on top of the finished Submagic video, so v1-v3
+    // share the exact v4/v5 music system (mood match, best-part offset, ducking,
+    // -13 LUFS). Best-effort — a music failure must never lose the rendered video.
+    if (music) {
+      try {
+        await mixBackgroundMusic(localPath, music.hook, music.moodTag, music.scriptFormat, 'smart', music.profile ?? null, music.transcript ?? null, variantId)
+        console.log(`[motion-renderer] mixed library music onto Submagic result ${jobId}:${variantId}`)
+      } catch (e) {
+        console.warn('[motion-renderer] post-Submagic music mix failed, keeping video without it:', (e as Error).message)
+      }
+    }
+
+    // Transition whooshes on Submagic's own cuts. Submagic has no SFX API, so the
+    // cuts are recovered from the finished file via scene detection and a whoosh
+    // is peak-aligned onto each one — same sound grammar as the Remotion variants.
+    try {
+      await mixTransitionSfx(localPath, music?.profile ?? null)
+    } catch (e) {
+      console.warn('[motion-renderer] transition SFX pass failed, keeping video without it:', (e as Error).message)
+    }
+  })
 
   // Push finished Submagic result to R2 finished/ folder so it's always
   // available for publishing even if local disk is wiped.
@@ -590,7 +776,7 @@ async function detectSceneCuts(videoPath: string): Promise<number[]> {
   return times
 }
 
-async function mixTransitionSfx(videoPath: string): Promise<void> {
+async function mixTransitionSfx(videoPath: string, profile: ContentProfile | null = null): Promise<void> {
   const duration = await getVideoDuration(videoPath)
 
   // Keep cuts away from the edges and at least 1.5s apart; cap the count so a
@@ -610,29 +796,37 @@ async function mixTransitionSfx(videoPath: string): Promise<void> {
     return
   }
 
-  // Variety rule: no single sound file plays more than twice per video. Build
-  // a pool of five distinct whoosh files (two takes of two categories plus an
-  // airy one) and rotate cuts through it — 10 cuts = each file at most twice,
-  // and neighboring cuts never share a sound.
-  const POOL_DEFS: Array<[SfxCategory, number]> = [
-    ['whoosh', 0], ['whoosh', 1], ['whoosh-snap', 0], ['whoosh-snap', 1], ['whoosh-airy', 0],
-  ]
+  // Same sound grammar as the Remotion variants (lib/render-kit.ts): pick a
+  // transition identity for THIS render — weighted by the footage's energy —
+  // and draw the whoosh pool from that style's sound family. A fresh style
+  // pick plus a shuffled pool means two renders of the same script never
+  // sound alike, and round-robin keeps neighboring cuts on different files.
+  const style = pickTransitionSmart(profile)
+  const categories = [...new Set<SfxCategory>([...transitionSoundFamily(style), 'whoosh-airy'])]
   const pool: Array<{ path: string; peakSec: number }> = []
-  for (const [cat, take] of POOL_DEFS) {
-    const p = await getSfx(cat, take)
-    if (!p) continue
-    try { pool.push({ path: p, peakSec: (await probeSfxTiming(p)).peakSec }) } catch { /* skip */ }
+  for (const cat of categories) {
+    for (const take of [0, 1]) {
+      const p = await getSfx(cat, take)
+      if (!p || pool.some(e => e.path === p)) continue
+      try { pool.push({ path: p, peakSec: (await probeSfxTiming(p)).peakSec }) } catch { /* skip */ }
+    }
   }
   if (!pool.length) return
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[pool[i], pool[j]] = [pool[j], pool[i]]
+  }
 
   // Back-time each cue so its file's PEAK lands on the cut, then delay-mix all
   // instances over the existing audio. Each cut gets its own input (the files
   // are ~1s mp3s, so repeated inputs are cheap and keep the filter graph
-  // simple). normalize=0 keeps the voice/music level.
+  // simple). normalize=0 keeps the voice/music level. A light per-cue volume
+  // wobble stops even a repeated file from reading as a copy-paste.
   const inputs = cuts.map((_, i) => `-i "${pool[i % pool.length].path}"`).join(' ')
   const chains = cuts.map((t, i) => {
     const ms = Math.max(0, Math.round((t - pool[i % pool.length].peakSec) * 1000))
-    return `[${i + 1}:a]adelay=${ms}|${ms},volume=0.35[s${i}]`
+    const vol = (0.3 + Math.random() * 0.08).toFixed(2)
+    return `[${i + 1}:a]adelay=${ms}|${ms},volume=${vol}[s${i}]`
   }).join(';')
   const mixIn = cuts.map((_, i) => `[s${i}]`).join('')
   const tmp = videoPath + '_sfx.mp4'
@@ -645,13 +839,34 @@ async function mixTransitionSfx(videoPath: string): Promise<void> {
   )
   if (fs.existsSync(tmp) && fs.statSync(tmp).size > 1000) {
     fs.renameSync(tmp, videoPath)
-    console.log(`[motion-renderer] transition SFX on ${cuts.length} cut${cuts.length === 1 ? '' : 's'} (${cuts.map(t => t.toFixed(1)).join(', ')}s)`)
+    console.log(`[motion-renderer] transition SFX on ${cuts.length} cut${cuts.length === 1 ? '' : 's'}, style=${style} (${cuts.map(t => t.toFixed(1)).join(', ')}s)`)
   } else {
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
   }
 }
 
 // ── Background music from the curated library ────────────────────────────────
+
+// Integrated loudness (LUFS) of a file's first audio stream via ebur128.
+// Returns null when unmeasurable (no audio stream, ffmpeg error) — callers
+// fall back to fixed levels rather than failing the mix.
+async function measureIntegratedLoudness(filePath: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    exec(
+      `ffmpeg -hide_banner -nostats -i "${filePath}" -map a:0 -af ebur128 -f null -`,
+      { timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
+      (err, _out, stderr) => {
+        if (err) return resolve(null)
+        // The summary block at the end holds the final integrated value; per-
+        // frame lines also print "I:" so take the LAST match.
+        const matches = String(stderr ?? '').match(/I:\s*(-?[\d.]+)\s*LUFS/g)
+        if (!matches?.length) return resolve(null)
+        const last = matches[matches.length - 1].match(/(-?[\d.]+)/)
+        resolve(last ? parseFloat(last[1]) : null)
+      }
+    )
+  })
+}
 
 // Picks a mood-matched track from the creator's own library, starts it at the
 // detected best part (chorus/drop), and mixes it under the voice: EQ-carve the
@@ -686,23 +901,40 @@ export async function mixBackgroundMusic(
   const ssArg = startOffset > 0 ? `-ss ${startOffset} ` : ''
   console.log(`[motion-renderer] using library track "${lib.track.title}" (${lib.track.categories.join('/')})${startOffset ? ` @ ${startOffset}s` : ''}`)
 
+  // VOICE-AWARE leveling: measure how loud the dialogue in THIS video actually
+  // is and place the music bed a fixed distance (18 LU) below it, instead of
+  // trusting a constant that assumed studio-level voice. The duck trigger
+  // scales with the voice too — a fixed threshold never fired on quiet takes,
+  // which is exactly when music "covers the voice". Falls back to the audited
+  // constants when measurement fails.
+  const voiceI = await measureIntegratedLoudness(videoPath)
+  const musicI = await measureIntegratedLoudness(musicPath)
+  let bedVolume = 'volume=0.13'
+  if (voiceI !== null && musicI !== null) {
+    const gainDb = Math.max(-40, Math.min(0, voiceI - 18 - musicI))
+    bedVolume = `volume=${gainDb.toFixed(1)}dB`
+    console.log(`[motion-renderer] voice ${voiceI.toFixed(1)} LUFS, music ${musicI.toFixed(1)} LUFS -> bed gain ${gainDb.toFixed(1)} dB`)
+  }
+  const duckThreshold = voiceI !== null
+    ? Math.min(0.08, Math.max(0.005, 10 ** ((voiceI - 8) / 20)))
+    : 0.035
+
   // Fade in over 1.5s at start, fade out in the last 1.5s
   const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2)
   const tmp = videoPath + '_mx.mp4'
 
   try {
     // loop → fade in/out → EQ-carve the vocal presence band (-5dB ~2.5kHz so
-    // music never masks speech) → quiet bed level (0.13) → DEEP, SMOOTH sidechain
-    // duck (ratio 6, slow 700ms release) so music sits well under the voice and
-    // stays down through a phrase instead of "pumping" back up in every micro-gap
-    // → master to -14 LUFS / -1.5 dBTP. Tuned down from 0.18/ratio-4/-13 after a
-    // strict audit called the music too loud and pumpy against the cleaned voice.
+    // music never masks speech) → voice-relative bed level → DEEP, SMOOTH
+    // sidechain duck (ratio 6, slow 700ms release) so music sits well under the
+    // voice and stays down through a phrase instead of "pumping" back up in
+    // every micro-gap → master to -14 LUFS / -1.5 dBTP.
     await run(
       `ffmpeg -y -i "${videoPath}" -stream_loop -1 ${ssArg}-i "${musicPath}" ` +
       `-filter_complex ` +
       `"[1:a]asetpts=N/SR/TB,afade=t=in:ss=0:d=1.5,afade=t=out:st=${fadeOutStart}:d=1.5,` +
-      `equalizer=f=2500:width_type=q:w=1.4:g=-5,volume=0.13[bgfade];` +
-      `[bgfade][0:a]sidechaincompress=threshold=0.035:ratio=6:attack=15:release=700[ducked];` +
+      `equalizer=f=2500:width_type=q:w=1.4:g=-5,${bedVolume}[bgfade];` +
+      `[bgfade][0:a]sidechaincompress=threshold=${duckThreshold.toFixed(4)}:ratio=6:attack=15:release=700[ducked];` +
       `[0:a][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=11[out]" ` +
       `-map 0:v -map "[out]" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${tmp}"`,
       300_000
@@ -946,11 +1178,43 @@ async function renderMotionGraphicsTestOnly(
 // and the compositor drops connections (ECONNRESET). So when multiple variants
 // are started together, planning/B-roll/music still run in parallel but the
 // render step itself goes through this queue, one at a time.
-let remotionRenderQueue: Promise<unknown> = Promise.resolve()
 function enqueueRemotionRender<T>(fn: () => Promise<T>): Promise<T> {
-  const p = remotionRenderQueue.then(fn, fn)
-  remotionRenderQueue = p.catch(() => undefined)
+  const prev = g.__olyRemotionQueue ?? Promise.resolve()
+  const p = prev.then(fn, fn)
+  g.__olyRemotionQueue = p.catch(() => undefined)
   return p
+}
+
+// Sandbox-only: make Remotion's gnu compositor run on Amazon Linux 2023's glibc
+// 2.34. Mirrors @remotion/vercel's patchCompositor — download Ubuntu 22.04's
+// glibc 2.35 and patchelf the compositor's interpreter + rpath onto it. Runs
+// once per VM (marker file); ffmpeg/ffprobe are left on system glibc (they work
+// on 2.34). Verified end-to-end on a real AL2023 container.
+const GLIBC_PATCH_MARKER = '/tmp/.oly-glibc235-patched'
+async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
+  if (fs.existsSync(GLIBC_PATCH_MARKER)) return
+  const comp = path.join(gnuDir, 'remotion')
+  if (!fs.existsSync(comp)) {
+    console.warn(`[motion-renderer] compositor not found at ${comp}; skipping glibc patch`)
+    return
+  }
+  const scriptPath = path.join(os.tmpdir(), 'oly-patch-compositor.sh')
+  const script = [
+    'set -eu',
+    // patchelf/zstd/binutils(ar)/tar for the patch — idempotent, best-effort.
+    'sudo dnf install -y -q patchelf zstd binutils tar >/dev/null 2>&1 || true',
+    'GLIBC=/tmp/glibc235',
+    'mkdir -p "$GLIBC" && cd /tmp',
+    'curl -fsSL -o libc6.deb "https://launchpadlibrarian.net/612471225/libc6_2.35-0ubuntu3.1_amd64.deb" || curl -fsSL -o libc6.deb "https://remotion.media/libc6_2.35-0ubuntu3.1_amd64.deb"',
+    'ar x libc6.deb',
+    'zstd -d -f data.tar.zst -o data.tar',
+    'tar xf data.tar -C "$GLIBC" --strip-components=1',
+    `patchelf --set-interpreter "$GLIBC/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" --force-rpath --set-rpath "$GLIBC/lib/x86_64-linux-gnu:\\$ORIGIN" "${comp}"`,
+    `touch "${GLIBC_PATCH_MARKER}"`,
+    'echo "[motion-renderer] compositor patched onto bundled glibc 2.35"',
+  ].join('\n')
+  fs.writeFileSync(scriptPath, script)
+  await run(`bash "${scriptPath}"`, 300_000)
 }
 async function renderRemotionEdit(
   jobId: string,
@@ -1356,17 +1620,38 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
       await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
+      // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
+      // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
+      // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
+      // ffmpeg/ffprobe stay on system glibc 2.34. Verified end-to-end on real
+      // AL2023. Runs from the cloned worker (not the bootstrap) so it can't be
+      // blocked by a lagging Vercel function deploy; once-per-VM via a marker.
+      const gnuDir = path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')
+      if (process.env.SANDBOX) {
+        await patchSandboxCompositorGlibc(gnuDir)
+      }
+      // In the sandbox: lower concurrency so the single render server isn't
+      // hammered by many tabs at once (its asset/frame serving is what stalls
+      // on long renders), a bigger delayRender timeout for headroom, and the
+      // compositor cache cap. Fonts are embedded (data URIs, see fonts-data.ts)
+      // so they never hit the server at all.
+      //
+      // Locally, a HEAVY composition (v7 dense motion: a dozen OffthreadVideo
+      // B-roll covers + collage scenes + 18 fonts) oversubscribes headless
+      // Chrome on a busy machine (user apps + dev server) — every tab races to
+      // load the same fonts/assets through the dev server, font loading crawls
+      // past the old 240s wall, and the OffthreadVideo compositor drops
+      // connections ("Request closed") under the memory pressure. Fewer tabs
+      // (concurrency 4) each get enough headroom to load fonts and decode video.
+      const sandboxFlags = process.env.SANDBOX
+        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2 --binaries-directory="${gnuDir}"`
+        : ' --concurrency=4'
+      // 600s local / 900s sandbox delayRender: headless-Chrome startup + that
+      // first font/asset load need real room before the render is declared dead.
+      const renderTimeout = process.env.SANDBOX ? 900000 : 600000
       await run(
-        // 600s delayRender timeout + capped concurrency: on a busy machine
-        // (user apps + dev server) a HEAVY composition (v7 dense motion: a dozen
-        // OffthreadVideo B-roll covers + collage scenes + 18 fonts) oversubscribes
-        // headless Chrome — every tab races to load the same fonts/assets through
-        // the dev server, and font loading crawls past the old 240s wall while the
-        // OffthreadVideo compositor drops connections ("Request closed") under the
-        // memory pressure. Fewer tabs (concurrency 4) each get enough headroom to
-        // load fonts and decode video, and 600s gives that first load real room.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=600000 --concurrency=4`,
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=${renderTimeout}${sandboxFlags}`,
         1_500_000,
       )
     })
@@ -1374,7 +1659,12 @@ async function renderRemotionEdit(
 
     if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, 6, STEPS, 'Adding background music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      // Through the audio queue: this render finished, but the NEXT variant's
+      // render may have just started — its Chrome must not fight three
+      // loudness-measure/mix ffmpeg passes for the same cores.
+      await enqueueAudioPostSteps(() =>
+        mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      )
     }
 
     console.log('[motion-renderer] Remotion-only edit ready')
@@ -1499,7 +1789,9 @@ async function renderSmartCinematic(
 
     if (MUSIC_ENABLED && musicMode !== 'off') {
       await setVariantProgress(jobId, variantId, step++, STEPS, 'Adding background music')
-      await mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      await enqueueAudioPostSteps(() =>
+        mixBackgroundMusic(outputPath, hook, moodTag ?? null, scriptFormat, musicMode, profile, null, variantId)
+      )
     }
 
     console.log('[motion-renderer] output ready')
@@ -1509,17 +1801,17 @@ async function renderSmartCinematic(
   }
 }
 
-export function startSingleVariant(
+export async function runSingleVariant(
   jobId: string,
   variantId: string,
   sourceUrl: string,
   opts: RenderVariantOptions,
-) {
+): Promise<void> {
   const key = jobId + ':' + variantId
   if (active.has(key)) return
   active.add(key)
 
-  const outDir = path.join(process.cwd(), 'public', 'renders', jobId)
+  const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
 
   // Caption/motion-graphics test runs skip Submagic (no round-trip), but keep
@@ -1547,10 +1839,128 @@ export function startSingleVariant(
     await renderSmartCinematic(jobId, variantId, sourceUrl, outDir, opts)
   }
 
-  launch()
-    .catch(e => console.error('[motion-renderer] startSingleVariant fatal:', e))
-    .finally(() => {
-      clearTimeout(timeoutId)
-      active.delete(key)
-    })
+  try {
+    await launch()
+  } catch (e) {
+    console.error('[motion-renderer] runSingleVariant fatal:', e)
+  } finally {
+    clearTimeout(timeoutId)
+    active.delete(key)
+  }
+}
+
+// Fire-and-forget wrapper for long-lived servers (local dev, VPS). On Vercel,
+// dispatchPipelineTask('render-variant') runs the awaited version inside a
+// Sandbox instead — background work there cannot outlive the response.
+export function startSingleVariant(
+  jobId: string,
+  variantId: string,
+  sourceUrl: string,
+  opts: RenderVariantOptions,
+) {
+  void runSingleVariant(jobId, variantId, sourceUrl, opts)
+}
+
+// ── Dispatchable pipeline tasks ───────────────────────────────────────────────
+// Self-contained units of background work. On a long-lived server the routes
+// run them fire-and-forget in-process; on Vercel the worker (worker/run-task.ts)
+// runs them to completion inside a Sandbox VM. Everything they need comes from
+// the DB + env, so they work identically in both homes.
+
+// Downloads + compresses the job's footage and uploads it to R2, writing prep
+// progress onto the pending variants; marks the whole job failed if the
+// footage can't be fetched.
+export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
+  const db = supabaseAdmin()
+
+  let lastProgressWrite = 0
+  const writePrepProgress = async (percent: number, label: string) => {
+    const now = Date.now()
+    if (percent < 100 && now - lastProgressWrite < 700) return
+    lastProgressWrite = now
+    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    const currentVariants = (currentJob?.variants ?? []) as VideoVariant[]
+    const nextVariants = currentVariants.map((v) => (
+      v.status === 'pending'
+        ? { ...v, progress: { step: Math.max(1, Math.min(100, Math.round(percent))), total: 100, label } }
+        : v
+    ))
+    await db.from('video_jobs').update({ variants: nextVariants }).eq('id', jobId)
+  }
+
+  try {
+    const prepared = await prepareJobSource(jobId, sourceUrl, writePrepProgress)
+    console.log(`[motion-renderer] source prepared job=${jobId} local=${prepared.localPath}`)
+    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
+      v.status === 'pending' ? { ...v, progress: null } : v
+    ))
+    await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
+  } catch (e) {
+    console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
+    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    const failedVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => ({
+      ...v,
+      status: 'failed' as const,
+      progress: null,
+      error: `Could not prepare the footage: ${(e as Error).message}`,
+    }))
+    await db.from('video_jobs').update({ variants: failedVariants, status: 'failed' }).eq('id', jobId)
+  }
+}
+
+// Renders one edit-tool variant (v4-v6) start to finish: builds the render
+// options from the job + script the same way the start-variant route does,
+// then awaits the full pipeline.
+export async function renderEditVariantTask(jobId: string, variantId: string): Promise<void> {
+  const db = supabaseAdmin()
+
+  const { data: job } = await db.from('video_jobs').select('*').eq('id', jobId).single()
+  if (!job) throw new Error(`job ${jobId} not found`)
+
+  const stored = ((job.variants ?? []) as VideoVariant[]).find((v) => v.id === variantId)
+  const def = VARIANT_DEFINITIONS.find((v) => v.id === variantId)
+  const variant = (stored && def ? { ...stored, ...def } : stored) as (VideoVariant & Record<string, unknown>) | undefined
+  if (!variant) throw new Error(`variant ${variantId} not found on job ${jobId}`)
+
+  await patchVariant(
+    db,
+    jobId,
+    variantId,
+    { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null },
+    { jobStatus: 'processing' },
+  )
+
+  const { data: scriptRow } = await db
+    .from('scripts')
+    .select('hook, cta, mood_tag, filming_plan')
+    .eq('id', job.script_id)
+    .single()
+  const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
+
+  // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
+  // so they read as a real side-by-side comparison rather than two random picks.
+  // our-v6 never touches Submagic (Remotion-only edit), so it needs no template.
+  let submagicTemplateName: string | undefined
+  if (!variant.motionGraphicsTestOnly && !variant.remotionEdit) {
+    const [tplA, tplB] = await pickPremiumTemplates()
+    submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
+  }
+
+  await runSingleVariant(jobId, variantId, job.source_drive_url as string, {
+    hook: scriptRow?.hook ?? '',
+    cta: scriptRow?.cta ?? '',
+    nativeCaptions: variant.nativeCaptions as boolean | undefined,
+    moodTag: scriptRow?.mood_tag ?? null,
+    scriptFormat,
+    motionGraphicsTestOnly: variant.motionGraphicsTestOnly as boolean | undefined,
+    remotionEdit: variant.remotionEdit as boolean | undefined,
+    captionTestOnly: variant.captionTestOnly as boolean | undefined,
+    motionGraphics: variant.motionGraphics as boolean | undefined,
+    motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
+    submagicTemplateName,
+    submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
+    submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
+    musicMode: variant.music_mode as MusicMode | undefined,
+  })
 }

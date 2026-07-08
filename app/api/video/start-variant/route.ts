@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { startSingleVariant, retrieveAndStoreSubmagicResult, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
+import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
+import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
 import {
   deriveSmartSubmagicSettings,
   pickPremiumTemplates,
@@ -44,25 +45,18 @@ async function pollSubmagicUntilDone(
     const result = await pollSubmagicJob(projectId).catch(() => null)
     if (!result || result.status === 'processing') continue
 
-    let finalUrl: string | null = result.downloadUrl
     if (result.status === 'ready' && result.downloadUrl) {
-      try {
-        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, result.downloadUrl, music)
-        console.log(`[start-variant] Submagic result retrieved into Olympus storage for ${jobId}:${variantId}`)
-      } catch (e) {
-        console.warn(`[start-variant] could not retrieve Submagic result, keeping their hosted URL:`, (e as Error).message)
-        // Fall back to Submagic's own URL rather than failing the variant —
-        // still playable, just not pulled into our own storage this time.
-      }
+      // Single canonical finisher (shared with the status route): retrieval,
+      // SFX/frame post-steps, R2 upload, and the ready write all live there.
+      await finalizeSubmagicVariant(jobId, variantId, result.downloadUrl, music)
+      return
     }
 
     await patchVariant(
       db,
       jobId,
       variantId,
-      result.status === 'ready'
-        ? { status: 'ready', download_url: finalUrl, preview_url: finalUrl, error: null, progress: null }
-        : { status: 'failed', error: result.error ?? 'Submagic failed', progress: null },
+      { status: 'failed', error: result.error ?? 'Submagic failed', progress: null },
       { completeWhenAllDone: true },
     )
     return
@@ -73,7 +67,7 @@ async function pollSubmagicUntilDone(
 }
 
 export async function POST(req: NextRequest) {
-  const { jobId, variantId } = await req.json()
+  const { jobId, variantId, force } = await req.json()
 
   if (!jobId || !variantId) {
     return NextResponse.json({ error: 'Missing jobId or variantId.' }, { status: 400 })
@@ -110,6 +104,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, reused: true })
     }
 
+    // Instant UI feedback; the task patches again on start (harmless repeat).
     await patchVariant(
       supabase,
       jobId,
@@ -118,39 +113,9 @@ export async function POST(req: NextRequest) {
       { jobStatus: 'processing' },
     )
 
-    const { data: scriptRow } = await supabase
-      .from('scripts')
-      .select('hook, cta, mood_tag, filming_plan')
-      .eq('id', job.script_id)
-      .single()
-
-    const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
-
-    // our-v4/our-v5 share the same two AI-picked premium (non-Hormozi) templates
-    // so they read as a real side-by-side comparison rather than two random picks.
-    // our-v6 never touches Submagic (Remotion-only edit), so it needs no template.
-    let submagicTemplateName: string | undefined
-    if (!variant.motionGraphicsTestOnly && !variant.remotionEdit) {
-      const [tplA, tplB] = await pickPremiumTemplates()
-      submagicTemplateName = variant.motionGraphicsStyle === 'bold' ? tplB : tplA
-    }
-
-    startSingleVariant(jobId, variantId, job.source_drive_url, {
-      hook: scriptRow?.hook ?? '',
-      cta: scriptRow?.cta ?? '',
-      nativeCaptions: variant.nativeCaptions as boolean | undefined,
-      moodTag: scriptRow?.mood_tag ?? null,
-      scriptFormat,
-      motionGraphicsTestOnly: variant.motionGraphicsTestOnly as boolean | undefined,
-      remotionEdit: variant.remotionEdit as boolean | undefined,
-      captionTestOnly: variant.captionTestOnly as boolean | undefined,
-      motionGraphics: variant.motionGraphics as boolean | undefined,
-      motionGraphicsStyle: variant.motionGraphicsStyle as 'minimal' | 'bold' | undefined,
-      submagicTemplateName,
-      submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
-      submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
-      musicMode: variant.music_mode as MusicMode | undefined,
-    })
+    // The whole render (option building included) is a pipeline task —
+    // in-process here on a long-lived server, in a Sandbox VM on Vercel.
+    await dispatchPipelineTask({ task: 'render-variant', jobId, variantId })
 
     return NextResponse.json({ ok: true })
   }
@@ -159,10 +124,16 @@ export async function POST(req: NextRequest) {
     const preset = variant.submagicPreset ?? {}
     const lockKey = `${jobId}:${variantId}`
 
-    if (variant.external_id && (variant.status === 'processing' || variant.status === 'ready')) {
+    // A finished variant normally reuses its Submagic project (no double
+    // spend on accidental re-clicks). force=true (the studio's retry button
+    // on a ready variant) skips the reuse and submits a fresh render —
+    // a variant that's actively processing is never force-restarted.
+    const forceRegenerate = force === true && variant.status === 'ready'
+    if (!forceRegenerate && variant.external_id && (variant.status === 'processing' || variant.status === 'ready')) {
       console.log(`[start-variant] Reusing existing Submagic project for ${lockKey}: ${variant.external_id}`)
       return NextResponse.json({ ok: true, reused: true, projectId: variant.external_id })
     }
+    if (forceRegenerate) console.log(`[start-variant] force regeneration for ${lockKey}`)
 
     if (activeSubmagicStarts.has(lockKey)) {
       console.log(`[start-variant] Suppressed duplicate Submagic start for ${lockKey}`)
@@ -175,7 +146,9 @@ export async function POST(req: NextRequest) {
         supabase,
         jobId,
         variantId,
-        { status: 'processing', preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } },
+        // external_id cleared so the status poller never polls a stale
+        // Submagic project between this reset and the new projectId write.
+        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 2, label: 'Submitting to Submagic' } },
         { jobStatus: 'processing' },
       )
 

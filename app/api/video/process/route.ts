@@ -4,7 +4,8 @@ import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, verifyDriveFile } from '@/lib/video-pipeline'
 import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
-import { prepareJobSource } from '@/lib/motion-renderer'
+import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
+import { rendersDir } from '@/lib/paths'
 import { deleteJobStorage } from '@/lib/storage'
 
 const MUSIC_MODES: MusicMode[] = ['smart', 'off']
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
   for (const old of oldJobs ?? []) {
     void deleteJobStorage(old.id)
     try {
-      fs.rmSync(path.join(process.cwd(), 'public', 'renders', old.id), { recursive: true, force: true })
+      fs.rmSync(rendersDir(old.id), { recursive: true, force: true })
     } catch { /* best-effort */ }
   }
 
@@ -72,65 +73,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error?.message ?? 'Could not start job.' }, { status: 500 })
   }
 
-  let lastProgressWrite = 0
-  const writePrepProgress = async (percent: number, label: string) => {
-    const now = Date.now()
-    if (percent < 100 && now - lastProgressWrite < 700) return
-    lastProgressWrite = now
-
-    const { data: currentJob } = await supabase
-      .from('video_jobs')
-      .select('variants')
-      .eq('id', job.id)
-      .single()
-
-    const currentVariants = (currentJob?.variants ?? variants) as VideoVariant[]
-    const nextVariants = currentVariants.map((v) => (
-      v.status === 'pending'
-        ? { ...v, progress: { step: Math.max(1, Math.min(100, Math.round(percent))), total: 100, label } }
-        : v
-    ))
-
-    await supabase.from('video_jobs').update({ variants: nextVariants }).eq('id', job.id)
-  }
-
+  // Download + compress + upload the footage as a background pipeline task —
+  // in-process on a long-lived server, in a Sandbox VM on Vercel. Progress
+  // and success/failure land on the variants via the task itself.
+  // source_drive_url stays the original Drive link — Submagic-bound variants
+  // resolve the actual fetchable URL via getSubmagicSourceUrl (the R2-hosted
+  // compressed copy), not this field directly.
   console.log(`[video-process] preparing source for job=${job.id}`)
-  prepareJobSource(job.id, confirmedVideoUrl, writePrepProgress)
-    .then(async (prepared) => {
-      console.log(`[video-process] source prepared job=${job.id} local=${prepared.localPath}`)
-      const { data: currentJob } = await supabase
-        .from('video_jobs')
-        .select('variants')
-        .eq('id', job.id)
-        .single()
-
-      const currentVariants = (currentJob?.variants ?? variants) as VideoVariant[]
-      const readyVariants = currentVariants.map((v) => (
-        v.status === 'pending' ? { ...v, progress: null } : v
-      ))
-
-      // source_drive_url stays the original Drive link -- Submagic-bound
-      // variants resolve the actual fetchable URL via getSubmagicSourceUrl
-      // (the R2-hosted compressed copy), not this field directly.
-      await supabase
-        .from('video_jobs')
-        .update({ variants: readyVariants })
-        .eq('id', job.id)
-    })
-    .catch(async (e) => {
-      console.error(`[video-process] source prep failed job=${job.id}:`, (e as Error).message)
-      const failedVariants = variants.map((v) => ({
-        ...v,
-        status: 'failed' as const,
-        progress: null,
-        error: `Could not download footage from Google Drive: ${(e as Error).message}`,
-      }))
-
-      await supabase
-        .from('video_jobs')
-        .update({ variants: failedVariants, status: 'failed' })
-        .eq('id', job.id)
-    })
+  await dispatchPipelineTask({ task: 'prepare-source', jobId: job.id, sourceUrl: confirmedVideoUrl })
 
   return NextResponse.json({ jobId: job.id })
 }

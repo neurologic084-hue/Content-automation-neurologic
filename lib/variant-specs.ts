@@ -63,38 +63,43 @@ export interface ResolvedSubmagicSettings {
 // v1-v5. v6 skips Submagic entirely, so it has no spec. v4/v5 reuse the same
 // resolver for their Submagic pass (their motion-graphics layer is separate).
 export const VARIANT_SPECS: Record<string, VariantSpec> = {
+  // Calm & Clean — Umi's small elegant captions (user-picked). All three
+  // Submagic variants run extra-fast silence cutting by request; the
+  // sensitivity gate still softens the pace on medical/emotional or
+  // personal footage. B-roll maxed by request on all three Submagic
+  // variants: 46-49% on every footage tier, always under 50.
   'our-v1': {
     id: 'our-v1',
     name: 'Calm & Clean',
-    captionLane: 'minimal',
-    locked: { magicZooms: true, hookTitle: false, basePace: 'natural' },
-    adaptive: { brollCeiling: { none: 10, some: 22, rich: 30 } },
+    captionLane: 'clean',
+    templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
+    locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
+    adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,
   },
-  // UGC Aesthetic — modeled on the reference edit ("Multiple Shots, Voice
-  // Isolation, No Music, Photo B Roll"): small elegant captions with italic
-  // accent words (Umi family) and punch-in zooms standing in for multi-angle
-  // cuts. B-roll comes from Submagic's stock magicBrolls (plan-included, no AI
-  // credits). Music mixes in post from our library, quiet under the voice.
+  // UGC Aesthetic — Luke captions (user-picked; Beast/Ella as backup) with
+  // punch-in zooms standing in for multi-angle cuts. B-roll comes from
+  // Submagic's stock magicBrolls (plan-included, no AI credits). The plain-
+  // footage tier is removed by request: 38% floor even on static footage.
   'our-v2': {
     id: 'our-v2',
     name: 'UGC Aesthetic',
-    captionLane: 'clean',
-    templatePool: ['Umi', 'Gstaad', 'Malta', 'Nema'],
-    locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 25, some: 38, rich: 48 } },
+    captionLane: 'bold',
+    templatePool: ['Luke', 'Beast', 'Ella'],
+    locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
+    adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,
   },
-  // Creator Classic — simple clean captions from the built-in template pool
-  // (no custom theme), punch-in zooms standing in for multi-angle cuts, stock
-  // cutaways at the same coverage, music on.
+  // Creator Bold — Hormozi 3 captions (user-picked, other Hormozis as
+  // backup), punchy pacing. B-roll ceilings run high on request — every tier
+  // generous, never ≥50%.
   'our-v3': {
     id: 'our-v3',
-    name: 'Creator Classic',
-    captionLane: 'clean',
-    templatePool: ['Gstaad', 'Malta', 'Nema', 'Umi'],
-    locked: { magicZooms: true, hookTitle: false, basePace: 'fast' },
-    adaptive: { brollCeiling: { none: 25, some: 38, rich: 48 } },
+    name: 'Creator Bold',
+    captionLane: 'bold',
+    templatePool: ['Hormozi 3', 'Hormozi 1', 'Hormozi 2', 'Hormozi 4', 'Hormozi 5'],
+    locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
+    adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,
   },
   // v4/v5: the Remotion overlay carries the visual interest, so their Submagic
@@ -134,8 +139,10 @@ export function resolveSubmagicSettings(
 ): ResolvedSubmagicSettings {
   const pace = gatePace(spec.locked.basePace, profile.sensitivity)
 
-  // Guardrail 2: B-roll % = the variant's ceiling for this richness, never more.
-  const brollPct = spec.adaptive.brollCeiling[profile.brollableRichness]
+  // Guardrail 2: B-roll % = the variant's ceiling for this richness, never
+  // more — and NEVER 50 or above, no matter what a future spec edit says.
+  // The voice and the speaker's face stay the anchor of every edit.
+  const brollPct = Math.min(spec.adaptive.brollCeiling[profile.brollableRichness], 49)
 
   // Guardrail 3: zooms only if the variant wants them AND framing has room —
   // push-ins on an already-tight face read as jitter, not energy.

@@ -1,4 +1,5 @@
-import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3'
+import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3'
+import { Upload } from '@aws-sdk/lib-storage'
 import fs from 'fs'
 
 const BUCKET = process.env.R2_BUCKET!
@@ -16,23 +17,34 @@ function r2Client() {
 }
 
 export async function uploadToStorage(localPath: string, fileName: string, jobId: string, folder?: string): Promise<string> {
-  const client = r2Client()
   const fileBuffer = fs.readFileSync(localPath)
   const storagePath = folder ? `${folder}/${jobId}/${fileName}` : `${jobId}/${fileName}`
   console.log(`[storage] uploading ${storagePath} (${(fileBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
 
-  // Large files on a slow connection occasionally hit a transient network error
-  // mid-upload. Retry a few times with backoff before giving up.
-  const maxAttempts = 3
+  // Flaky links corrupt long TLS streams mid-upload ("SSL alert bad record
+  // mac"), so:
+  // - multipart with 8MB parts: each part is a short-lived request, and a
+  //   corrupted part retries alone instead of restarting the whole file
+  // - a FRESH client per attempt: a poisoned keep-alive connection in the
+  //   pool otherwise makes every retry fail identically
+  const maxAttempts = 4
   let lastError: string | undefined
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const client = r2Client()
     try {
-      await client.send(new PutObjectCommand({
-        Bucket: BUCKET,
-        Key: storagePath,
-        Body: fileBuffer,
-        ContentType: 'video/mp4',
-      }))
+      const upload = new Upload({
+        client,
+        params: {
+          Bucket: BUCKET,
+          Key: storagePath,
+          Body: fileBuffer,
+          ContentType: 'video/mp4',
+        },
+        partSize: 8 * 1024 * 1024,
+        queueSize: 2,
+        leavePartsOnError: false,
+      })
+      await upload.done()
       const publicUrl = `${PUBLIC_URL}/${storagePath}`
       console.log(`[storage] uploaded ${storagePath}: ${publicUrl}`)
       return publicUrl
@@ -40,8 +52,10 @@ export async function uploadToStorage(localPath: string, fileName: string, jobId
       lastError = (e as Error).message
       console.warn(`[storage] upload ${storagePath} attempt ${attempt}/${maxAttempts} failed: ${lastError}`)
       if (attempt < maxAttempts) {
-        await new Promise((r) => setTimeout(r, attempt * 1500))
+        await new Promise((r) => setTimeout(r, attempt * 2500))
       }
+    } finally {
+      client.destroy()
     }
   }
 

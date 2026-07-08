@@ -18,15 +18,21 @@ interface Props {
 }
 
 interface MenuPos {
-  top: number
+  top?: number
+  bottom?: number
   right: number
 }
+
+// Tallest case (all seven rows) — used to decide whether the dropdown still
+// fits below the button or should open upward instead of falling off-screen.
+const MENU_MAX_HEIGHT = 380
 
 export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) {
   const [mounted, setMounted] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
   const [showDelete, setShowDelete] = useState(false)
+  const [showDeleteEdit, setShowDeleteEdit] = useState(false)
   const [showFolderModal, setShowFolderModal] = useState(false)
   const [folders, setFolders] = useState<Folder[]>([])
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(currentFolderId ?? null)
@@ -58,7 +64,13 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
 
   function openMenu(btn: HTMLButtonElement) {
     const rect = btn.getBoundingClientRect()
-    setMenuPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right })
+    const openUp = rect.bottom + MENU_MAX_HEIGHT > window.innerHeight
+    setMenuPos({
+      right: window.innerWidth - rect.right,
+      ...(openUp
+        ? { bottom: window.innerHeight - rect.top + 6 }
+        : { top: rect.bottom + 6 }),
+    })
     setMenuOpen(o => !o)
   }
 
@@ -114,9 +126,32 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
   async function handleDelete() {
     setDeleting(true)
     setShowDelete(false)
-    const supabase = createClient()
-    await supabase.from('scripts').delete().eq('id', scriptId)
-    if (ideaId) await supabase.from('ideas').delete().eq('id', ideaId)
+    // Server route instead of a direct row delete: it also removes the
+    // script's video edits AND their stored files (R2 + local renders),
+    // which a bare row delete leaves orphaned in the bucket forever.
+    try {
+      await fetch('/api/scripts/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scriptId, ideaId: ideaId || null }),
+      })
+    } catch { /* refresh shows the true state either way */ }
+    router.refresh()
+  }
+
+  async function handleDeleteEdit() {
+    setDeleting(true)
+    setShowDeleteEdit(false)
+    // Deletes every edit (video job + its stored files) this script has —
+    // the script itself stays untouched, ready for a fresh edit.
+    try {
+      await fetch('/api/video/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scriptId }),
+      })
+    } catch { /* refresh shows the true state either way */ }
+    setDeleting(false)
     router.refresh()
   }
 
@@ -158,12 +193,36 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
           style={{
             position: 'fixed',
             top: menuPos.top,
+            bottom: menuPos.bottom,
             right: menuPos.right,
             zIndex: 9999,
             minWidth: 192,
           }}
           className="bg-white rounded-2xl border border-[#E4E4E0] shadow-2xl py-1 animate-fadeIn"
         >
+          <button
+            onClick={() => { closeMenu(); router.push(`/review/${scriptId}`) }}
+            className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#18181B] hover:bg-[#F9F9F8] active:bg-[#F4F3F0] cursor-pointer"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+            </svg>
+            Review script
+          </button>
+          <button
+            onClick={() => { closeMenu(); router.push(`/edit/${scriptId}`) }}
+            className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#18181B] hover:bg-[#F9F9F8] active:bg-[#F4F3F0] cursor-pointer"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="23 7 16 12 23 17 23 7" />
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+            </svg>
+            Edit video
+          </button>
+          <div style={{ height: 1, background: '#F0EFED', margin: '0 12px' }} />
           <button
             onClick={openFolderModal}
             className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#18181B] hover:bg-[#F9F9F8] active:bg-[#F4F3F0] cursor-pointer"
@@ -195,6 +254,17 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
           )}
           <div style={{ height: 1, background: '#F0EFED', margin: '0 12px' }} />
           <button
+            onClick={() => { closeMenu(); setShowDeleteEdit(true) }}
+            className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#EF4444] hover:bg-[#FEF2F2] active:bg-[#FEE2E2] cursor-pointer"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="23 7 16 12 23 17 23 7" />
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+              <line x1="4" y1="2" x2="21" y2="22" />
+            </svg>
+            Remove edit
+          </button>
+          <button
             onClick={() => { closeMenu(); setShowDelete(true) }}
             className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#EF4444] hover:bg-[#FEF2F2] active:bg-[#FEE2E2] cursor-pointer"
           >
@@ -203,7 +273,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
               <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
               <path d="M10 11v6M14 11v6M9 6V4h6v2" />
             </svg>
-            Delete script
+            Remove edit and script
           </button>
         </div>,
         document.body
@@ -329,10 +399,20 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
       )}
 
       <ConfirmModal
+        open={showDeleteEdit}
+        title="Remove edit"
+        message="This removes the video edit and its rendered videos (frees storage). The script stays — you can make a new edit anytime."
+        confirmLabel="Yes, remove edit"
+        cancelLabel="No, keep it"
+        danger
+        onConfirm={handleDeleteEdit}
+        onCancel={() => setShowDeleteEdit(false)}
+      />
+      <ConfirmModal
         open={showDelete}
-        title="Delete script"
-        message="This permanently deletes the script and its idea. Cannot be undone."
-        confirmLabel="Yes, delete"
+        title="Remove edit and script"
+        message="This permanently removes the script, its idea, and every video edit made from it. Cannot be undone."
+        confirmLabel="Yes, remove all"
         cancelLabel="No, keep it"
         danger
         onConfirm={handleDelete}

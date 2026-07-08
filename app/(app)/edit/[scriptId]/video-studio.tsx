@@ -76,7 +76,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
   function startPolling(id: string) {
     if (pollRef.current) clearInterval(pollRef.current)
-    pollRef.current = setInterval(() => pollStatus(id), 2500)
+    // 4s: fast enough that progress feels live, light enough that the server
+    // isn't hammering Submagic's poll API (and on Vercel, each tick is a
+    // billed function call).
+    pollRef.current = setInterval(() => pollStatus(id), 4000)
     pollStatus(id)
   }
 
@@ -147,7 +150,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     router.push(`/publish?jobId=${jobId}&variantId=${variantId}`)
   }
 
-  async function handleStartVariant(variantId: string) {
+  async function handleStartVariant(variantId: string, force = false) {
     if (!jobId) return
     const preparingSource = variants.length > 0 && variants.every(v => v.status === 'pending') && variants.some(v => v.progress)
     if (preparingSource) return
@@ -156,35 +159,13 @@ export function VideoStudio({ script, existingJobId }: Props) {
       await fetch('/api/video/start-variant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, variantId }),
+        body: JSON.stringify({ jobId, variantId, force }),
       })
       setStatus('processing')
       startPolling(jobId)
     } finally {
       setStartingVariants(prev => { const s = new Set(prev); s.delete(variantId); return s })
     }
-  }
-
-  async function handleReset() {
-    if (pollRef.current) clearInterval(pollRef.current)
-    // Delete the job server-side so its R2/local files go with it — a bare
-    // row delete here used to leave every rendered video orphaned in storage.
-    if (jobId) {
-      try {
-        await fetch('/api/video/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobId }),
-        })
-      } catch { /* reset the UI regardless */ }
-    }
-    setJobId(null)
-    setStatus('idle')
-    setVariants([])
-    setReadyCount(0)
-    setSelectedVariant(null)
-    setDriveUrl('')
-    setError(null)
   }
 
   const prepProgress = variants.find(v => v.status === 'pending' && v.progress)?.progress ?? null
@@ -389,7 +370,9 @@ export function VideoStudio({ script, existingJobId }: Props) {
               const isReady = v?.status === 'ready'
               const isSelected = selectedVariant === v?.id
               const isStarting = v?.id ? startingVariants.has(v.id) : false
-              const canRetryReady = v?.tool !== 'submagic'
+              // Submagic variants included: retry sends force=true so the
+              // backend submits a fresh project instead of reusing the old one.
+              const canRetryReady = true
               const toolMeta = v ? TOOL_COLOR[v.tool] : null
 
               return (
@@ -405,13 +388,16 @@ export function VideoStudio({ script, existingJobId }: Props) {
                   {isReady && v?.preview_url && !v.preview_url.startsWith('placeholder') ? (
                     <div className="w-full rounded-xl mb-3 overflow-hidden bg-black" style={{ height: 240 }}>
                       <video
-                        src={v.preview_url}
-                        autoPlay
+                        // #t=0.1 makes the browser show a real frame from just
+                        // past the start as the poster (frame 0 is sometimes
+                        // black on Submagic renders). preload="metadata" +
+                        // no autoplay: the page fetches kilobytes per card
+                        // instead of streaming six ~50MB videos at once.
+                        src={`${v.preview_url}#t=0.1`}
                         muted
-                        loop
                         playsInline
                         controls
-                        preload="auto"
+                        preload="metadata"
                         className="w-full h-full object-cover"
                       />
                     </div>
@@ -500,7 +486,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                         </button>
                         {canRetryReady && (
                           <button
-                            onClick={() => v?.id && handleStartVariant(v.id)}
+                            onClick={() => v?.id && handleStartVariant(v.id, true)}
                             disabled={isStarting}
                             className="h-9 w-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all disabled:opacity-40"
                             style={{ background: '#F4F3F0', color: '#71717A' }}
@@ -554,15 +540,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
             })}
           </div>
 
-          {/* Actions */}
+          {/* Actions — deleting/replacing an edit lives in the Library's
+              script menu now, so the library stays the one place edits are
+              managed from. */}
           <div className="flex items-center gap-3 pt-1">
-            <button
-              onClick={handleReset}
-              className="h-9 px-4 rounded-xl text-xs font-medium cursor-pointer border"
-              style={{ borderColor: '#E4E4E0', color: '#71717A' }}
-            >
-              Replace footage
-            </button>
             {selectedVariant && (
               <div className="flex items-center gap-2 text-xs text-[#22C55E] font-medium">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

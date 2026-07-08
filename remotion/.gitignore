@@ -1,0 +1,4 @@
+
+# variant render smoke-test artifacts
+.test-out/
+public/edit-cache/_test-*

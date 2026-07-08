@@ -27,6 +27,11 @@ import {
   useVideoConfig,
 } from 'remotion'
 import { loadFont } from '@remotion/fonts'
+import { FONT_DATA } from '../fonts-data'
+
+// Embedded data URI instead of staticFile() — the render-server font fetch
+// hangs on long sandbox renders (delayRender "Loading font …" never clears).
+const fontUrl = (file: string) => FONT_DATA[file]
 
 const BASE_FONT = 'EditCapBase'
 const ACCENT_FONT = 'EditCapAccent'
@@ -40,47 +45,47 @@ const VIRAL_SANS_STRONG = 'EditViralSansStrong'
 const VIRAL_SERIF_UP = 'EditViralSerifUp'
 const VIRAL_BLOCK = 'EditViralBlock'
 
-loadFont({ family: BASE_FONT, url: staticFile('fonts/Poppins-SemiBold.ttf') }).catch(() => undefined)
-loadFont({ family: ACCENT_FONT, url: staticFile('fonts/PlayfairDisplay-Italic.ttf') }).catch(() => undefined)
-loadFont({ family: BOLD_FONT, url: staticFile('fonts/Poppins-Bold.ttf') }).catch(() => undefined)
-loadFont({ family: IMPACT_FONT, url: staticFile('fonts/Anton-Regular.ttf') }).catch(() => undefined)
-loadFont({ family: VIRAL_SANS, url: staticFile('fonts/Inter-Medium.ttf') }).catch(() => undefined)
-loadFont({ family: VIRAL_SANS_STRONG, url: staticFile('fonts/Inter-SemiBold.ttf') }).catch(() => undefined)
-loadFont({ family: VIRAL_SERIF_UP, url: staticFile('fonts/PlayfairDisplay-Bold.ttf') }).catch(() => undefined)
-loadFont({ family: VIRAL_BLOCK, url: staticFile('fonts/ArchivoBlack-Regular.ttf') }).catch(() => undefined)
+loadFont({ family: BASE_FONT, url: fontUrl('Poppins-SemiBold.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: ACCENT_FONT, url: fontUrl('PlayfairDisplay-Italic.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: BOLD_FONT, url: fontUrl('Poppins-Bold.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: IMPACT_FONT, url: fontUrl('Anton-Regular.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: VIRAL_SANS, url: fontUrl('Inter-Medium.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: VIRAL_SANS_STRONG, url: fontUrl('Inter-SemiBold.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: VIRAL_SERIF_UP, url: fontUrl('PlayfairDisplay-Bold.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: VIRAL_BLOCK, url: fontUrl('ArchivoBlack-Regular.ttf'), format: 'truetype' }).catch(() => undefined)
 // Dan Koe (v6) family: heavy italic serif for the glowing floating titles,
 // bold neutral sans for captions/labels, mono for the red-line tag.
 const KOE_SERIF = 'EditKoeSerif'
 const KOE_SANS = 'EditKoeSans'
 const KOE_MONO = 'EditKoeMono'
 const KOE_MONO_BOLD = 'EditKoeMonoBold'
-loadFont({ family: KOE_SERIF, url: staticFile('fonts/PlayfairDisplay-ExtraBoldItalic.ttf') }).catch(() => undefined)
-loadFont({ family: KOE_SANS, url: staticFile('fonts/Inter-Bold.ttf') }).catch(() => undefined)
-loadFont({ family: KOE_MONO, url: staticFile('fonts/SpaceMono-Regular.ttf') }).catch(() => undefined)
-loadFont({ family: KOE_MONO_BOLD, url: staticFile('fonts/SpaceMono-Bold.ttf') }).catch(() => undefined)
+loadFont({ family: KOE_SERIF, url: fontUrl('PlayfairDisplay-ExtraBoldItalic.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: KOE_SANS, url: fontUrl('Inter-Bold.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: KOE_MONO, url: fontUrl('SpaceMono-Regular.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: KOE_MONO_BOLD, url: fontUrl('SpaceMono-Bold.ttf'), format: 'truetype' }).catch(() => undefined)
 // Koe collage captions (v6 Sample look): Fraunces variable — the soft
 // high-contrast serif with the blobby ball terminals the reference's huge
 // lowercase payoff words and giant section numerals are set in. Registered
 // across the full weight range; weight is picked per use via
 // fontVariationSettings (opsz 144 = the display cut).
 const KOE_DISPLAY = 'EditKoeDisplay'
-loadFont({ family: KOE_DISPLAY, url: staticFile('fonts/Fraunces-Variable.ttf'), weight: '100 900' }).catch(() => undefined)
+loadFont({ family: KOE_DISPLAY, url: fontUrl('Fraunces-Variable.ttf'), format: 'truetype', weight: '100 900' }).catch(() => undefined)
 const KOE_DISPLAY_VARIATION = "'opsz' 144, 'SOFT' 40, 'WONK' 0, 'wght' 640"
 const KOE_NUMERAL_VARIATION = "'opsz' 144, 'SOFT' 60, 'WONK' 0, 'wght' 560"
 // Koe collage connector text: Space Grotesk — a geometric grotesque with real
 // character (distinctive a/g/numerals), so the small sans line never reads as
 // a generic Arial default. Kept separate from the viral sans so only v6 moves.
 const KOE_CONNECTOR = 'EditKoeConnector'
-loadFont({ family: KOE_CONNECTOR, url: staticFile('fonts/SpaceGrotesk-Variable.ttf'), weight: '300 700' }).catch(() => undefined)
+loadFont({ family: KOE_CONNECTOR, url: fontUrl('SpaceGrotesk-Variable.ttf'), format: 'truetype', weight: '300 700' }).catch(() => undefined)
 // Julie (v4) accent: heavy italic geometric sans for the two-tone keywords.
 const JULIE_ACCENT = 'EditJulieAccent'
-loadFont({ family: JULIE_ACCENT, url: staticFile('fonts/Poppins-BoldItalic.ttf') }).catch(() => undefined)
+loadFont({ family: JULIE_ACCENT, url: fontUrl('Poppins-BoldItalic.ttf'), format: 'truetype' }).catch(() => undefined)
 // Eubank (v4) extras: calligraphic script for the gold method titles (the
 // "Picasso Method" look), light geometric sans for thin quote/label text.
 const EUBANK_SCRIPT = 'EditEubankScript'
 const EUBANK_LIGHT = 'EditEubankLight'
-loadFont({ family: EUBANK_SCRIPT, url: staticFile('fonts/GreatVibes-Regular.ttf') }).catch(() => undefined)
-loadFont({ family: EUBANK_LIGHT, url: staticFile('fonts/Poppins-Light.ttf') }).catch(() => undefined)
+loadFont({ family: EUBANK_SCRIPT, url: fontUrl('GreatVibes-Regular.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: EUBANK_LIGHT, url: fontUrl('Poppins-Light.ttf'), format: 'truetype' }).catch(() => undefined)
 
 const KOE_RED = '#F03A32'
 
@@ -298,6 +303,11 @@ const SegmentClip: React.FC<{
       <OffthreadVideo
         src={staticFile(videoFile)}
         startFrom={Math.round(seg.srcStart * fps)}
+        // Tone mapping needs ffmpeg zscale/tonemap filters that the bare
+        // sandbox VM's compositor lacks — leaving it on makes frame extraction
+        // 500 ("Could not extract frame from compositor"). Our footage is SDR,
+        // so tone mapping is a no-op visually; turning it off is free here.
+        toneMapping={false}
         style={{
           width: '100%',
           height: '100%',
@@ -323,6 +333,7 @@ const SegmentClip: React.FC<{
             src={staticFile(matte.file)}
             muted
             transparent
+            toneMapping={false}
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
         </Sequence>
@@ -512,7 +523,7 @@ const DesignedCover: React.FC<{
   const palette = POSTER_PALETTES[item.design?.palette ?? 'champagne']
   const hasMedia = !!item.file
   const media = !hasMedia ? null : item.kind === 'video'
-    ? <OffthreadVideo src={staticFile(item.file)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
 
   const kickerIn = interpolate(frame, [4, 10], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
@@ -881,7 +892,7 @@ const BrollClip: React.FC<{
   })
   // file may be '' for typography-only designed posters (DesignedCover guards).
   const media = !item.file ? null : item.kind === 'video'
-    ? <OffthreadVideo src={staticFile(item.file)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
 
   // Split: FootageStage carries the footage to the top while the media rises
@@ -938,7 +949,7 @@ const BrollClip: React.FC<{
       ]
       const mediaFor = (f: string) =>
         f.endsWith('.mp4')
-          ? <OffthreadVideo src={staticFile(f)} muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ? <OffthreadVideo src={staticFile(f)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           : <Img src={staticFile(f)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       return (
         <AbsoluteFill style={{ pointerEvents: 'none' }}>
