@@ -164,6 +164,15 @@ export async function POST(req: NextRequest) {
       // Drive file. Cached per job, so every Submagic variant on this job
       // shares one compression + upload pass.
       const videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
+      // When the source was pre-cut by our own planner (source-cut.mp4), Submagic
+      // must NOT cut again: dial silence removal to its gentlest and turn off
+      // bad-take removal so it only adds captions + zoom styling. If the pre-cut
+      // step didn't run, Submagic cuts on its own exactly as before.
+      const isPrecut = videoUrlForSubmagic.endsWith('/source-cut.mp4')
+      const precutOverrides = isPrecut
+        ? { removeSilencePace: 'natural' as const, removeBadTakes: false }
+        : {}
+      if (isPrecut) console.log(`[start-variant] ${variantId}: using pre-cut source — Submagic styles only`)
       let projectId: string
       // Local-library music to mix on top AFTER Submagic finishes (v1-v3). Stays
       // null for the autonomous aiEditTemplate + legacy paths, which keep
@@ -253,6 +262,7 @@ export async function POST(req: NextRequest) {
             removeSilencePace: resolved.removeSilencePace,
             musicTrackId,
             ...(customItems.length ? { items: customItems } : {}),
+            ...precutOverrides,
           })
 
           // Music comes from our library AFTER Submagic returns — same matcher
@@ -301,6 +311,7 @@ export async function POST(req: NextRequest) {
             hookTitle: smart.hookTitle,
             removeSilencePace: smart.removeSilencePace,
             musicTrackId,
+            ...precutOverrides,
           })
         }
       }

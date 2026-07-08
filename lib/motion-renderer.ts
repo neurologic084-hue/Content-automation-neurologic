@@ -22,6 +22,7 @@ import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
 import { applyColorGrade, resolveEditGrade, type GradeMode } from './color-grade'
+import { buildSubmagicCutSource } from './precut'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -336,6 +337,17 @@ const submagicSourceCache = (g.__olySubmagicSources ??= new Map<string, Promise<
 // silently falling back to the raw Drive link, since a silent fallback
 // caused real confusion before.
 export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string): Promise<string> {
+  // Prefer the pre-cut clip when it exists: our planner already trimmed it, so
+  // Submagic only styles. Checked BEFORE the in-process cache so the cut wins
+  // even in a process that earlier cached the uncut compressed URL.
+  if (process.env.R2_PUBLIC_URL) {
+    const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`
+    try {
+      const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+      if (head.ok) return cutUrl
+    } catch { /* no cut clip (or unreachable) — fall back to the compressed source */ }
+  }
+
   const cached = submagicSourceCache.get(jobId)
   if (cached) return cached
 
@@ -504,6 +516,23 @@ export async function prepareJobSource(
   } catch (e) {
     console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
   }
+  // Pre-cut the footage for the Submagic variants (v1-v3): our planner makes a
+  // tight, clean cut (silence + retakes + stutters) and Submagic then only adds
+  // captions + zoom styling on top. Uploaded once as source-cut.mp4 and shared
+  // by every Submagic variant. Best-effort — if it fails, getSubmagicSourceUrl
+  // falls back to the uncut compressed source and Submagic cuts on its own.
+  await onProgress?.(98, 'Trimming footage')
+  try {
+    const cutPath = path.join(outDir, 'source-cut.mp4')
+    const built = await buildSubmagicCutSource(localPath, cutPath)
+    if (built) {
+      await uploadToStorage(built, 'source-cut.mp4', jobId)
+      console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId})`)
+    }
+  } catch (e) {
+    console.warn(`[motion-renderer] pre-cut step failed for job=${jobId} — Submagic will cut on its own:`, (e as Error).message)
+  }
+
   // Analyze the footage once now, while the compressed file is warm on disk, so
   // the content profile is ready before any variant starts. Best-effort — never
   // block source prep on it.
