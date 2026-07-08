@@ -430,23 +430,25 @@ export async function ensureContentProfile(jobId: string, sourceUrl: string): Pr
       // reads video at 1fps + the audio track, so a 480p/10fps copy with mono
       // audio carries the same signal at ~2MB. Full-file behavior is unchanged
       // for the common (small) case.
+      // Two-tier compression: the GOOD compressed copy is for editing; analysis
+      // always reads a very-low proxy (480p / 10fps / mono audio, ~1-2MB).
+      // Gemini samples video at 1fps + the audio track, so the proxy carries
+      // the same signal at a fraction of the encode+upload time — and stays
+      // safely under the ~20MB inline-request limit no matter the source.
       let analysisPath = localPath
       let samplePath: string | null = null
       try {
-        const sizeMB = fs.statSync(localPath).size / 1048576
-        if (sizeMB > 14) {
-          samplePath = path.join(outDir, 'analysis-sample.mp4')
-          await run(
-            `ffmpeg -y -i "${localPath}" -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 ` +
-            `-c:a aac -b:a 64k -ac 1 "${samplePath}"`,
-            180_000,
-          )
-          analysisPath = samplePath
-          console.log(`[content-profile] source ${sizeMB.toFixed(0)}MB > 14MB — analyzing from low-res sample`)
-        }
+        samplePath = path.join(outDir, 'analysis-sample.mp4')
+        await run(
+          `ffmpeg -y -i "${localPath}" -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 ` +
+          `-c:a aac -b:a 64k -ac 1 "${samplePath}"`,
+          180_000,
+        )
+        analysisPath = samplePath
       } catch (e) {
-        console.warn('[content-profile] sample creation failed, analyzing full file:', (e as Error).message)
+        console.warn('[content-profile] proxy creation failed, analyzing full file:', (e as Error).message)
         analysisPath = localPath
+        samplePath = null
       }
 
       const profile = await analyzeVideoFile(analysisPath, { transcript: transcript ?? undefined })
