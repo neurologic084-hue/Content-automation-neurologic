@@ -6,6 +6,11 @@ import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 
+// Custom B-roll works end-to-end (all 6 variants) but the input is hidden to
+// keep the client UI simple. Set to false to show it again — nothing else
+// needs to change.
+const HIDE_CUSTOM_BROLL = true
+
 const MUSIC_OPTIONS: { value: MusicMode; label: string; hint: string }[] = [
   { value: 'smart', label: 'Smart',    hint: 'Mood-matched track from the library' },
   { value: 'off',   label: 'No music', hint: 'Voice only' },
@@ -307,8 +312,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
             onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
           />
 
-          {/* Custom B-roll (optional) */}
-          <div className="mb-4">
+          {/* Custom B-roll (optional) — feature works end-to-end but is hidden
+              for now to keep the client UI simple. Flip HIDE_CUSTOM_BROLL to
+              false to bring the field back; the whole pipeline reactivates. */}
+          <div className="mb-4" hidden={HIDE_CUSTOM_BROLL}>
             <p className="text-xs font-semibold text-[#71717A] mb-1.5">Your own B-roll <span className="font-normal text-[#A1A1AA]">(optional)</span></p>
             <textarea
               placeholder={"Google Drive links to your own B-roll clips, one per line.\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
