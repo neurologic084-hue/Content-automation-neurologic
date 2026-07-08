@@ -46,6 +46,21 @@ export interface BrollItem {
   // Palette rotates per card so two posters in one video read differently.
   // file may be '' for a designed card: the poster renders typography-only.
   design?: { kicker: string; headline: string; palette?: 'champagne' | 'dusk' | 'blush' }
+  // Collage scene (v7 test): AI-generated transparent cutouts springing in
+  // over a dark editorial canvas, Vox-style. Carries its own type, so caption
+  // pages under it are dropped (like the designed card). file stays '' — the
+  // scene draws its own background. See lib/collage-scenes.ts.
+  collage?: CollagePayload
+}
+
+// The render payload for one collage scene. Cutout files are transparent PNGs
+// (chroma-keyed pipeline-side); the halftone/red-stroke print treatment is
+// applied in-render so it stays tweakable without regenerating images.
+export interface CollagePayload {
+  kicker?: string      // small connector lead-in, spoken words ("It's the")
+  headline?: string    // 2-4 word serif payoff, spoken words
+  stat?: string        // optional big number as spoken ("$36 trillion")
+  cutouts: Array<{ file: string; size: 'hero' | 'support' }>
 }
 
 interface PlannedSlot {
@@ -83,6 +98,9 @@ export async function planBrollSlots(
   // Windows already claimed by template graphics (Koe title/list/venn/rings):
   // graphics outrank stock footage, so B-roll steers around them.
   avoid: Array<{ start: number; duration: number }> = [],
+  // Max-motion mode (v7 test): cutaway cadence tightens to every ~3-4s and
+  // the talking-head gaps between cutaways shrink — the edit never sits still.
+  dense = false,
 ): Promise<PlannedSlot[]> {
   if (media === 'none' || duration < 8 || editedWords.length < 10) return []
   // Adaptive cadence for EVERY flavor, driven by the Gemini profile's read of
@@ -91,14 +109,16 @@ export async function planBrollSlots(
   // viral flavor runs MUCH denser — its references cut away every few seconds
   // even over a static talking head (tuned up on feedback: more action).
   const CADENCE: Record<ContentProfile['brollableRichness'], number> =
-    media === 'viral' ? { none: 7, some: 5.5, rich: 4.5 } : { none: 12, some: 8.5, rich: 6.5 }
+    dense ? { none: 4.5, some: 3.8, rich: 3.2 }
+    : media === 'viral' ? { none: 7, some: 5.5, rich: 4.5 } : { none: 12, some: 8.5, rich: 6.5 }
   const targetCount = Math.min(
-    media === 'viral' ? 10 : 6,
+    dense ? 14 : media === 'viral' ? 10 : 6,
     Math.max(2, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
   )
   // Video-flavored variants can carry more full-screen moments; they're the
   // main place transitions (and their sounds) live.
-  const maxCovers = media === 'video' ? 3 : media === 'viral' ? 10 : media === 'mixed' ? 2 : 1
+  const maxCovers = dense ? 14 : media === 'video' ? 3 : media === 'viral' ? 10 : media === 'mixed' ? 2 : 1
+  const minGap = dense ? 1.2 : 2.0
   // Longer viral videos earn a second designed Remotion poster card.
   const maxDesigns = media !== 'viral' || !designs ? 0 : duration > 45 ? 2 : 1
   const coverRule = media === 'video'
@@ -143,7 +163,7 @@ export async function planBrollSlots(
           'Rules:',
           '- Each cutaway illustrates a concrete, visual phrase — start at that phrase\'s time.',
           '- duration: 1.8 to 3.2 seconds. Never start before 2.5s, never end within the last 1.5s.',
-          '- At least 2 seconds of talking-head between cutaways. No overlaps.',
+          `- At least ${dense ? '1.2' : '2'} seconds of talking-head between cutaways. No overlaps.`,
           '- query: a 2-4 word STOCK-SEARCH query naming something FILMABLE — a person doing a',
           '  specific action, a physical object, or a place ("woman eating dinner", "hands',
           '  scrolling phone", "airport security line"). Stock libraries cannot match abstract',
@@ -181,7 +201,7 @@ export async function planBrollSlots(
   for (const c of candidates
     .filter(c => typeof c.start === 'number' && typeof c.duration === 'number' && typeof c.query === 'string' && c.query.trim())
     .sort((a, b) => (a.start as number) - (b.start as number))) {
-    const start = Math.max(2.5, Math.max(lastEnd + 2.0, c.start as number))
+    const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
     const dur = Math.min(maxDur, Math.max(1.8, c.duration as number))
     if (start + dur > duration - 1.5) continue
     if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
@@ -248,7 +268,7 @@ export async function planBrollSlots(
       busy.push({ start: slot.start, end: slot.start + FILL_DUR })
       busy.sort((a, b) => a.start - b.start)
       filled++
-      cursor = slot.start + FILL_DUR + 2.5  // breathe before the next filler
+      cursor = slot.start + FILL_DUR + (dense ? 1.3 : 2.5)  // breathe before the next filler
     }
     if (filled) {
       console.log(`[broll] gap-filled ${filled} slot(s) — planner delivered ${slots.length - filled}/${targetCount}`)

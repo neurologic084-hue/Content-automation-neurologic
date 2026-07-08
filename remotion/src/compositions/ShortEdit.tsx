@@ -140,6 +140,17 @@ export type ShortEditBroll = {
   // copy as the card's own headline. file may be '' — the poster then renders
   // as a typography-only animation. Palette rotates per card.
   design?: { kicker: string; headline: string; palette?: 'champagne' | 'dusk' | 'blush' }
+  // Collage scene (v7 test): AI-generated transparent cutouts spring in over a
+  // dark editorial canvas with the spoken claim as type — the Vox-explainer
+  // grammar in the Koe palette. file stays ''; cutout files are transparent
+  // PNGs staged pipeline-side (lib/collage-scenes.ts). The halftone/red-stroke
+  // print treatment is applied here so it stays tweakable without regenerating.
+  collage?: {
+    kicker?: string
+    headline?: string
+    stat?: string
+    cutouts: Array<{ file: string; size: 'hero' | 'support' }>
+  }
 }
 
 // NOTE: must stay a `type` (not `interface`) — Remotion's <Composition> props
@@ -652,6 +663,207 @@ const DesignedCover: React.FC<{
 //   card   — a rounded photo/video card floating over the footage (v4/v6).
 //   cover  — full-screen insert that OWNS the transition (blur/flash/punch, or
 //            the viral slide push). Designed covers render the poster instead.
+// ── Collage scene (v7 test) ───────────────────────────────────────────────────
+// The Vox-explainer cutout grammar in the Koe palette: a dark editorial canvas,
+// AI-generated cutouts (transparent PNGs) springing in staggered with a
+// halftone print texture and an offset red stroke, the spoken claim set in the
+// Fraunces display serif on top. Renders inside BrollClip's cover branch, so
+// the blur transition + riser SFX apply exactly like any other cover.
+
+// Halftone dot field masked to the cutout's own alpha — the "printed in a
+// magazine" texture that keeps generated imagery from reading as AI-glossy.
+// Mask geometry must mirror the Img underneath (contain, bottom-anchored).
+const CollageHalftone: React.FC<{ file: string }> = ({ file }) => {
+  const mask: React.CSSProperties = {
+    WebkitMaskImage: `url(${staticFile(file)})`,
+    WebkitMaskSize: 'contain',
+    WebkitMaskPosition: 'center bottom',
+    WebkitMaskRepeat: 'no-repeat',
+    maskImage: `url(${staticFile(file)})`,
+    maskSize: 'contain',
+    maskPosition: 'center bottom',
+    maskRepeat: 'no-repeat',
+  }
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        backgroundImage: 'radial-gradient(circle, rgba(8, 9, 12, 0.5) 1.1px, transparent 1.6px)',
+        backgroundSize: '7px 7px',
+        opacity: 0.55,
+        ...mask,
+      }}
+    />
+  )
+}
+
+// One treated cutout: grayscale print look + offset red silhouette stroke
+// (drop-shadow on the transparent PNG), halftone masked on top, organic drift.
+const CollageCutout: React.FC<{
+  file: string
+  delay: number          // frames before the spring starts
+  flip?: boolean         // mirror the red offset + drift for the support cutout
+}> = ({ file, delay, flip }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const inS = frame >= delay
+    ? spring({ frame: frame - delay, fps, config: { damping: 13, stiffness: 130, mass: 0.9 } })
+    : 0
+  const drift = Math.sin((frame + (flip ? 60 : 0)) * 0.025) * 3
+  const dir = flip ? -1 : 1
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        opacity: Math.min(1, inS * 1.5),
+        translate: `0px ${(1 - inS) * 90 + drift}px`,
+        scale: String(0.86 + 0.14 * inS),
+        rotate: `${dir * (2.2 - inS * 2.2 + 0.6)}deg`,
+      }}
+    >
+      <Img
+        src={staticFile(file)}
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'contain',
+          objectPosition: 'center bottom',
+          filter: `grayscale(1) contrast(1.14) brightness(1.05) drop-shadow(${dir * 12}px 14px 0 rgba(240, 58, 50, 0.85))`,
+        }}
+      />
+      <CollageHalftone file={file} />
+    </div>
+  )
+}
+
+const CollageScene: React.FC<{
+  item: ShortEditBroll
+  durationInFrames: number
+  widthPx: number
+}> = ({ item, durationInFrames, widthPx }) => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const c = item.collage!
+  const hero = c.cutouts.find(k => k.size === 'hero')
+  const support = c.cutouts.find(k => k.size === 'support')
+
+  // The big offset accent ring behind the hero — the collage's one drawn shape.
+  const ringIn = spring({ frame: Math.max(0, frame - 2), fps, config: { damping: 16, stiffness: 110, mass: 1 } })
+  // Whole-scene slow push so the canvas never sits dead still.
+  const push = interpolate(frame, [0, durationInFrames], [1.0, 1.045], {
+    extrapolateRight: 'clamp',
+    easing: Easing.bezier(0.3, 0, 0.7, 1),
+  })
+  const textAt = 12
+  const textIn = frame >= textAt
+    ? spring({ frame: frame - textAt, fps, config: { damping: 15, stiffness: 140, mass: 0.8 } })
+    : 0
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: '#0B0C10', overflow: 'hidden' }}>
+      <AbsoluteFill style={{ scale: String(push) }}>
+        {/* canvas: dark radial wash + a faint global dot field (paper) */}
+        <AbsoluteFill style={{ background: 'radial-gradient(120% 85% at 50% 28%, #1B1C22 0%, #0B0C10 72%)' }} />
+        <AbsoluteFill
+          style={{
+            backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.05) 1px, transparent 1.4px)',
+            backgroundSize: '9px 9px',
+          }}
+        />
+        {/* offset red ring behind the hero */}
+        <div
+          style={{
+            position: 'absolute',
+            left: '14%',
+            top: '34%',
+            width: '72%',
+            height: '52%',
+            border: `${Math.max(2, widthPx * 0.004)}px solid rgba(240, 58, 50, 0.55)`,
+            borderRadius: '50%',
+            rotate: '-8deg',
+            scale: String(0.7 + 0.3 * ringIn),
+            opacity: Math.min(0.9, ringIn),
+          }}
+        />
+
+        {/* cutout layer: hero bottom-anchored, support smaller on the side */}
+        {hero ? (
+          <div style={{ position: 'absolute', left: support ? '2%' : '13%', bottom: '4%', width: '74%', height: '64%' }}>
+            <CollageCutout file={hero.file} delay={4} />
+          </div>
+        ) : null}
+        {support ? (
+          <div style={{ position: 'absolute', right: '2%', bottom: '18%', width: '42%', height: '42%' }}>
+            <CollageCutout file={support.file} delay={10} flip />
+          </div>
+        ) : null}
+
+        {/* type block: connector kicker, Fraunces headline, red stat */}
+        <div
+          style={{
+            position: 'absolute',
+            left: '8%',
+            width: '84%',
+            top: '6.5%',
+            opacity: Math.min(1, textIn * 1.4),
+            translate: `0px ${(1 - textIn) * 26}px`,
+          }}
+        >
+          {c.kicker ? (
+            <div
+              style={{
+                fontFamily: KOE_CONNECTOR,
+                fontVariationSettings: "'wght' 480",
+                fontSize: widthPx * 0.03,
+                letterSpacing: '0.22em',
+                textTransform: 'uppercase',
+                color: '#9AA1AA',
+                marginBottom: '0.55em',
+              }}
+            >
+              {c.kicker}
+            </div>
+          ) : null}
+          {c.headline ? (
+            <div
+              style={{
+                fontFamily: KOE_DISPLAY,
+                fontVariationSettings: KOE_DISPLAY_VARIATION,
+                fontSize: widthPx * 0.078,
+                lineHeight: 1.04,
+                color: '#FFFFFF',
+                textShadow: '0 0 30px rgba(255,255,255,0.4), 0 2px 10px rgba(0,0,0,0.5)',
+              }}
+            >
+              {c.headline}
+            </div>
+          ) : null}
+          {c.stat ? (
+            <div
+              style={{
+                fontFamily: KOE_DISPLAY,
+                fontVariationSettings: KOE_NUMERAL_VARIATION,
+                fontSize: widthPx * 0.115,
+                lineHeight: 1,
+                marginTop: '0.18em',
+                color: KOE_RED,
+                textShadow: '0 0 34px rgba(240, 58, 50, 0.45)',
+              }}
+            >
+              {c.stat}
+            </div>
+          ) : null}
+        </div>
+      </AbsoluteFill>
+
+      {/* vignette so the scene sits in the same dark room as the footage */}
+      <AbsoluteFill style={{ background: 'radial-gradient(130% 100% at 50% 45%, transparent 58%, rgba(0,0,0,0.5) 100%)' }} />
+    </AbsoluteFill>
+  )
+}
+
 const BrollClip: React.FC<{
   item: ShortEditBroll
   durationInFrames: number
@@ -793,7 +1005,9 @@ const BrollClip: React.FC<{
     const IN = transitionStyle === 'slide' ? 7 : 6
     const outStart = Math.max(IN, durationInFrames - (transitionStyle === 'slide' ? 7 : 6))
 
-    const content = item.design
+    const content = item.collage
+      ? <CollageScene item={item} durationInFrames={durationInFrames} widthPx={widthPx} />
+      : item.design
       ? <DesignedCover item={item} durationInFrames={durationInFrames} widthPx={widthPx} />
       : (
         <AbsoluteFill style={{ backgroundColor: '#000' }}>

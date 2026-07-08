@@ -43,6 +43,15 @@ export interface RemotionVariantIdentity {
   grade?: 'cinematic'             // subtle segment-level color grade
   hookSpotlight?: boolean         // Julie's opening focus: dark edges, bright subject
   handheld?: boolean              // organic position/rotation drift on every shot
+  // AI-generated editorial collage scenes (Vox-style layered cutouts, kie.ai)
+  // replacing some stock covers — see lib/collage-scenes.ts. v7 test flag.
+  collageScenes?: boolean
+  // Max-motion mode (v7 test): denser cutaway cadence, more collage scenes,
+  // tighter talking-head gaps — the edit should feel like it never sits still.
+  denseMotion?: boolean
+  // Drop the opening koe TITLE graphic (glowing serif hook + red rotating word).
+  // v7 uses viral captions that carry their own hook, so the title double-stacks.
+  hideTitleGraphic?: boolean
 }
 
 export const REMOTION_IDENTITIES: Record<string, RemotionVariantIdentity> = {
@@ -82,6 +91,18 @@ export const REMOTION_IDENTITIES: Record<string, RemotionVariantIdentity> = {
     pace: 'punchy', maxPageWords: 3, captionCase: 'sentence',
     insets: false, textBehindHook: false, designedCards: false,
     graphics: 'koe', grade: 'cinematic',
+  },
+  // V7 TEST — AI-generated collage scenes in MAX-MOTION trim: dense cutaway
+  // cadence, 5 collage scenes per video, handheld drift so no frame ever sits
+  // still. Captions are the v5 VIRAL system (two-tier white sans + gold italic
+  // serif accents — per feedback, the caption look Daniel prefers) over the
+  // Koe dark grade + glowing graphics. When approved, fold into v6.
+  'our-v7': {
+    captionStyle: 'viral', brollMedia: 'viral', lockedTransition: 'blur',
+    pace: 'punchy', maxPageWords: 6, captionCase: 'title',
+    insets: false, textBehindHook: false, designedCards: false,
+    graphics: 'koe', grade: 'cinematic', handheld: true,
+    collageScenes: true, denseMotion: true, hideTitleGraphic: true,
   },
 }
 
@@ -211,10 +232,10 @@ export function planSfxCues(
     const inPeak = COVER_IN_PEAK[style]
     if (b.layout === 'cover') {
       const end = b.start + b.duration
-      if (b.design) {
-        // Stage 3 payoff: riser builds INTO the poster card (its peak IS the
-        // landing), released by a soft hit with a click blended on top to
-        // sharpen the riser's rough peak.
+      if (b.design || b.collage) {
+        // Stage 3 payoff: riser builds INTO the poster card / collage scene
+        // (its peak IS the landing), released by a soft hit with a click
+        // blended on top to sharpen the riser's rough peak.
         cues.push({ start: Math.max(0, b.start - 1.8), peakAt: b.start, category: 'riser', volume: 0.16 })
         cues.push({ start: Math.max(0, b.start - 0.05), peakAt: b.start + 0.05, category: 'boom-soft', volume: 0.32 })
         cues.push({ start: b.start, peakAt: b.start + 0.03, category: 'click-digital', volume: 0.18 })

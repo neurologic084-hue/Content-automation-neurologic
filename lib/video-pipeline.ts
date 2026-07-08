@@ -129,6 +129,20 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
     autoStart: false,
     remotionEdit: true,
   },
+  // v7 is a TEST variant: the exact v6 Cinematic identity, plus AI-GENERATED
+  // collage scenes (Vox-style layered cutouts, generated via kie.ai and keyed/
+  // stylized in-render) replacing some stock B-roll covers. Once the look is
+  // proven on real footage, the collage system folds into v6 and this entry
+  // goes away — see lib/collage-scenes.ts.
+  {
+    id: 'our-v7',
+    name: 'Cinematic Collage (Test)',
+    description: 'The v6 Cinematic edit with AI-generated editorial collage scenes — halftone cutouts springing in over a dark canvas — in place of some stock B-roll.',
+    tool: 'edit',
+    order: 7,
+    autoStart: false,
+    remotionEdit: true,
+  },
 ]
 
 export function extractDriveFileId(url: string): string | null {

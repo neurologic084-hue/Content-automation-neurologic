@@ -18,7 +18,8 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { buildRenderKit, planSfxCues } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, type BrollItem } from './broll'
+import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
 import { planEubankGraphics, planEubankSfxCues, type EubankGraphic } from './eubank-graphics'
@@ -1047,19 +1048,47 @@ async function renderRemotionEdit(
         console.warn('[motion-renderer] Eubank graphics pass failed, rendering without them:', (e as Error).message)
       }
     }
+    // v7: the viral captions carry their own hook, so drop the koe opening
+    // title graphic (the glowing "Automate your video editing workflow" block)
+    // to avoid double-stacking text over the first beat.
+    if (kit.hideTitleGraphic) {
+      graphics = graphics.filter(g => g.kind !== 'title')
+    }
 
-    await setVariantProgress(jobId, variantId, 4, STEPS, 'Finding B-roll')
+    await setVariantProgress(jobId, variantId, 4, STEPS, kit.collageScenes ? 'Generating collage scenes and B-roll' : 'Finding B-roll')
     const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
     const brollPrefix = `edit-cache/${variantId}-${jobId.slice(0, 8)}-broll`
+    // The hook is a top-band overlay — B-roll can run under it, so it
+    // never claims timeline from the cutaway planner.
+    const graphicWindows = graphics
+      .filter(g => g.kind !== 'hook')
+      .map(g => ({ start: g.start, duration: g.duration }))
+
+    // Collage scenes (v7 test): plan FIRST — like graphics, they outrank stock
+    // footage, so the cutaway planner steers around their windows. Generation
+    // (kie.ai images + chromakey) then runs in PARALLEL with the stock media
+    // resolution below; merging happens once both are done. Fully best-effort:
+    // no key / failed generations just mean stock-only B-roll.
+    let collagePromise: Promise<BrollItem[]> = Promise.resolve([])
+    let collageWindows: Array<{ start: number; duration: number }> = []
+    if (kit.collageScenes) {
+      try {
+        const scenes = await planCollageScenes(plan.editedWords, plan.editedDuration, profile, kit.variation, graphicWindows, kit.denseMotion)
+        collageWindows = scenes.map(s => ({ start: s.start, duration: s.duration }))
+        collagePromise = generateCollageItems(scenes, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix)
+          .catch(e => {
+            console.warn('[motion-renderer] collage generation failed, continuing without scenes:', (e as Error).message)
+            return []
+          })
+      } catch (e) {
+        console.warn('[motion-renderer] collage planning failed, continuing without scenes:', (e as Error).message)
+      }
+    }
+
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none') {
       try {
-        // The hook is a top-band overlay — B-roll can run under it, so it
-        // never claims timeline from the cutaway planner.
-        const graphicWindows = graphics
-          .filter(g => g.kind !== 'hook')
-          .map(g => ({ start: g.start, duration: g.duration }))
-        const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, graphicWindows)
+        const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
         broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia)
         if (viral) {
           // Pages over covers go big/centered; pages under the designed poster
@@ -1149,6 +1178,24 @@ async function renderRemotionEdit(
       }
     }
 
+    // Merge the generated collage scenes in with the stock cutaways. They
+    // carry their own type, so caption pages living mostly inside one are
+    // dropped — the same rule as the viral designed card. Merged OUTSIDE the
+    // stock try/catch so a Pexels failure never loses the generated scenes.
+    const collageItems = await collagePromise
+    if (collageItems.length) {
+      broll.push(...collageItems)
+      broll.sort((a, b) => a.start - b.start)
+      const collageFrac = (p: { start: number; end: number }, b: { start: number; duration: number }) => {
+        const overlap = Math.min(p.end, b.start + b.duration) - Math.max(p.start, b.start)
+        return overlap / Math.max(p.end - p.start, 0.01)
+      }
+      plan.pages = plan.pages.filter(p => !collageItems.some(b => collageFrac(p, b) >= 0.6))
+      for (const item of collageItems) {
+        for (const cut of item.collage?.cutouts ?? []) staged.push(path.join(REMOTION_DIR, 'public', cut.file))
+      }
+    }
+
     // Caption pages under a TEXT-CARRYING graphic are dropped — the graphic
     // carries the words for that beat, like the references. Koe's title keeps
     // captions running (it has its own subtitle); every Eubank kind carries
@@ -1191,10 +1238,15 @@ async function renderRemotionEdit(
         }
       }
       // A numeral living mostly under a text-carrying graphic would fight it.
+      // Collage scenes carry their own type too, so numerals clear them as well.
       koeMotifs = koeMotifs.filter(m =>
         !graphics.some(g =>
           TEXT_GRAPHICS.has(g.kind) &&
           Math.min(m.end, g.start + g.duration) - Math.max(m.start, g.start) > 0.3 * (m.end - m.start)
+        ) &&
+        !broll.some(b =>
+          b.collage &&
+          Math.min(m.end, b.start + b.duration) - Math.max(m.start, b.start) > 0.3 * (m.end - m.start)
         )
       )
       console.log(`[motion-renderer] koe collage: ${groups.size} group(s), ${plan.pages.filter(p => p.accentRange).length} serif payoff(s), ${koeMotifs.length} numeral motif(s)`)
@@ -1305,12 +1357,17 @@ async function renderRemotionEdit(
     await enqueueRemotionRender(async () => {
       await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
       await run(
-        // 240s delayRender timeout: on a busy machine (user apps + dev server),
-        // headless-Chrome startup + font loads can crawl past 120s and fail
-        // renders that would otherwise succeed.
+        // 600s delayRender timeout + capped concurrency: on a busy machine
+        // (user apps + dev server) a HEAVY composition (v7 dense motion: a dozen
+        // OffthreadVideo B-roll covers + collage scenes + 18 fonts) oversubscribes
+        // headless Chrome — every tab races to load the same fonts/assets through
+        // the dev server, and font loading crawls past the old 240s wall while the
+        // OffthreadVideo compositor drops connections ("Request closed") under the
+        // memory pressure. Fewer tabs (concurrency 4) each get enough headroom to
+        // load fonts and decode video, and 600s gives that first load real room.
         `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=240000`,
-        900_000,
+        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=600000 --concurrency=4`,
+        1_500_000,
       )
     })
     if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
