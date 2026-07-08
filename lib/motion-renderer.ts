@@ -424,7 +424,33 @@ export async function ensureContentProfile(jobId: string, sourceUrl: string): Pr
         }
       }
 
-      const profile = await analyzeVideoFile(localPath, { transcript: transcript ?? undefined })
+      // Size-safe analysis input: Gemini's inline (base64) request path is only
+      // documented safe under ~20MB, and a long source can hit 58MB (→ ~77MB
+      // as base64). Above ~14MB, analyze a low-res sample instead — Gemini
+      // reads video at 1fps + the audio track, so a 480p/10fps copy with mono
+      // audio carries the same signal at ~2MB. Full-file behavior is unchanged
+      // for the common (small) case.
+      let analysisPath = localPath
+      let samplePath: string | null = null
+      try {
+        const sizeMB = fs.statSync(localPath).size / 1048576
+        if (sizeMB > 14) {
+          samplePath = path.join(outDir, 'analysis-sample.mp4')
+          await run(
+            `ffmpeg -y -i "${localPath}" -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 ` +
+            `-c:a aac -b:a 64k -ac 1 "${samplePath}"`,
+            180_000,
+          )
+          analysisPath = samplePath
+          console.log(`[content-profile] source ${sizeMB.toFixed(0)}MB > 14MB — analyzing from low-res sample`)
+        }
+      } catch (e) {
+        console.warn('[content-profile] sample creation failed, analyzing full file:', (e as Error).message)
+        analysisPath = localPath
+      }
+
+      const profile = await analyzeVideoFile(analysisPath, { transcript: transcript ?? undefined })
+      if (samplePath) { try { fs.unlinkSync(samplePath) } catch { /* best-effort */ } }
       // Only persist a REAL profile — never cache the neutral fallback, so a
       // transient Gemini failure doesn't get baked in and can be re-attempted.
       if (profile !== FALLBACK_PROFILE) {
