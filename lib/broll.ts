@@ -7,9 +7,11 @@
 //   2. Openverse (CC0 images)    — keyless fallback so B-roll always works.
 //      cc0/pdm licenses only, so no attribution obligations sneak in.
 //
-// Coverage follows the same Gemini-profile ceilings as the Submagic variants
-// (brollableRichness → 20/30/40%), and the reference video's grammar: photo
-// CARDS floating over the footage for most items, at most one full-screen cover.
+// Coverage is either SMART (adaptive cadence from the Gemini profile's read of
+// the footage, damped on sensitive content) or MANUAL (the studio's 0-50%
+// slider, converted to a cutaway count), and follows the reference video's
+// grammar: photo CARDS floating over the footage for most items, at most one
+// full-screen cover (the viral flavor runs all covers).
 
 import fs from 'fs'
 import path from 'path'
@@ -74,7 +76,51 @@ interface PlannedSlot {
 // 'none' = the variant carries no stock footage at all (Koe: graphics only).
 export type BrollFlavor = 'image' | 'video' | 'mixed' | 'viral' | 'none'
 
-const COVERAGE: Record<ContentProfile['brollableRichness'], number> = { none: 30, some: 35, rich: 40 }
+// ── B-roll amount (user-facing knob, video studio) ───────────────────────────
+// Picked once per job, applies to the Remotion variants (v4/v5/v6):
+//   smart  — the pipeline decides coverage from the footage (Gemini profile:
+//            richness drives cadence, sensitivity damps it)
+//   manual — the user's slider percent (0-50) decides coverage directly
+//   none   — no B-roll at all (stock OR custom), pure talking head
+// Stored per-variant in the job's variants jsonb (like grade_mode), so it
+// needs no schema migration.
+export type BrollMode = 'smart' | 'manual' | 'none'
+export const BROLL_MODES: BrollMode[] = ['smart', 'manual', 'none']
+export const MAX_BROLL_PERCENT = 50
+
+export interface BrollSetting {
+  mode: BrollMode
+  // Coverage percent for 'manual' (0-50, integer); null for smart/none.
+  percent: number | null
+}
+
+// Untrusted input (request body / jsonb) → a safe setting. Manual without a
+// usable number degrades to smart rather than guessing an amount.
+export function normalizeBrollSetting(mode: unknown, percent: unknown): BrollSetting {
+  const m: BrollMode = BROLL_MODES.includes(mode as BrollMode) ? (mode as BrollMode) : 'smart'
+  if (m !== 'manual') return { mode: m, percent: null }
+  const p = typeof percent === 'number' && Number.isFinite(percent)
+    ? percent
+    : typeof percent === 'string' && percent.trim() !== '' && Number.isFinite(Number(percent))
+      ? Number(percent)
+      : null
+  if (p === null) return { mode: 'smart', percent: null }
+  return { mode: 'manual', percent: Math.round(Math.min(MAX_BROLL_PERCENT, Math.max(0, p))) }
+}
+
+// Average planned cutaway length: covers run 2.0-3.8s, the gap-filler uses
+// 2.6s — used to convert a coverage percent into a cutaway count.
+const AVG_CUT_SECONDS = 2.8
+
+// A coverage percent becomes a cutaway count: percent of the timeline under
+// B-roll at the average cutaway length, bounded by what physically fits (2.5s
+// head, 1.5s tail, minGap of talking head between cutaways). 0 is honest: a
+// 5% ask on a short clip may round to no cutaways at all.
+export function coverageTargetCount(duration: number, percent: number, minGap: number): number {
+  const wanted = Math.round((duration * percent) / 100 / AVG_CUT_SECONDS)
+  const fits = Math.floor((duration - 2.5 - 1.5 + minGap) / (AVG_CUT_SECONDS + minGap))
+  return Math.max(0, Math.min(wanted, fits))
+}
 
 // ── Planning ──────────────────────────────────────────────────────────────────
 
@@ -101,8 +147,13 @@ export async function planBrollSlots(
   // Max-motion mode (v7 test): cutaway cadence tightens to every ~3-4s and
   // the talking-head gaps between cutaways shrink — the edit never sits still.
   dense = false,
+  // Manual coverage percent from the studio slider (0-50). null = smart: the
+  // adaptive cadence below decides. When set, it wins outright — the cadence
+  // and its caps are bypassed so the slider is honored on any video length.
+  coverage: number | null = null,
 ): Promise<PlannedSlot[]> {
   if (media === 'none' || duration < 8 || editedWords.length < 10) return []
+  const minGap = dense ? 1.2 : 2.0
   // Adaptive cadence for EVERY flavor, driven by the Gemini profile's read of
   // the footage: rich content gets a cutaway every ~6.5s (≈ the reference
   // edits' density), a plain talking head still gets one every ~12s. The
@@ -111,14 +162,22 @@ export async function planBrollSlots(
   const CADENCE: Record<ContentProfile['brollableRichness'], number> =
     dense ? { none: 4.5, some: 3.8, rich: 3.2 }
     : media === 'viral' ? { none: 7, some: 5.5, rich: 4.5 } : { none: 12, some: 8.5, rich: 6.5 }
-  const targetCount = Math.min(
-    dense ? 14 : media === 'viral' ? 10 : 6,
-    Math.max(2, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
-  )
+  // Sensitivity damper (smart mode): medical/emotional or personal footage
+  // reads wrong under a wall of stock cutaways — stretch the cadence so the
+  // speaker carries more of the video, same spirit as the Submagic pace gate.
+  const sensitivityStretch = profile?.sensitivity === 'medical_emotional' ? 1.5
+    : profile?.sensitivity === 'personal' ? 1.2 : 1
+  const targetCount = coverage !== null
+    ? coverageTargetCount(duration, coverage, minGap)
+    : Math.min(
+        dense ? 14 : media === 'viral' ? 10 : 6,
+        Math.max(2, Math.round(duration / (CADENCE[profile?.brollableRichness ?? 'some'] * sensitivityStretch))),
+      )
+  if (targetCount === 0) return []
   // Video-flavored variants can carry more full-screen moments; they're the
-  // main place transitions (and their sounds) live.
-  const maxCovers = dense ? 14 : media === 'video' ? 3 : media === 'viral' ? 10 : media === 'mixed' ? 2 : 1
-  const minGap = dense ? 1.2 : 2.0
+  // main place transitions (and their sounds) live. A manual coverage ask can
+  // exceed the default viral/dense caps, so those caps follow the target.
+  const maxCovers = dense ? Math.max(14, targetCount) : media === 'video' ? 3 : media === 'viral' ? Math.max(10, targetCount) : media === 'mixed' ? 2 : 1
   // Longer viral videos earn a second designed Remotion poster card.
   const maxDesigns = media !== 'viral' || !designs ? 0 : duration > 45 ? 2 : 1
   const coverRule = media === 'video'
@@ -299,8 +358,11 @@ export async function planCustomBrollSlots(
   clips: CustomClip[],
   avoid: Array<{ start: number; duration: number }> = [],
   dense = false,
+  // Manual coverage percent from the studio slider (0-50). null = smart.
+  coverage: number | null = null,
 ): Promise<BrollItem[]> {
   if (!clips.length || duration < 8 || editedWords.length < 10) return []
+  const minGap = dense ? 1.2 : 2.0
 
   // Same adaptive cadence as stock covers; each clip may appear up to twice
   // so short clip lists still cover a long video without going stale.
@@ -309,9 +371,11 @@ export async function planCustomBrollSlots(
     : { none: 12, some: 9, rich: 6.5 }
   const targetCount = Math.min(
     clips.length * 2,
-    Math.max(1, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
+    coverage !== null
+      ? coverageTargetCount(duration, coverage, minGap)
+      : Math.max(1, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
   )
-  const minGap = dense ? 1.2 : 2.0
+  if (targetCount === 0) return []
 
   const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
   const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
@@ -382,9 +446,10 @@ export async function planCustomBrollSlots(
     if (items.length >= targetCount) break
   }
 
-  // Fallback spread: at minimum, each clip lands once, evenly spaced.
+  // Fallback spread: at minimum, each clip lands once, evenly spaced — but
+  // never more cutaways than the coverage target asked for.
   if (!items.length) {
-    const usable = Math.min(clips.length, Math.max(1, Math.floor((duration - 6) / (3 + minGap))))
+    const usable = Math.min(targetCount, clips.length, Math.max(1, Math.floor((duration - 6) / (3 + minGap))))
     const step = (duration - 6) / usable
     for (let i = 0; i < usable; i++) {
       const clip = clips[i]

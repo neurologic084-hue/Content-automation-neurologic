@@ -27,7 +27,7 @@ import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, type BrollItem, type CustomClip } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, normalizeBrollSetting, type BrollItem, type CustomClip, type BrollMode } from './broll'
 import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
@@ -1593,7 +1593,17 @@ async function renderRemotionEdit(
       graphics = graphics.filter(g => g.kind !== 'title')
     }
 
-    await setVariantProgress(jobId, variantId, 4, STEPS, kit.collageScenes ? 'Generating collage scenes and B-roll' : 'Finding B-roll')
+    // The studio's B-roll knob: smart (footage-adaptive), a manual coverage
+    // percent, or none. 'none' silences every cutaway source — stock, custom
+    // clips, and collage scenes — not just stock.
+    const brollSetting = normalizeBrollSetting(opts.brollMode, opts.brollPercent)
+    const brollCoverage = brollSetting.mode === 'manual' ? brollSetting.percent : null
+    const brollOff = brollSetting.mode === 'none'
+    if (brollSetting.mode !== 'smart') {
+      console.log(`[motion-renderer] B-roll mode for ${variantId}: ${brollSetting.mode}${brollCoverage !== null ? ` (${brollCoverage}%)` : ''}`)
+    }
+
+    await setVariantProgress(jobId, variantId, 4, STEPS, brollOff ? 'Planning visuals' : kit.collageScenes ? 'Generating collage scenes and B-roll' : 'Finding B-roll')
     const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
     const brollPrefix = `edit-cache/${variantId}-${jobId.slice(0, 8)}-broll`
     // The hook is a top-band overlay — B-roll can run under it, so it
@@ -1609,7 +1619,7 @@ async function renderRemotionEdit(
     // no key / failed generations just mean stock-only B-roll.
     let collagePromise: Promise<BrollItem[]> = Promise.resolve([])
     let collageWindows: Array<{ start: number; duration: number }> = []
-    if (kit.collageScenes) {
+    if (kit.collageScenes && !brollOff) {
       try {
         const scenes = await planCollageScenes(plan.editedWords, plan.editedDuration, profile, kit.variation, graphicWindows, kit.denseMotion)
         collageWindows = scenes.map(s => ({ start: s.start, duration: s.duration }))
@@ -1625,7 +1635,7 @@ async function renderRemotionEdit(
 
     const usingCustomBroll = !!opts.customBroll?.length
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
-    if (kit.brollMedia !== 'none') {
+    if (kit.brollMedia !== 'none' && !brollOff) {
       try {
         // One set for the whole render: stock cover slots, carousel panes and
         // every query-ladder fallback all draw from it, so no clip appears
@@ -1638,9 +1648,9 @@ async function renderRemotionEdit(
           // entirely. Clips are matched to transcript moments by content.
           const clips = await stageCustomBroll(jobId, opts.customBroll!, cacheDir, 'edit-cache')
           for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
-          broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion)
+          broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
         } else {
-          const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion)
+          const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
           broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
         }
         if (viral) {
@@ -2006,6 +2016,11 @@ export interface RenderVariantOptions {
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
   musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
   gradeMode?: GradeMode            // per-job color look (smart / golden / clean / moody / off)
+  // Per-job B-roll amount for the Remotion variants (v4-v6): 'smart' adapts
+  // to the footage, 'manual' honors brollPercent, 'none' disables B-roll
+  // entirely (stock, custom clips, and collage scenes alike).
+  brollMode?: BrollMode
+  brollPercent?: number | null     // manual coverage percent (0-50)
   // Creator-supplied B-roll (Drive links stored on the job). When present,
   // stock B-roll is skipped entirely and these clips are matched to
   // transcript moments instead.
@@ -2337,6 +2352,8 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
     musicMode: variant.music_mode as MusicMode | undefined,
     gradeMode: (variant.grade_mode as GradeMode | undefined),
+    brollMode: variant.broll_mode as BrollMode | undefined,
+    brollPercent: variant.broll_percent as number | null | undefined,
     customBroll: (job.custom_broll as { url: string; description?: string | null }[] | null) ?? undefined,
   })
 }

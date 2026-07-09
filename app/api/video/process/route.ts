@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/server'
 import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, verifyDriveFile } from '@/lib/video-pipeline'
 import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 import { normalizeGradeMode } from '@/lib/color-grade'
+import { normalizeBrollSetting } from '@/lib/broll'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
 import { rendersDir } from '@/lib/paths'
 import { deleteJobStorage } from '@/lib/storage'
@@ -12,9 +13,10 @@ import { deleteJobStorage } from '@/lib/storage'
 const MUSIC_MODES: MusicMode[] = ['smart', 'off']
 
 export async function POST(req: NextRequest) {
-  const { scriptId, driveUrl, musicMode, gradeMode, customBroll } = await req.json()
+  const { scriptId, driveUrl, musicMode, gradeMode, brollMode, brollPercent, customBroll } = await req.json()
   const resolvedMusicMode: MusicMode = MUSIC_MODES.includes(musicMode) ? musicMode : DEFAULT_MUSIC_MODE
   const resolvedGradeMode = normalizeGradeMode(gradeMode)
+  const resolvedBroll = normalizeBrollSetting(brollMode, brollPercent)
 
   if (!scriptId || !driveUrl) {
     return NextResponse.json({ error: 'Missing scriptId or driveUrl.' }, { status: 400 })
@@ -80,6 +82,8 @@ export async function POST(req: NextRequest) {
     progress: { step: 5, total: 100, label: 'Preparing footage' },
     music_mode: resolvedMusicMode,
     grade_mode: resolvedGradeMode,
+    broll_mode: resolvedBroll.mode,
+    broll_percent: resolvedBroll.percent,
   }))
 
   const { data: job, error } = await supabase

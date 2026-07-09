@@ -28,6 +28,19 @@ const GRADE_OPTIONS: { value: GradeMode; label: string; hint: string }[] = [
   { value: 'off',    label: 'Natural', hint: 'As filmed' },
 ]
 
+// B-roll amount for the Motion Lab variants (v4-v6). 'smart' lets the pipeline
+// read the footage and decide; 'manual' honors the slider percent; 'none'
+// renders a pure talking head. Mirrors BrollMode in lib/broll.ts (kept inline
+// so no server module reaches the client bundle).
+type BrollMode = 'smart' | 'manual' | 'none'
+const BROLL_OPTIONS: { value: BrollMode; label: string; hint: string }[] = [
+  { value: 'smart',  label: 'Smart',  hint: 'Adapts to your footage' },
+  { value: 'manual', label: 'Slider', hint: 'Pick the exact amount' },
+  { value: 'none',   label: 'None',   hint: 'Talking head only' },
+]
+const DEFAULT_BROLL_PERCENT = 25
+const MAX_BROLL_PERCENT = 50
+
 interface Script {
   id: string
   hook: string
@@ -52,6 +65,8 @@ export function VideoStudio({ script, existingJobId }: Props) {
   const [customBrollText, setCustomBrollText] = useState('')
   const [musicMode, setMusicMode] = useState<MusicMode>('smart')
   const [gradeMode, setGradeMode] = useState<GradeMode>('smart')
+  const [brollMode, setBrollMode] = useState<BrollMode>('smart')
+  const [brollPercent, setBrollPercent] = useState(DEFAULT_BROLL_PERCENT)
   const [jobId, setJobId] = useState<string | null>(existingJobId)
   // 'loading': have an existing job but haven't fetched its real status yet
   const [status, setStatus] = useState<'idle' | 'loading' | 'submitting' | 'processing' | 'complete' | 'error'>(
@@ -166,6 +181,8 @@ export function VideoStudio({ script, existingJobId }: Props) {
         driveUrl,
         musicMode,
         gradeMode,
+        brollMode,
+        brollPercent: brollMode === 'manual' ? brollPercent : null,
         customBroll: customBrollText.split('\n').map(l => l.trim()).filter(Boolean),
       }),
     })
@@ -427,6 +444,55 @@ export function VideoStudio({ script, existingJobId }: Props) {
               })}
             </div>
             <p className="text-[11px] text-[#A1A1AA] mt-1.5">Smart gives each style its own grade. Pick a look to apply the same one across all six.</p>
+          </div>
+
+          {/* B-roll amount */}
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-[#71717A] mb-1.5">B-roll</p>
+            <div className="grid grid-cols-3 gap-2">
+              {BROLL_OPTIONS.map(opt => {
+                const active = brollMode === opt.value
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setBrollMode(opt.value)}
+                    className="text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer"
+                    style={{
+                      borderColor: active ? '#FF4F17' : '#E4E4E0',
+                      background: active ? '#FFF3EF' : '#FAFAFA',
+                      outline: active ? '1.5px solid #FF4F17' : 'none',
+                    }}
+                  >
+                    <span className="block text-xs font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
+                    <span className="block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
+                  </button>
+                )
+              })}
+            </div>
+            {brollMode === 'manual' && (
+              <div className="mt-3 rounded-xl border border-[#E4E4E0] px-4 py-3" style={{ background: '#FAFAFA' }}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11px] font-medium text-[#71717A]">How much of the video is B-roll</span>
+                  <span className="text-xs font-bold tabular-nums" style={{ color: '#FF4F17' }}>{brollPercent}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={MAX_BROLL_PERCENT}
+                  step={5}
+                  value={brollPercent}
+                  onChange={e => setBrollPercent(Number(e.target.value))}
+                  className="w-full cursor-pointer"
+                  style={{ accentColor: '#FF4F17' }}
+                />
+                <div className="flex justify-between text-[10px] text-[#A1A1AA] mt-0.5">
+                  <span>0% · none</span>
+                  <span>{MAX_BROLL_PERCENT}% · max</span>
+                </div>
+              </div>
+            )}
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the Motion Lab variants (Concept Pro, Viral Energy, Cinematic). Smart reads your footage and picks the amount that fits it.</p>
           </div>
 
           {error && <p className="text-xs text-[#EF4444] mb-3">{error}</p>}
