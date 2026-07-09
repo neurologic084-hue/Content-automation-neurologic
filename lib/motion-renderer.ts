@@ -1451,18 +1451,18 @@ async function renderRemotionEdit(
     if (kit.captionStyle === 'eubank') {
       await planEubankCaptions(plan.pages, profile, kit.variation)
     }
-    // Julie reuses the same LLM accent picker, mapped onto plain word flags:
-    // the reference accents a keyword on nearly every page, far denser than
-    // the profile-emphasis heuristic alone provides.
-    if (kit.captionStyle === 'julie') {
+    // Julie and Glow reuse the same LLM accent picker, mapped onto plain word
+    // flags: the reference accents a keyword on nearly every page, far denser
+    // than the profile-emphasis heuristic alone provides.
+    if (kit.captionStyle === 'julie' || kit.captionStyle === 'glow') {
       await planViralCaptions(plan.pages, profile, kit.variation)
       for (const page of plan.pages) {
         if (page.accentRange) {
           for (let i = page.accentRange[0]; i <= page.accentRange[1]; i++) page.words[i].accent = true
         }
-        // Strip the viral-only styling fields so the page renders as julie.
-        // Behind-hook pages were parked at 'mid' for the matte look — julie
-        // never stages a matte, so re-home them off the face first.
+        // Strip the viral-only styling fields so the page renders as julie/glow.
+        // Behind-hook pages were parked at 'mid' for the matte look — neither
+        // style stages a matte, so re-home them off the face first.
         if (page.behind) page.position = profile?.faceArea === 'lower' ? 'high' : 'low'
         delete page.accentRange
         delete page.accentFont

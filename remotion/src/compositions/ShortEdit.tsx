@@ -37,6 +37,10 @@ const BASE_FONT = 'EditCapBase'
 const ACCENT_FONT = 'EditCapAccent'
 const BOLD_FONT = 'EditCapBold'
 const IMPACT_FONT = 'EditCapImpact'
+// Glow (v6 replacement) — heavy rounded sans (Poppins Black), the caption from
+// the reference: sentence-case phrases that build word by word, keywords
+// highlighted in a bright glowing sky-blue, everything else white.
+const GLOW_FONT = 'EditCapGlow'
 // Viral (v5) family: neutral grotesk for the small tiers (the reference's
 // Helvetica-like base), upright display serif for poster headlines, and a
 // heavy block grotesk for times/numbers.
@@ -49,6 +53,7 @@ loadFont({ family: BASE_FONT, url: fontUrl('Poppins-SemiBold.ttf'), format: 'tru
 loadFont({ family: ACCENT_FONT, url: fontUrl('PlayfairDisplay-Italic.ttf'), format: 'truetype' }).catch(() => undefined)
 loadFont({ family: BOLD_FONT, url: fontUrl('Poppins-Bold.ttf'), format: 'truetype' }).catch(() => undefined)
 loadFont({ family: IMPACT_FONT, url: fontUrl('Anton-Regular.ttf'), format: 'truetype' }).catch(() => undefined)
+loadFont({ family: GLOW_FONT, url: fontUrl('Poppins-Black.ttf'), format: 'truetype' }).catch(() => undefined)
 loadFont({ family: VIRAL_SANS, url: fontUrl('Inter-Medium.ttf'), format: 'truetype' }).catch(() => undefined)
 loadFont({ family: VIRAL_SANS_STRONG, url: fontUrl('Inter-SemiBold.ttf'), format: 'truetype' }).catch(() => undefined)
 loadFont({ family: VIRAL_SERIF_UP, url: fontUrl('PlayfairDisplay-Bold.ttf'), format: 'truetype' }).catch(() => undefined)
@@ -173,7 +178,7 @@ export type ShortEditProps = {
   // are always silent hard cuts — transitions only happen where they mean
   // something (entering/leaving a cover). 'slide' is the viral push.
   transitionStyle?: 'blur' | 'flash' | 'punch' | 'slide'
-  captionStyle?: 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
+  captionStyle?: 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank' | 'glow'
   // Transparent-webm foreground of the speaker for the first seconds; lets the
   // hook caption render behind them (best-effort, staged pipeline-side).
   matte?: { file: string; durationSec: number }
@@ -1477,7 +1482,7 @@ const CreditTag: React.FC<{ credit: { name: string; title: string }; widthPx: nu
 
 // Caption identities. serif/editorial/impact share the original page system;
 // viral, koe, julie, and eubank have dedicated renderers.
-type CaptionStyleName = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
+type CaptionStyleName = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank' | 'glow'
 
 // ── Koe editorial-collage captions (v6) ───────────────────────────────────────
 // Modeled frame-by-frame on "v6 Sample.mp4": small clean sans connector
@@ -1853,6 +1858,102 @@ const JulieCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ 
             </span>
           )
         )}
+      </div>
+    </AbsoluteFill>
+  )
+}
+
+// ── Glow caption (v6) — the "Julie" reference look ────────────────────────────
+// Sentence-case phrases that build word by word in a heavy rounded sans
+// (Poppins Black). Keywords land in a bright sky-blue with a real glow and a
+// size bump; everything else is white. Per-word accent flags come from the same
+// LLM picker the julie/viral styles use (motion-renderer maps accentRange →
+// word.accent for this style).
+const GLOW_BLUE = '#92F6FA'
+// TIGHT glow — the reference keeps the letters crisp, with only a small soft
+// halo, not a wide blur. A bright hairline core + one modest ring + a hair of
+// dark shadow so the type reads over bright footage. (An earlier wider 0.42em
+// ring softened the edges too much — this stays sharp.)
+const GLOW_BLUE_SHADOW =
+  '0 0 0.03em rgba(200,250,255,1), 0 0 0.1em rgba(95,215,235,0.85), 0 0 0.19em rgba(70,200,225,0.45), 0 0.04em 0.1em rgba(0,25,42,0.45)'
+const GLOW_WHITE_SHADOW =
+  '0 0 0.08em rgba(255,255,255,0.22), 0 0.05em 0.13em rgba(0,0,0,0.6)'
+
+const GlowCaptionPage: React.FC<{ page: ShortEditPage; widthPx: number }> = ({ page, widthPx }) => {
+  const frame = useCurrentFrame()
+
+  const big = page.big
+  const normalSize = widthPx * (big ? 0.064 : 0.057)
+  const accentSize = normalSize * 1.62   // keywords land much bigger — the reference's strong size jump
+
+  // Sequential build: each word fades + rises in on its own beat; accent words
+  // land with a scale pop + a quick brightness flash (the "expensive" pop).
+  const wordIn = (order: number, pop: boolean) => {
+    const at = order * 2
+    const o = interpolate(frame, [at, at + 3], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
+    const rise = interpolate(frame, [at, at + 4], [0.16, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+    const scale = pop
+      ? interpolate(frame, [at, at + 6], [1.18, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.cubic) })
+      : 1
+    const flash = pop
+      ? interpolate(frame, [at + 1, at + 10], [1.5, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.out(Easing.quad) })
+      : 1
+    return { o, rise, scale, flash }
+  }
+
+  const position = page.position
+  const positionStyle: React.CSSProperties =
+    position === 'low' ? { bottom: '20%' }
+    : position === 'mid' ? { top: '40%' }
+    : { top: '20%' }
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: 'none' }}>
+      <div
+        style={{
+          position: 'absolute',
+          left: '7%',
+          width: '86%',
+          display: 'flex',
+          flexWrap: 'wrap',
+          justifyContent: 'center',
+          alignItems: 'baseline',
+          // Gap in px scaled to the caption size — an em value here would resolve
+          // against the container's default 16px and collapse to a few pixels,
+          // jamming the words together.
+          columnGap: `${(normalSize * 0.32).toFixed(1)}px`,
+          rowGap: `${(normalSize * 0.12).toFixed(1)}px`,
+          textAlign: 'center',
+          ...positionStyle,
+        }}
+      >
+        {page.words.map((w, i) => {
+          const a = w.accent
+          const anim = wordIn(i, a)
+          const inner = (
+            <span
+              style={{
+                display: 'inline-block',
+                fontFamily: a ? GLOW_FONT : BOLD_FONT,
+                fontWeight: a ? 900 : 700,
+                fontSize: a ? accentSize : normalSize,
+                color: a ? GLOW_BLUE : '#FFFFFF',
+                textShadow: a ? GLOW_BLUE_SHADOW : GLOW_WHITE_SHADOW,
+                letterSpacing: '-0.005em',
+                opacity: anim.o,
+                translate: `0 ${(anim.rise * normalSize).toFixed(1)}px`,
+                scale: String(anim.scale),
+              }}
+            >
+              {w.t}
+            </span>
+          )
+          return anim.flash !== 1 ? (
+            <span key={i} style={{ display: 'inline-block', filter: `brightness(${anim.flash.toFixed(3)})` }}>{inner}</span>
+          ) : (
+            <span key={i} style={{ display: 'inline-block' }}>{inner}</span>
+          )
+        })}
       </div>
     </AbsoluteFill>
   )
@@ -2794,6 +2895,7 @@ const CaptionPage: React.FC<{ page: ShortEditPage; widthPx: number; style: Capti
   // 'koe' never reaches this dispatch — its pages render as collage GROUPS
   // (KoeCollageGroup) straight from the main composition.
   if (style === 'julie') return <JulieCaptionPage page={page} widthPx={widthPx} />
+  if (style === 'glow') return <GlowCaptionPage page={page} widthPx={widthPx} />
   if (style === 'eubank') return <EubankCaptionPage page={page} widthPx={widthPx} />
 
   const opacity = interpolate(frame, [0, 3], [0, 1], { extrapolateRight: 'clamp' })

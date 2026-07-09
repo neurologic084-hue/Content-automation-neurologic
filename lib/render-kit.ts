@@ -19,7 +19,7 @@ import { transitionStyleFor, type SfxCategory, type TransitionStyle } from './so
 import type { BrollItem } from './broll'
 import type { CaptionPage } from './edit-plan'
 
-export type CaptionStyle = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank'
+export type CaptionStyle = 'serif' | 'editorial' | 'impact' | 'viral' | 'koe' | 'julie' | 'eubank' | 'glow'
 export type BrollMedia = 'image' | 'video' | 'mixed' | 'viral' | 'none'
 
 // Per-variant TEMPLATE: every Remotion variant shares the same editing engine
@@ -87,10 +87,15 @@ export const REMOTION_IDENTITIES: Record<string, RemotionVariantIdentity> = {
   // title with red rotating subtitle word, bright/dim word lists, red venn
   // circles, ambient rings on emphasis moments).
   'our-v6': {
-    captionStyle: 'koe', brollMedia: 'viral', lockedTransition: 'blur',
-    pace: 'punchy', maxPageWords: 3, captionCase: 'sentence',
+    // GLOW caption look: sentence-case phrases that build word by word in a
+    // heavy rounded sans, keywords highlighted in a bright glowing sky-blue
+    // (see GlowCaptionPage). Accent words come from the shared viral/julie LLM
+    // picker (motion-renderer maps them to word.accent). No on-screen graphics —
+    // the reference is captions over footage + B-roll only.
+    captionStyle: 'glow', brollMedia: 'viral', lockedTransition: 'blur',
+    pace: 'punchy', maxPageWords: 5, captionCase: 'sentence',
     insets: false, textBehindHook: false, designedCards: false,
-    graphics: 'koe', grade: 'cinematic',
+    grade: 'cinematic',
   },
   // V7 TEST — AI-generated collage scenes in MAX-MOTION trim: dense cutaway
   // cadence, 5 collage scenes per video, handheld drift so no frame ever sits
