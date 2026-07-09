@@ -1,0 +1,59 @@
+# Free render host. The Next.js app (on Vercel) fires a repository_dispatch with
+# a task payload; this runner checks out the repo and runs worker/run-task.ts to
+# completion. State flows through Supabase + R2 only, exactly like the old Vercel
+# Sandbox path — the runner is disposable. Ubuntu runners have a modern glibc and
+# ffmpeg, so none of the Amazon-Linux glibc patching is needed here.
+name: Render task
+
+on:
+  repository_dispatch:
+    types: [render-task]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # Only the Remotion render (v4-v6) needs the remotion package tree + a
+      # browser. The Submagic + ffmpeg tasks don't, so skip this for them.
+      - name: Install Remotion + browser
+        if: github.event.client_payload.task == 'render-variant'
+        run: |
+          cd remotion
+          npm ci --no-audit --no-fund
+          npx remotion browser ensure
+          cd ..
+
+      - name: Run task
+        env:
+          # The task descriptor ({task, jobId, ...}). Passed via env (not inlined
+          # into the script) so its contents can never be shell-interpreted.
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          RENDERS_DIR: /tmp/renders
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          SUBMAGIC_API_KEY: ${{ secrets.SUBMAGIC_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: |
+          echo "Task: $(echo "$PAYLOAD" | head -c 200)"
+          node --import tsx worker/run-task.ts "$(printf %s "$PAYLOAD" | base64 -w0)"

@@ -112,20 +112,40 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
     `tail -c 3000 /tmp/task.log ; ` +
     `node --import tsx worker/upload-task-log.ts '${payload.jobId}' '${label}' /tmp/task.log || true`
 
-  const sandbox = await Sandbox.create({
-    source: {
-      type: 'git',
-      url: repoUrl,
-      ...(process.env.SANDBOX_GIT_TOKEN
-        ? { username: 'x-access-token', password: process.env.SANDBOX_GIT_TOKEN }
-        : {}),
-      depth: 1,
-    },
-    resources: { vcpus: needsRemotion ? 4 : 2 },
-    // Hobby caps sandboxes at 45 minutes; renders finish well inside that.
-    timeout: 40 * 60 * 1000,
-    runtime: 'node22',
-  })
+  // Sandbox creation can fail transiently (Vercel rate-limit, brief capacity /
+  // concurrency pressure — especially when several renders launch at once via
+  // "Generate all"). Retry a couple times with backoff before giving up, and
+  // surface the REAL Vercel error to the caller (it's stored on the variant so
+  // it's visible without VM access — a bare "could not start" hides whether it's
+  // a quota cap, a plan limit, or a blip).
+  let sandbox
+  let lastErr: Error | null = null
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      sandbox = await Sandbox.create({
+        source: {
+          type: 'git',
+          url: repoUrl,
+          ...(process.env.SANDBOX_GIT_TOKEN
+            ? { username: 'x-access-token', password: process.env.SANDBOX_GIT_TOKEN }
+            : {}),
+          depth: 1,
+        },
+        resources: { vcpus: needsRemotion ? 4 : 2 },
+        // Hobby caps sandboxes at 45 minutes; renders finish well inside that.
+        timeout: 40 * 60 * 1000,
+        runtime: 'node22',
+      })
+      break
+    } catch (e) {
+      lastErr = e as Error
+      console.warn(`[sandbox-tasks] Sandbox.create attempt ${attempt}/3 failed for ${payload.task}: ${lastErr.message}`)
+      if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 5000))
+    }
+  }
+  if (!sandbox) {
+    throw new Error(`Vercel Sandbox launch failed: ${lastErr?.message ?? 'unknown error'}`)
+  }
 
   // Detached: the command keeps running inside the VM after this function
   // returns its HTTP response. The VM stops itself when the script exits.
@@ -139,10 +159,48 @@ async function runInSandbox(payload: PipelineTask): Promise<void> {
   console.log(`[sandbox-tasks] launched ${payload.task} for ${payload.jobId} in a sandbox VM`)
 }
 
+// owner/repo for the GitHub Actions render host. Explicit GITHUB_RENDER_REPO
+// wins; otherwise it's parsed from the repo we already clone in the Sandbox path.
+function githubRenderRepo(): string | null {
+  if (process.env.GITHUB_RENDER_REPO) return process.env.GITHUB_RENDER_REPO
+  const url = process.env.SANDBOX_REPO_URL
+  const m = url?.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/)
+  return m ? m[1] : null
+}
+
+// Free render host: fire a repository_dispatch so a GitHub Actions runner (Ubuntu,
+// modern glibc, ffmpeg present) checks out the repo and runs worker/run-task.ts.
+// Needs GITHUB_DISPATCH_TOKEN (a token with Contents: write on the repo). Resolves
+// once GitHub accepts the event; the run is then queued on GitHub's side.
+async function runViaGitHubActions(payload: PipelineTask): Promise<void> {
+  const token = process.env.GITHUB_DISPATCH_TOKEN
+  const repo = githubRenderRepo()
+  if (!token || !repo) {
+    throw new Error('GitHub render host not configured (need GITHUB_DISPATCH_TOKEN and SANDBOX_REPO_URL/GITHUB_RENDER_REPO)')
+  }
+  const res = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ event_type: 'render-task', client_payload: payload }),
+  })
+  if (!res.ok) {
+    throw new Error(`GitHub Actions dispatch failed: ${res.status} ${(await res.text()).slice(0, 200)}`)
+  }
+  console.log(`[sandbox-tasks] dispatched ${payload.task} for ${payload.jobId} to GitHub Actions (${repo})`)
+}
+
 /** Fire off a pipeline task in whichever home fits this deployment. Resolves
- *  once the task is RUNNING (not finished) — progress lands in the DB. */
+ *  once the task is RUNNING/QUEUED (not finished) — progress lands in the DB.
+ *  Render host order: GitHub Actions (free, opt-in) → Vercel Sandbox → in-process. */
 export async function dispatchPipelineTask(payload: PipelineTask): Promise<void> {
-  if (process.env.VERCEL) {
+  if (process.env.RENDER_VIA_GITHUB === '1') {
+    await runViaGitHubActions(payload)
+  } else if (process.env.VERCEL) {
     await runInSandbox(payload)
   } else {
     void runInline(payload).catch((e) =>

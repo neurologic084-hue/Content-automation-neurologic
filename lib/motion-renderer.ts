@@ -6,7 +6,8 @@ import os from 'os'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS, createSubmagicUserMedia } from './video-pipeline'
+import type { CustomBrollEntry } from './video-pipeline'
 import type { VideoVariant } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
 import { getLibraryMusic } from './music-library'
@@ -20,7 +21,9 @@ import { cleanAudioInPlace, detectSilences } from './audio-clean'
 import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
-import { applyColorGrade } from './color-grade'
+import { applyColorGrade, resolveEditGrade, type GradeMode } from './color-grade'
+import { buildSubmagicCutSource } from './precut'
+import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
@@ -335,6 +338,17 @@ const submagicSourceCache = (g.__olySubmagicSources ??= new Map<string, Promise<
 // silently falling back to the raw Drive link, since a silent fallback
 // caused real confusion before.
 export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string): Promise<string> {
+  // Prefer the pre-cut clip when it exists: our planner already trimmed it, so
+  // Submagic only styles. Checked BEFORE the in-process cache so the cut wins
+  // even in a process that earlier cached the uncut compressed URL.
+  if (process.env.R2_PUBLIC_URL) {
+    const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`
+    try {
+      const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+      if (head.ok) return cutUrl
+    } catch { /* no cut clip (or unreachable) — fall back to the compressed source */ }
+  }
+
   const cached = submagicSourceCache.get(jobId)
   if (cached) return cached
 
@@ -503,6 +517,23 @@ export async function prepareJobSource(
   } catch (e) {
     console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
   }
+  // Pre-cut the footage for the Submagic variants (v1-v3): our planner makes a
+  // tight, clean cut (silence + retakes + stutters) and Submagic then only adds
+  // captions + zoom styling on top. Uploaded once as source-cut.mp4 and shared
+  // by every Submagic variant. Best-effort — if it fails, getSubmagicSourceUrl
+  // falls back to the uncut compressed source and Submagic cuts on its own.
+  await onProgress?.(98, 'Trimming footage')
+  try {
+    const cutPath = path.join(outDir, 'source-cut.mp4')
+    const built = await buildSubmagicCutSource(localPath, cutPath)
+    if (built) {
+      await uploadToStorage(built, 'source-cut.mp4', jobId)
+      console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId})`)
+    }
+  } catch (e) {
+    console.warn(`[motion-renderer] pre-cut step failed for job=${jobId} — Submagic will cut on its own:`, (e as Error).message)
+  }
+
   // Analyze the footage once now, while the compressed file is warm on disk, so
   // the content profile is ready before any variant starts. Best-effort — never
   // block source prep on it.
@@ -520,7 +551,11 @@ const MAX_ERROR_CHARS = 600
 
 function tidyError(error: string | null): string | null {
   if (!error) return error
-  const stripped = error.replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[data-uri]')
+  const stripped = error
+    .replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[data-uri]')
+    // Raw base64 (fonts quoted in Remotion prop dumps) that isn't a data: URI —
+    // a 100+ char base64 run is binary, never a useful message.
+    .replace(/[A-Za-z0-9+/]{100,}={0,2}/g, '[binary]')
   return stripped.length > MAX_ERROR_CHARS ? `${stripped.slice(0, MAX_ERROR_CHARS)}… (truncated)` : stripped
 }
 
@@ -531,11 +566,14 @@ async function markVariant(
   downloadUrl: string | null,
   error: string | null
 ) {
+  // On failure, run the raw error through the explainer so the card shows WHY
+  // (out of credits, quota hit, bad key, storage blip) rather than a stack/code.
+  const finalError = status === 'failed' ? explainFailure(error) : error
   await patchVariant(
     supabaseAdmin(),
     jobId,
     variantId,
-    { status, download_url: downloadUrl, preview_url: downloadUrl, error: tidyError(error), progress: null },
+    { status, download_url: downloadUrl, preview_url: downloadUrl, error: tidyError(finalError), progress: null },
     { completeWhenAllDone: true },
   )
 }
@@ -560,6 +598,16 @@ function versioned(url: string): string {
   return `${url}${url.includes('?') ? '&' : '?'}v=${Date.now()}`
 }
 
+// True when the render runs on an EPHEMERAL host whose disk dies after the run
+// (Vercel Sandbox VM or a GitHub Actions runner). On those, a local /renders/
+// URL 404s once the machine is gone, so a finished video MUST reach R2 — a
+// failed upload has to fail the variant, not return a dead local URL. (Distinct
+// from process.env.SANDBOX alone, which also means "Amazon Linux → patch glibc";
+// GitHub runners are Ubuntu and need no glibc patch, just the R2 requirement.)
+function isEphemeralHost(): boolean {
+  return process.env.SANDBOX === '1' || process.env.GITHUB_ACTIONS === 'true'
+}
+
 async function finishVariant(
   jobId: string,
   variantId: string,
@@ -574,10 +622,11 @@ async function finishVariant(
   let url: string
   if (r2Url) {
     url = versioned(r2Url)
-  } else if (process.env.SANDBOX) {
-    // On Vercel the VM (and its /tmp) is destroyed after this run, so a local
-    // /renders/ URL would 404 forever — a variant that looks "ready" but plays
-    // black. Fail loudly instead so it shows as failed and can be retried.
+  } else if (isEphemeralHost()) {
+    // On an ephemeral host (Vercel VM or GitHub runner) the disk is destroyed
+    // after this run, so a local /renders/ URL would 404 forever — a variant
+    // that looks "ready" but plays black. Fail loudly instead so it shows as
+    // failed and can be retried.
     await markVariant(jobId, variantId, 'failed', null, 'Could not upload the finished video to storage. Please retry this variant.')
     return
   } else {
@@ -657,6 +706,18 @@ async function submagicSkippedCleanAudio(jobId: string, variantId: string): Prom
   }
 }
 
+// The job's color look is stored per-variant in the variants jsonb (same slot
+// as music_mode), so it needs no schema migration. 'smart' when unset.
+async function readVariantGradeMode(jobId: string, variantId: string): Promise<GradeMode> {
+  try {
+    const { data: job } = await supabaseAdmin().from('video_jobs').select('variants').eq('id', jobId).single()
+    const v = ((job?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
+    return ((v?.grade_mode as GradeMode | undefined)) ?? 'smart'
+  } catch {
+    return 'smart'
+  }
+}
+
 export async function finalizeSubmagicVariant(
   jobId: string,
   variantId: string,
@@ -705,14 +766,26 @@ export async function finalizeSubmagicVariant(
     // safety net. Every other Submagic render is cleaned in-render and is left
     // exactly as Submagic returned it.
     const skippedCleanAudio = await submagicSkippedCleanAudio(jobId, variantId)
-    let finalUrl: string
-    try {
-      finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio)
-      console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
-    } catch (e) {
-      // Fall back to Submagic's own URL rather than failing the variant —
-      // still playable right now, just not pulled into our own storage.
-      console.warn(`[motion-renderer] could not retrieve Submagic result for ${key}, keeping their hosted URL:`, (e as Error).message)
+    const gradeMode = await readVariantGradeMode(jobId, variantId)
+    // Retrieval runs the whole finish chain (download → grade → effects → music
+    // → SFX → R2 upload) and re-downloads fresh each attempt, so it's safe to
+    // retry. Most failures here are TRANSIENT (network / TLS "bad record mac" /
+    // R2 blip) — retrying instead of immediately falling back is what keeps a
+    // variant off the engine's EXPIRING url, which would play now but go black
+    // hours later. Only after retries exhaust do we accept the hosted url (still
+    // usable now; the status-route heal re-pulls it on later polls).
+    let finalUrl: string | null = null
+    for (let attempt = 1; attempt <= 3 && finalUrl === null; attempt++) {
+      try {
+        finalUrl = await retrieveAndStoreSubmagicResult(jobId, variantId, submagicDownloadUrl, musicCtx, skippedCleanAudio, gradeMode)
+        console.log(`[motion-renderer] Submagic result retrieved into Olympus storage for ${key}`)
+      } catch (e) {
+        console.warn(`[motion-renderer] retrieve attempt ${attempt}/3 failed for ${key}:`, (e as Error).message)
+        if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 4000))
+      }
+    }
+    if (finalUrl === null) {
+      console.warn(`[motion-renderer] all retrieve attempts failed for ${key}, falling back to the engine's hosted URL (heal will re-pull)`)
       finalUrl = submagicDownloadUrl
     }
     await patchVariant(
@@ -749,6 +822,7 @@ export async function retrieveAndStoreSubmagicResult(
   downloadUrl: string,
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
   skippedCleanAudio: boolean = false,
+  gradeMode: GradeMode = 'smart',
 ): Promise<string> {
   const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
@@ -788,10 +862,11 @@ export async function retrieveAndStoreSubmagicResult(
       console.warn('[motion-renderer] residual-silence trim failed, keeping as-is:', (e as Error).message)
     }
 
-    // Warm & vibrant grade — phone footage out of Submagic reads flat/cold.
-    // Best-effort; a grade failure never loses the video.
+    // Color grade — phone footage out of Submagic reads flat/cold. The look is
+    // the job's chosen mode ('smart' default). Best-effort; a grade failure
+    // never loses the video.
     try {
-      await applyColorGrade(localPath)
+      await applyColorGrade(localPath, gradeMode)
     } catch (e) {
       console.warn('[motion-renderer] color grade failed, keeping as-is:', (e as Error).message)
     }
@@ -805,6 +880,11 @@ export async function retrieveAndStoreSubmagicResult(
     } catch (e) {
       console.warn('[motion-renderer] visual transitions failed, keeping as-is:', (e as Error).message)
     }
+
+    // Step 4/4 of the v1-v3 journey (see start-variant + status routes): grading
+    // and effects are done, now music + sound. setVariantProgress is best-effort
+    // internally, so a progress-write failure never affects the render.
+    await setVariantProgress(jobId, variantId, 4, 4, 'Adding music & finishing')
 
     // Add our own library music on top of the finished Submagic video, so v1-v3
     // share the exact v4/v5 music system (mood match, best-part offset, ducking,
@@ -835,9 +915,10 @@ export async function retrieveAndStoreSubmagicResult(
     console.warn(`[motion-renderer] finished-video R2 upload failed, falling back to local URL:`, (e as Error).message)
     return null
   })
-  // On Vercel a local /renders/ URL 404s once the VM is gone — surface the
-  // failure instead of returning a dead URL. Long-lived servers keep the file.
-  if (!r2Url && process.env.SANDBOX) {
+  // On an ephemeral host (Vercel VM / GitHub runner) a local /renders/ URL 404s
+  // once the machine is gone — surface the failure instead of returning a dead
+  // URL. Long-lived servers keep the file on disk.
+  if (!r2Url && isEphemeralHost()) {
     throw new Error('Could not upload the finished video to storage. Please retry this variant.')
   }
   return versioned(r2Url ?? `/renders/${jobId}/${fileName}`)
@@ -1347,7 +1428,9 @@ async function stageCustomBroll(
       const outPath = path.join(cacheDir, fileName)
       if (!fs.existsSync(outPath)) {
         const rawPath = outPath + '.raw'
-        await downloadFile(entry.url, rawPath)
+        // Prefer the normalized R2 copy from a previous prep — faster and immune
+        // to Drive's confirm-page quirks on re-renders.
+        await downloadFile((entry as CustomBrollEntry).r2Url ?? entry.url, rawPath)
         // Normalize to h264/yuv420p 30fps, audio stripped — OffthreadVideo-safe
         // regardless of what the phone/Drive produced (HEVC, odd rotation).
         await run(
@@ -1431,10 +1514,22 @@ async function renderRemotionEdit(
     // detected silences ride along as the second cut signal (word timings can
     // stretch across real pauses and hide them from gap-based cutting).
     await setVariantProgress(jobId, variantId, 3, STEPS, 'Planning cuts and captions')
-    const words = await transcribeLocalFile(workPath)
-    const silences = await detectSilences(workPath)
-    const duration = await getVideoDuration(workPath)
-    const dimensions = await probeVideoDimensions(workPath)
+    // These four all read workPath and don't depend on each other — run them
+    // together instead of serially (overlaps the slow Scribe call with the
+    // ffmpeg/ffprobe passes).
+    const [words, silences, duration, dimensions] = await Promise.all([
+      transcribeLocalFile(workPath),
+      detectSilences(workPath),
+      getVideoDuration(workPath),
+      probeVideoDimensions(workPath),
+    ])
+    // A talking-head clip that comes back with almost no words means the
+    // transcription failed (empty 200 from Scribe, wrong audio track) — NOT a
+    // silent video. Shipping it anyway produces a "ready" edit with no cuts, no
+    // captions, and no B-roll. Fail loudly instead so the user retries.
+    if (words.length < 5 && duration > 8) {
+      throw new Error('Transcription came back empty — could not read the speech in this clip. Please retry this variant.')
+    }
 
     // Pace, page length, and casing all come from the variant's template —
     // every variant shares this same engine underneath.
@@ -1804,7 +1899,7 @@ async function renderRemotionEdit(
       matte: matte ?? undefined,
       graphics: graphics.length ? graphics : undefined,
       tag,
-      grade: kit.grade,
+      grade: resolveEditGrade(opts.gradeMode, kit.grade),
       hookSpotlight: kit.hookSpotlight,
       handheld: kit.handheld,
       splits: broll.filter(b => b.layout === 'split').map(b => ({ start: b.start, end: b.start + b.duration })),
@@ -1816,7 +1911,7 @@ async function renderRemotionEdit(
 
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
     await enqueueRemotionRender(async () => {
-      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering edit in Remotion')
+      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering your edit')
       // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
       // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
       // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
@@ -1910,6 +2005,7 @@ export interface RenderVariantOptions {
   submagicMagicBrolls?: boolean    // Submagic's own stock B-roll
   submagicMagicZooms?: boolean     // Submagic's own zoom-ins
   musicMode?: MusicMode            // per-render music choice (smart / off); defaults to 'smart'
+  gradeMode?: GradeMode            // per-job color look (smart / golden / clean / moody / off)
   // Creator-supplied B-roll (Drive links stored on the job). When present,
   // stock B-roll is skipped entirely and these clips are matched to
   // transcript moments instead.
@@ -1937,7 +2033,7 @@ async function renderSmartCinematic(
     cleanTempFiles(outDir, variantId)
     const outputPath = path.join(outDir, `${variantId}.mp4`)
 
-    await setVariantProgress(jobId, variantId, step++, STEPS, 'Editing with Submagic')
+    await setVariantProgress(jobId, variantId, step++, STEPS, 'AI editing engine at work')
     const submagicSourceUrl = await getSubmagicSourceUrl(jobId, sourceUrl)
 
     // V2: one Gemini read of the footage (shared/cached across variants) drives
@@ -2048,7 +2144,14 @@ export async function runSingleVariant(
   try {
     await launch()
   } catch (e) {
+    // MUST mark the variant failed here — not just log. renderRemotionEdit and
+    // the caption/motion-graphics test paths can throw before they set up their
+    // own error handling (e.g. empty transcription), and renderEditVariantTask
+    // has no catch of its own. Without this the variant sits 'processing' with
+    // no progress ("Connecting to pipeline…") until the 45-min sweep, and the UI
+    // offers no Retry while processing — a frozen, unrecoverable card.
     console.error('[motion-renderer] runSingleVariant fatal:', e)
+    await markVariant(jobId, variantId, 'failed', null, (e as Error).message || 'The render failed to start. Please retry this variant.').catch(() => {})
   } finally {
     clearTimeout(timeoutId)
     active.delete(key)
@@ -2076,6 +2179,61 @@ export function startSingleVariant(
 // Downloads + compresses the job's footage and uploads it to R2, writing prep
 // progress onto the pending variants; marks the whole job failed if the
 // footage can't be fetched.
+// Once-per-job custom B-roll prep. Enriches each video_jobs.custom_broll
+// entry with: a normalized copy hosted in R2 (deleted with the job), the
+// Submagic user-media id, a one-line description, and transcript-matched
+// placements. v1-v3 turn those into timed Submagic items; v4-v6 reuse the
+// R2 copies + descriptions for their own per-variant planning.
+async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string): Promise<void> {
+  const db = supabaseAdmin()
+  const { data: job } = await db.from('video_jobs').select('custom_broll').eq('id', jobId).single()
+  const entries = (job?.custom_broll ?? null) as CustomBrollEntry[] | null
+  if (!entries?.length) return
+
+  console.log(`[custom-broll] preparing ${entries.length} clip(s) for job ${jobId.slice(0, 8)}`)
+  const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
+  const clips = await stageCustomBroll(jobId, entries, cacheDir, 'edit-cache')
+  if (!clips.length) return
+
+  // Host each normalized clip in R2 ({jobId}/custom-broll-i.mp4 — cleaned up
+  // by deleteJobStorage) and register it with Submagic.
+  for (let i = 0; i < clips.length; i++) {
+    const entry = entries[i]
+    if (!entry) continue
+    entry.duration = clips[i].duration
+    if (!entry.r2Url) {
+      try {
+        entry.r2Url = await uploadToStorage(path.join(REMOTION_DIR, 'public', clips[i].file), `custom-broll-${i}.mp4`, jobId)
+      } catch (e) {
+        console.warn(`[custom-broll] R2 upload failed for clip ${i}:`, (e as Error).message)
+      }
+    }
+    if (entry.r2Url && !entry.submagicMediaId) {
+      entry.submagicMediaId = await createSubmagicUserMedia(entry.r2Url)
+    }
+  }
+
+  // Transcript-matched placements from the SOURCE timeline (items are placed
+  // on the source video Submagic receives, before its silence cuts).
+  try {
+    const words = await transcribeLocalFile(sourceLocalPath)
+    const duration = await getVideoDuration(sourceLocalPath)
+    const placed = await planCustomBrollSlots(words.map(w => ({ ...w, segmentIndex: 0 })), duration, null, clips, [], false)
+    for (const entry of entries) entry.placements = []
+    for (const item of placed) {
+      const idx = clips.findIndex(c => c.file === item.file)
+      if (idx >= 0 && entries[idx]) {
+        entries[idx].placements!.push({ start: item.start, end: Number((item.start + item.duration).toFixed(2)) })
+      }
+    }
+    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${clips.length} clip(s)`)
+  } catch (e) {
+    console.warn('[custom-broll] placement planning failed (v1-v3 will render without items):', (e as Error).message)
+  }
+
+  await db.from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
+}
+
 export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
   const db = supabaseAdmin()
 
@@ -2097,6 +2255,16 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
   try {
     const prepared = await prepareJobSource(jobId, sourceUrl, writePrepProgress)
     console.log(`[motion-renderer] source prepared job=${jobId} local=${prepared.localPath}`)
+
+    // Custom B-roll prep (once per job, best-effort): normalize + describe the
+    // creator's clips, host them in R2, register them with Submagic, and plan
+    // transcript-matched placements that every Submagic variant will reuse.
+    try {
+      await prepareCustomBrollForJob(jobId, prepared.localPath)
+    } catch (e) {
+      console.warn(`[motion-renderer] custom B-roll prep failed (renders proceed without it):`, (e as Error).message)
+    }
+
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
       v.status === 'pending' ? { ...v, progress: null } : v
@@ -2168,6 +2336,7 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     submagicMagicBrolls: variant.submagicMagicBrolls as boolean | undefined,
     submagicMagicZooms: variant.submagicMagicZooms as boolean | undefined,
     musicMode: variant.music_mode as MusicMode | undefined,
+    gradeMode: (variant.grade_mode as GradeMode | undefined),
     customBroll: (job.custom_broll as { url: string; description?: string | null }[] | null) ?? undefined,
   })
 }

@@ -209,7 +209,7 @@ export type ShortEditProps = {
   // Koe red-line tag (name or CTA), mono type with a drawn red vertical rule.
   tag?: { line1: string; line2?: string; start: number; durationSec: number }
   // Subtle cinematic grade + vignette on the footage.
-  grade?: 'cinematic' | 'warm'
+  grade?: 'cinematic' | 'warm' | 'clean'
   // Julie's opening focus effect: edges darken, subject stays bright (~2.4s).
   hookSpotlight?: boolean
   // Eubank: tiny organic position/rotation drift on every shot — the reference
@@ -252,7 +252,7 @@ const SegmentClip: React.FC<{
   koe?: boolean
   eubank?: boolean
   handheld?: boolean
-  grade?: 'cinematic' | 'warm'
+  grade?: 'cinematic' | 'warm' | 'clean'
   widthPx: number
   matte?: { file: string; durationSec: number }
   behindPages?: ShortEditPage[]
@@ -317,9 +317,11 @@ const SegmentClip: React.FC<{
           width: '100%',
           height: '100%',
           objectFit: 'cover',
-          // cinematic = moody desaturated (v6); warm = sunnier, richer color
+          // cinematic = moody desaturated (v6); warm = sunnier, richer color;
+          // clean = crisp + slightly richer, no warmth shift (true-to-life)
           filter: grade === 'cinematic' ? 'contrast(1.07) saturate(0.86) brightness(0.96)'
             : grade === 'warm' ? 'contrast(1.06) sepia(0.08) saturate(1.22) brightness(1.02)'
+            : grade === 'clean' ? 'contrast(1.07) saturate(1.08)'
             : undefined,
         }}
       />

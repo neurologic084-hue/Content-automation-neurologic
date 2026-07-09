@@ -2,6 +2,7 @@ import FormData from 'form-data'
 import { chatCompletion, MODELS } from './openrouter'
 import type { CaptionLane } from './variant-specs'
 import type { ContentProfile } from './video-analysis'
+import type { GradeMode } from './color-grade'
 
 // Per-render background-music choice, picked in the video studio and stored on
 // each variant. 'smart' = pick a mood-matched track from the curated library
@@ -11,6 +12,19 @@ import type { ContentProfile } from './video-analysis'
 export type MusicMode = 'smart' | 'off'
 
 export const DEFAULT_MUSIC_MODE: MusicMode = 'smart'
+
+// One creator-supplied B-roll clip attached to a job. Enriched in the
+// prepare-source task: normalized copy in R2, Submagic user-media id, a
+// one-line description (Gemini), and transcript-matched placements shared by
+// all Submagic variants.
+export interface CustomBrollEntry {
+  url: string
+  description?: string | null
+  r2Url?: string | null
+  duration?: number | null
+  submagicMediaId?: string | null
+  placements?: { start: number; end: number }[]
+}
 
 export interface SubmagicPreset {
   // Fully autonomous mode   Submagic handles everything (music, B-roll, cuts, style)
@@ -60,6 +74,10 @@ export interface VideoVariant extends VideoVariantDef {
   // Per-render music choice for this job (same for every variant). Read by the
   // render path to decide source / whether to add music at all.
   music_mode?: MusicMode
+  // Color-grade look for this job (same for every variant). 'smart' = each
+  // variant's signature look; otherwise a single look forced across all.
+  // Stored per-variant in this jsonb so it needs no schema migration.
+  grade_mode?: GradeMode
   // ISO timestamp stamped when the variant enters 'processing', cleared when it
   // reaches ready/failed. Lets the status route detect a variant whose worker
   // VM was killed before it could write its own failure (a silent forever-spin).
@@ -213,6 +231,10 @@ export interface SubmagicJobOptions {
   removeBadTakes?: boolean
   cleanAudio?: boolean
   musicTrackId?: string
+  // Timed creator B-roll: clips previously uploaded to Submagic user-media,
+  // placed at source-timeline seconds. Layouts: full, split-50-50,
+  // pip-top-right, pip-bottom-right, split-35-65 (+ -bordered variants).
+  items?: Array<{ type: 'user-media'; startTime: number; endTime: number; userMediaId: string; layout: string }>
 }
 
 interface SubmagicTemplateOption {
@@ -605,6 +627,30 @@ export async function fetchSubmagicAudioTrack(
   }
 }
 
+// Upload a hosted clip (e.g. its R2 public URL) into Submagic's user-media
+// library so timed items can reference it. Returns the userMediaId, or null
+// on failure (custom B-roll then degrades to no cutaways, never a dead render).
+export async function createSubmagicUserMedia(url: string): Promise<string | null> {
+  try {
+    const res = await fetch('https://api.submagic.co/v1/user-media', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      console.warn(`[submagic] user-media upload failed (${res.status}): ${text.slice(0, 200)}`)
+      return null
+    }
+    const data = JSON.parse(text) as { userMediaId?: string; id?: string }
+    return data.userMediaId ?? data.id ?? null
+  } catch (e) {
+    console.warn('[submagic] user-media upload error:', (e as Error).message)
+    return null
+  }
+}
+
 export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
@@ -624,6 +670,7 @@ export async function submitSubmagicJob(
         templateName: opts.templateName,
         magicBrolls: opts.magicBrolls ?? false,
         magicZooms: opts.magicZooms ?? false,
+        ...(opts.items?.length ? { items: opts.items } : {}),
         cleanAudio: opts.cleanAudio ?? true,
         removeSilencePace: opts.removeSilencePace ?? 'extra-fast',
         removeBadTakes: opts.removeBadTakes ?? false,
@@ -674,7 +721,15 @@ export async function pollSubmagicJob(projectId: string): Promise<{
     headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
   })
 
-  if (!res.ok) return { status: 'failed', previewUrl: null, downloadUrl: null, error: 'Poll failed' }
+  // A non-OK status here is almost always a TRANSIENT blip — a 429/5xx/gateway
+  // hiccup during frequent polling of a project that's still rendering fine.
+  // Reporting 'failed' would kill a healthy render and burn a fresh re-run, so
+  // treat it as still-processing; a genuinely dead project is caught later by
+  // the poll-loop timeout / 45-min stale sweep instead of on one bad response.
+  if (!res.ok) {
+    console.warn(`[submagic] poll got HTTP ${res.status} for ${projectId} — treating as still-processing`)
+    return { status: 'processing', previewUrl: null, downloadUrl: null, error: null }
+  }
 
   const data = await res.json()
 

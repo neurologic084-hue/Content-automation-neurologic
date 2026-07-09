@@ -6,9 +6,26 @@ import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 
+// Custom B-roll works end-to-end (all 6 variants) but the input is hidden to
+// keep the client UI simple. Set to false to show it again — nothing else
+// needs to change.
+const HIDE_CUSTOM_BROLL = true
+
 const MUSIC_OPTIONS: { value: MusicMode; label: string; hint: string }[] = [
   { value: 'smart', label: 'Smart',    hint: 'Mood-matched track from the library' },
   { value: 'off',   label: 'No music', hint: 'Voice only' },
+]
+
+// Color look. 'smart' lets each variant keep its signature grade; the others
+// force one consistent look across every variant. Mirrors GradeMode in
+// lib/color-grade.ts (kept inline so no server module reaches the client bundle).
+type GradeMode = 'smart' | 'golden' | 'clean' | 'moody' | 'off'
+const GRADE_OPTIONS: { value: GradeMode; label: string; hint: string }[] = [
+  { value: 'smart',  label: 'Smart',   hint: "Each style's own look" },
+  { value: 'golden', label: 'Golden',  hint: 'Warm & sunny' },
+  { value: 'clean',  label: 'Clean',   hint: 'Crisp, true-to-life' },
+  { value: 'moody',  label: 'Moody',   hint: 'Dark & cinematic' },
+  { value: 'off',    label: 'Natural', hint: 'As filmed' },
 ]
 
 interface Script {
@@ -25,14 +42,16 @@ interface Props {
 }
 
 const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = {
-  submagic:    { bg: '#EEF2FF', text: '#6366F1', label: 'Submagic' },
-  edit:        { bg: '#FFF3EF', text: '#FF4F17', label: 'Edit' },
+  // White-label names — vendor tools stay behind the curtain in the client UI.
+  submagic:    { bg: '#EEF2FF', text: '#6366F1', label: 'Edit Engine' },
+  edit:        { bg: '#FFF3EF', text: '#FF4F17', label: 'Motion Lab' },
 }
 
 export function VideoStudio({ script, existingJobId }: Props) {
   const [driveUrl, setDriveUrl] = useState('')
   const [customBrollText, setCustomBrollText] = useState('')
   const [musicMode, setMusicMode] = useState<MusicMode>('smart')
+  const [gradeMode, setGradeMode] = useState<GradeMode>('smart')
   const [jobId, setJobId] = useState<string | null>(existingJobId)
   // 'loading': have an existing job but haven't fetched its real status yet
   const [status, setStatus] = useState<'idle' | 'loading' | 'submitting' | 'processing' | 'complete' | 'error'>(
@@ -146,6 +165,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
         scriptId: script.id,
         driveUrl,
         musicMode,
+        gradeMode,
         customBroll: customBrollText.split('\n').map(l => l.trim()).filter(Boolean),
       }),
     })
@@ -190,8 +210,37 @@ export function VideoStudio({ script, existingJobId }: Props) {
     }
   }
 
+  // One-click: kick off every variant that hasn't started (or failed) at once.
+  // The backend serializes each variant's writes per-job, so firing all six in
+  // parallel is safe.
+  async function handleStartAll() {
+    if (!jobId || isPreparingSource) return
+    const targets = variants.filter(v => v.status === 'pending' || v.status === 'failed')
+    if (!targets.length) return
+    setStartingVariants(prev => { const s = new Set(prev); targets.forEach(v => s.add(v.id)); return s })
+    setStatus('processing')
+    try {
+      await Promise.all(
+        targets.map(v =>
+          fetch('/api/video/start-variant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jobId, variantId: v.id, force: v.status === 'failed' }),
+          }).catch(() => {}),
+        ),
+      )
+      startPolling(jobId)
+    } finally {
+      setStartingVariants(prev => { const s = new Set(prev); targets.forEach(v => s.delete(v.id)); return s })
+    }
+  }
+
   const prepProgress = variants.find(v => v.status === 'pending' && v.progress)?.progress ?? null
   const isPreparingSource = !!prepProgress && variants.length > 0 && variants.every(v => v.status === 'pending')
+  // One-click affordance: how many variants can still be kicked off, and whether
+  // a bulk start is already in flight.
+  const startableCount = variants.filter(v => v.status === 'pending' || v.status === 'failed').length
+  const bulkStarting = startableCount > 0 && variants.filter(v => v.status === 'pending' || v.status === 'failed').every(v => startingVariants.has(v.id))
   const overallReadyTotal = variants.filter(v => v.status !== 'pending').length || variants.length || 5
   const overallPercent = isPreparingSource
     ? Math.round((prepProgress.step / prepProgress.total) * 100)
@@ -307,8 +356,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
             onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
           />
 
-          {/* Custom B-roll (optional) */}
-          <div className="mb-4">
+          {/* Custom B-roll (optional) — feature works end-to-end but is hidden
+              for now to keep the client UI simple. Flip HIDE_CUSTOM_BROLL to
+              false to bring the field back; the whole pipeline reactivates. */}
+          <div className="mb-4" hidden={HIDE_CUSTOM_BROLL}>
             <p className="text-xs font-semibold text-[#71717A] mb-1.5">Your own B-roll <span className="font-normal text-[#A1A1AA]">(optional)</span></p>
             <textarea
               placeholder={"Google Drive links to your own B-roll clips, one per line.\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
@@ -347,7 +398,35 @@ export function VideoStudio({ script, existingJobId }: Props) {
                 )
               })}
             </div>
-            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Source choice applies to the Edit variants. Submagic variants use their own music (this only toggles it on/off for those).</p>
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Source choice applies to the Motion Lab variants. Edit Engine variants pick their own matching track (this only toggles music on/off for those).</p>
+          </div>
+
+          {/* Color look */}
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-[#71717A] mb-1.5">Color look</p>
+            <div className="flex flex-wrap gap-2">
+              {GRADE_OPTIONS.map(opt => {
+                const active = gradeMode === opt.value
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setGradeMode(opt.value)}
+                    className="text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer flex-1"
+                    style={{
+                      minWidth: 96,
+                      borderColor: active ? '#FF4F17' : '#E4E4E0',
+                      background: active ? '#FFF3EF' : '#FAFAFA',
+                      outline: active ? '1.5px solid #FF4F17' : 'none',
+                    }}
+                  >
+                    <span className="block text-xs font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
+                    <span className="block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Smart gives each style its own grade. Pick a look to apply the same one across all six.</p>
           </div>
 
           {error && <p className="text-xs text-[#EF4444] mb-3">{error}</p>}
@@ -400,6 +479,30 @@ export function VideoStudio({ script, existingJobId }: Props) {
             </div>
           )}
 
+          {/* One-click: generate every variant at once */}
+          {!isPreparingSource && startableCount > 1 && (
+            <button
+              onClick={handleStartAll}
+              disabled={bulkStarting}
+              className="w-full h-12 rounded-2xl text-sm font-semibold text-white cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+              style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.28)' }}
+            >
+              {bulkStarting ? (
+                <>
+                  <span className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                  Starting all {startableCount} variants...
+                </>
+              ) : (
+                <>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M5 3l14 9-14 9V3z" />
+                  </svg>
+                  Generate all {startableCount} variants
+                </>
+              )}
+            </button>
+          )}
+
           {/* Variants grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {(variants.length ? variants : Array.from({ length: 1 })).map((variant, i) => {
@@ -408,10 +511,16 @@ export function VideoStudio({ script, existingJobId }: Props) {
               const isReady = v?.status === 'ready'
               const isSelected = selectedVariant === v?.id
               const isStarting = v?.id ? startingVariants.has(v.id) : false
-              // Submagic variants included: retry sends force=true so the
-              // backend submits a fresh project instead of reusing the old one.
+              // retry sends force=true so the backend submits a fresh project
+              // instead of reusing the old one.
               const canRetryReady = true
               const toolMeta = v ? TOOL_COLOR[v.tool] : null
+              // Honest progress: a step-based bar otherwise pins at 100% the
+              // whole time the last (long-running) step is still working, which
+              // reads as "stuck at 100%". Cap at 95% until the variant is truly
+              // ready so 100% always means done.
+              const rawPct = v?.progress ? (v.progress.step / v.progress.total) * 100 : 0
+              const shownPct = isReady ? 100 : Math.min(95, Math.round(rawPct))
 
               return (
                 <div
@@ -469,14 +578,14 @@ export function VideoStudio({ script, existingJobId }: Props) {
                               </span>
                             </div>
                             <span className="text-[13px] font-bold tabular-nums" style={{ color: '#FF4F17' }}>
-                              {v?.progress ? `${Math.round((v.progress.step / v.progress.total) * 100)}%` : '0%'}
+                              {`${shownPct}%`}
                             </span>
                           </div>
                           <div className="w-full bg-[#E4E4E0] rounded-full overflow-hidden" style={{ height: 4 }}>
                             <div
                               className="h-full rounded-full transition-all duration-700"
                               style={{
-                                width: v?.progress ? `${(v.progress.step / v.progress.total) * 100}%` : '0%',
+                                width: `${shownPct}%`,
                                 background: '#FF4F17',
                               }}
                             />
