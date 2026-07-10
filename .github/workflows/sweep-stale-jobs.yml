@@ -1,0 +1,32 @@
+# Stuck-render watchdog. A variant whose worker VM dies mid-render can't write
+# its own 'failed' — without a scheduled sweep it sits 'processing' forever
+# unless someone happens to have the studio open (the status route sweeps too,
+# but only while a browser polls). Vercel's free plan only allows daily crons,
+# so the every-15-min sweep lives here instead — the repo is public, so
+# Actions minutes are free.
+#
+# Note: GitHub only runs scheduled workflows from the DEFAULT branch, so this
+# starts working once merged to main. Uses the same repo secrets as
+# render-task.yml — no new setup needed.
+name: Sweep stale video jobs
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sweep-stale-jobs
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sweep stale jobs
+        run: node .github/scripts/sweep-stale-jobs.mjs
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
