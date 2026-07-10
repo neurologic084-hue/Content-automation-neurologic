@@ -36,6 +36,13 @@ export async function proxy(request: NextRequest) {
     return supabaseResponse
   }
 
+  // Cron routes are invoked by Vercel's scheduler, which carries no Supabase
+  // session — they authenticate themselves via CRON_SECRET (checked in the
+  // route) and only sweep internal state, never spend money.
+  if (pathname.startsWith('/api/cron/')) {
+    return supabaseResponse
+  }
+
   // API routes: every endpoint spends money (LLM, Tavily, Blotato, Submagic)
   // or takes actions on connected accounts — none are public. Return 401 JSON
   // instead of a login redirect so client fetch() calls fail loudly.

@@ -215,11 +215,19 @@ export function VideoStudio({ script, existingJobId }: Props) {
     if (preparingSource) return
     setStartingVariants(prev => new Set(prev).add(variantId))
     try {
-      await fetch('/api/video/start-variant', {
+      const res = await fetch('/api/video/start-variant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobId, variantId, force }),
       })
+      // A declined start (e.g. 409 while the footage is still being prepared)
+      // used to vanish silently — the card just didn't move. Show the reason.
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(data.error ?? 'Could not start this variant. Try again in a moment.')
+        return
+      }
+      setError(null)
       setStatus('processing')
       startPolling(jobId)
     } finally {

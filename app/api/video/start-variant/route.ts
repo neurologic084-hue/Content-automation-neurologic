@@ -18,6 +18,9 @@ import {
 import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
 import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
+import { rendersDir } from '@/lib/paths'
+import fs from 'fs'
+import path from 'path'
 import type { ContentProfile } from '@/lib/video-analysis'
 import type { MusicMode, VideoVariant, CustomBrollEntry } from '@/lib/video-pipeline'
 
@@ -93,6 +96,33 @@ export async function POST(req: NextRequest) {
     : storedVariant
   if (!variant) {
     return NextResponse.json({ error: 'Variant not found.' }, { status: 400 })
+  }
+
+  // Source-prep guard: starting a variant while prepare-source is still running
+  // spawns a second prep of the same footage (observed under test: duplicate
+  // transcription spend + a tmp-rename crash surfacing a raw ENOENT to the
+  // user). Within the prep window, only allow a start once the compressed
+  // source exists locally (in-process mode) or in R2 (cross-process). After the
+  // grace window, let it through — the render task self-heals from R2/Drive,
+  // and blocking forever on a failed best-effort R2 backup would be worse than
+  // the race. A prep that already failed terminally skips the guard so its
+  // retry isn't told to keep waiting.
+  const SOURCE_PREP_GRACE_MS = 12 * 60 * 1000
+  const prepFailed = variant.status === 'failed' && (variant.error ?? '').startsWith('Could not prepare the footage')
+  if (!prepFailed && Date.now() - new Date(job.created_at).getTime() < SOURCE_PREP_GRACE_MS) {
+    let sourceReady = fs.existsSync(path.join(rendersDir(jobId), 'source-compressed.mp4'))
+    if (!sourceReady && process.env.R2_PUBLIC_URL) {
+      sourceReady = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/source-compressed.mp4`, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(5_000),
+      }).then(r => r.ok).catch(() => false)
+    }
+    if (!sourceReady) {
+      return NextResponse.json(
+        { error: 'The footage is still being prepared — give it a moment and try again.' },
+        { status: 409 },
+      )
+    }
   }
 
   if (variant.tool === 'edit') {

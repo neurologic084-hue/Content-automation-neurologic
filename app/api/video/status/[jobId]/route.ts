@@ -7,6 +7,8 @@ import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
 import { explainFailure } from '@/lib/error-explain'
 import { rendersDir } from '@/lib/paths'
 import { patchVariant } from '@/lib/job-lock'
+import { sweepStaleVariants } from '@/lib/stale-sweep'
+import { notifyOps } from '@/lib/notify'
 import fs from 'fs'
 import path from 'path'
 
@@ -62,40 +64,13 @@ export async function GET(
     return NextResponse.json({ error: 'Job not found.' }, { status: 404 })
   }
 
-  // Stale sweep: a variant whose worker VM was killed mid-render (OOM, Vercel
-  // hard-kill) never gets to write its own 'failed', so it spins forever. The
-  // sandbox itself caps at 40 min, so anything 'processing' past 45 min from
-  // its start stamp is definitively dead — fail it so the UI stops spinning and
-  // the retry button appears. No false positives: real renders finish well
-  // under the cap, and the stamp is per-variant (not job-age), so a variant
-  // started hours after the job was created is timed from when IT started.
+  // Stale sweep: fail any variant whose worker died mid-render so the UI stops
+  // spinning and the retry button appears. Shared with /api/cron/sweep, which
+  // covers the closed-tab case — this inline call just keeps the studio's view
+  // fresh between cron ticks. Rules and rationale live in lib/stale-sweep.ts.
   {
-    const STALE_MS = 45 * 60 * 1000
-    // A much shorter cap for variants that have reported NO progress at all
-    // (progress still null). That means the render task never checked in — the
-    // Sandbox VM failed to launch or died during bootstrap — so there's no
-    // reason to wait the full 45 min. A real render emits its first progress
-    // ('Preparing footage' / 'Downloading footage') within a minute or two.
-    const NEVER_STARTED_MS = 12 * 60 * 1000
-    const now = Date.now()
-    const stale = ((job.variants ?? []) as VideoVariant[]).filter(v => {
-      if (v.status !== 'processing' || !v.processing_started_at) return false
-      const age = now - new Date(v.processing_started_at).getTime()
-      const neverStarted = !v.progress && age > NEVER_STARTED_MS
-      return age > STALE_MS || neverStarted
-    })
-    for (const v of stale) {
-      const neverStarted = !v.progress
-      console.warn(`[video-status] variant ${jobId}:${v.id} ${neverStarted ? `never reported progress in ${NEVER_STARTED_MS / 60000}m` : `stuck processing past ${STALE_MS / 60000}m`} — marking failed`)
-      await patchVariant(supabase, jobId, v.id, {
-        status: 'failed',
-        error: neverStarted
-          ? 'The render didn\'t start (the worker never came up). Please retry this variant.'
-          : 'The render stopped unexpectedly (the worker was interrupted). Please retry this variant.',
-        progress: null,
-      }, { completeWhenAllDone: true })
-    }
-    if (stale.length) {
+    const swept = await sweepStaleVariants(supabase, jobId, (job.variants ?? []) as VideoVariant[], job.created_at)
+    if (swept > 0) {
       const { data: refreshed } = await supabase.from('video_jobs').select('*').eq('id', jobId).single()
       if (refreshed) Object.assign(job, refreshed)
     }
@@ -198,6 +173,12 @@ export async function GET(
         target.error = explainFailure(poll.error)
         target.progress = null
         variantsChanged = true
+        // This write bypasses patchVariant (bulk array update below), so alert
+        // ops here directly — same shape as the patchVariant failure alert.
+        notifyOps(
+          `🔴 Variant failed — job \`${jobId}\` ${target.id}: ${target.error}`,
+          { key: `variant-failed:${jobId}:${target.id}` },
+        )
       }
     }
   }

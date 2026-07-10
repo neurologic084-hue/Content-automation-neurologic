@@ -15,6 +15,7 @@ import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
+import { notifyOps } from './notify'
 import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
@@ -267,17 +268,24 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
   const outputPath = path.join(outDir, 'source-compressed.mp4')
   if (fs.existsSync(outputPath)) return outputPath
 
-  const tmpPath = path.join(outDir, 'source-compressed.tmp.mp4')
-  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch { /* best-effort */ }
+  // Unique per-call temp name: two concurrent preps (e.g. a variant started
+  // while prepare-source is still running) used to share one .tmp file — the
+  // first rename won and the second crashed with ENOENT. With unique names both
+  // renames succeed; the second atomically overwrites with identical content.
+  const tmpPath = path.join(outDir, `source-compressed.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}.mp4`)
 
-  await run(
-    `ffmpeg -y -i "${inputPath}" ` +
-    `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
-    `-c:a aac -b:a 128k -ar 48000 -movflags +faststart "${tmpPath}"`,
-    600_000,
-  )
-
-  fs.renameSync(tmpPath, outputPath)
+  try {
+    await run(
+      `ffmpeg -y -i "${inputPath}" ` +
+      `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
+      `-c:a aac -b:a 128k -ar 48000 -movflags +faststart "${tmpPath}"`,
+      600_000,
+    )
+    fs.renameSync(tmpPath, outputPath)
+  } finally {
+    // No-op after a successful rename; clears the orphan if ffmpeg failed.
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch { /* best-effort */ }
+  }
   return outputPath
 }
 
@@ -2287,6 +2295,12 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
   } catch (e) {
     console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
+    // This bulk write bypasses patchVariant, so alert ops directly — one alert
+    // for the whole job, not one per variant.
+    notifyOps(
+      `🔴 Source prep failed — job \`${jobId}\` (all variants failed): ${(e as Error).message}`,
+      { key: `prep-failed:${jobId}` },
+    )
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     const failedVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => ({
       ...v,

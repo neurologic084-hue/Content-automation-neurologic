@@ -697,6 +697,9 @@ export async function submitSubmagicJob(
     videoUrl: typeof body.videoUrl === 'string' ? `${body.videoUrl.slice(0, 120)}...` : body.videoUrl,
   }))
 
+  // Without a timeout a stalled connection here blocked the variant until the
+  // 30-min safety timer — 60s is generous for a JSON submit (the video itself
+  // is passed by URL, not uploaded in this request).
   const res = await fetch('https://api.submagic.co/v1/projects', {
     method: 'POST',
     headers: {
@@ -704,6 +707,7 @@ export async function submitSubmagicJob(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
   })
 
   if (!res.ok) {
@@ -723,8 +727,11 @@ export async function pollSubmagicJob(projectId: string): Promise<{
   downloadUrl: string | null
   error: string | null
 }> {
+  // 30s cap: a hung poll is worse than a failed one — every caller already
+  // tolerates a throw here (treated as "still processing" / retried next tick).
   const res = await fetch(`https://api.submagic.co/v1/projects/${projectId}`, {
     headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
+    signal: AbortSignal.timeout(30_000),
   })
 
   // A non-OK status here is almost always a TRANSIENT blip — a 429/5xx/gateway

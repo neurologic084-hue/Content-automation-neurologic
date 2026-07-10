@@ -1,3 +1,5 @@
+import { notifyOps } from './notify'
+
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 
 export const MODELS = {
@@ -69,6 +71,17 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
           console.warn(`[openrouter] ${opts.model} attempt ${attempt}/${MAX_ATTEMPTS} failed (${res.status}), retrying`)
           await sleep(RETRY_BASE_MS * attempt)
           continue
+        }
+        // Dead key / empty credits kills EVERY AI stage at once, and most
+        // callers degrade silently (fallback profile, kept takes, heuristic
+        // captions) — so the render "succeeds" and hides the outage. Alert the
+        // moment it happens; one alert per hour is plenty since every call
+        // fails identically until credits are topped up.
+        if (res.status === 401 || res.status === 402 || res.status === 403) {
+          notifyOps(
+            `🔴 OpenRouter auth/credit failure (HTTP ${res.status}) — AI stages are silently degrading on every render until this is fixed: ${err}`,
+            { key: 'openrouter-credits', dedupeMs: 60 * 60 * 1000 },
+          )
         }
         throw e
       }

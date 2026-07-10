@@ -8,8 +8,25 @@
 // Model is overridable via GEMINI_MODEL (default below) so we can bump
 // versions without a code change if the id ever 404s.
 
+import { notifyOps } from './notify'
+
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'google/gemini-3.5-flash'
+
+// Same retry discipline as lib/openrouter.ts: media-analysis calls used to be
+// a single fetch, so one transient blip (429, gateway hiccup, dropped socket)
+// failed the whole analysis and silently downgraded the render to the fallback
+// profile. 408/429/5xx and transient network errors get retried; real 4xx
+// (bad key, bad request) never do.
+const REQUEST_TIMEOUT_MS = 120_000
+const MAX_ATTEMPTS = 3
+const RETRY_BASE_MS = 1_500
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500
+}
 
 export interface InlineMedia {
   mimeType: string   // e.g. "audio/mp3", "video/mp4"
@@ -97,25 +114,57 @@ export async function geminiGenerate(opts: GenerateOptions): Promise<string> {
     ...(hasVideo ? { provider: { only: ['google-vertex'] } } : {}),
   }
 
-  const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  })
+  let lastError: Error | undefined
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gemini (OpenRouter) error ${res.status}: ${err.slice(0, 500)}`)
+      if (!res.ok) {
+        const err = (await res.text()).slice(0, 500)
+        const e = new Error(`Gemini (OpenRouter) error ${res.status}: ${err}`)
+        if (isRetryableStatus(res.status) && attempt < MAX_ATTEMPTS) {
+          lastError = e
+          console.warn(`[gemini] ${model} attempt ${attempt}/${MAX_ATTEMPTS} failed (${res.status}), retrying`)
+          await sleep(RETRY_BASE_MS * attempt)
+          continue
+        }
+        // Callers degrade silently on failure (fallback profile, no graphics),
+        // so a dead key would hide itself — alert ops directly. Shares the
+        // dedupe key with lib/openrouter.ts: same account, one alert.
+        if (res.status === 401 || res.status === 402 || res.status === 403) {
+          notifyOps(
+            `🔴 OpenRouter auth/credit failure (HTTP ${res.status}) — AI stages are silently degrading on every render until this is fixed: ${err.slice(0, 300)}`,
+            { key: 'openrouter-credits', dedupeMs: 60 * 60 * 1000 },
+          )
+        }
+        throw e
+      }
+
+      const data = await res.json()
+      const text: string = data?.choices?.[0]?.message?.content ?? ''
+      return text.trim()
+    } catch (e) {
+      const err = e as Error
+      const transient = err.name === 'TimeoutError' || err.name === 'AbortError' || /terminated|fetch failed|socket|ECONNRESET/i.test(err.message)
+      if (transient && attempt < MAX_ATTEMPTS) {
+        lastError = err
+        console.warn(`[gemini] ${model} attempt ${attempt}/${MAX_ATTEMPTS} ${err.name === 'TimeoutError' ? `timed out after ${REQUEST_TIMEOUT_MS / 1000}s` : err.message}, retrying`)
+        await sleep(RETRY_BASE_MS * attempt)
+        continue
+      }
+      throw err
+    }
   }
-
-  const data = await res.json()
-  const text: string = data?.choices?.[0]?.message?.content ?? ''
-  return text.trim()
+  throw lastError ?? new Error('Gemini (OpenRouter): exhausted retries')
 }
 
 // Convenience: a call expecting a JSON object back (responseSchema set).

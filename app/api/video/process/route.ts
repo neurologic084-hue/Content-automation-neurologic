@@ -114,6 +114,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: retry.error?.message ?? 'Could not start job.' }, { status: 500 })
     }
   } else if (error || !job) {
+    // 23503 = FK violation (scriptId not in scripts), 22P02 = not a valid uuid.
+    // Both mean "no such script" — say that instead of leaking raw Postgres.
+    if (error?.code === '23503' || error?.code === '22P02') {
+      return NextResponse.json({ error: 'Script not found. Refresh the page and try again.' }, { status: 404 })
+    }
     return NextResponse.json({ error: error?.message ?? 'Could not start job.' }, { status: 500 })
   }
 
