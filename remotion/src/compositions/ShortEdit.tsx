@@ -320,7 +320,7 @@ const SegmentClip: React.FC<{
           // cinematic = moody desaturated (v6); warm = sunnier, richer color;
           // clean = crisp + slightly richer, no warmth shift (true-to-life)
           filter: grade === 'cinematic' ? 'contrast(1.07) saturate(0.86) brightness(0.96)'
-            : grade === 'warm' ? 'contrast(1.06) sepia(0.08) saturate(1.22) brightness(1.02)'
+            : grade === 'warm' ? 'contrast(1.06) sepia(0.08) saturate(1.22) brightness(0.98)'
             : grade === 'clean' ? 'contrast(1.07) saturate(1.08)'
             : undefined,
         }}

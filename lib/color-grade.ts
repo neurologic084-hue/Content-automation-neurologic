@@ -28,7 +28,7 @@ export function normalizeGradeMode(raw: unknown): GradeMode {
 // (skips the filter); contrast/saturation 1.0 = untouched; brightness 0 = untouched.
 const FFMPEG_GRADES: Record<Exclude<GradeMode, 'off'>, { temperature: number; contrast: number; saturation: number; brightness: number }> = {
   smart:  { temperature: 5600, contrast: 1.06, saturation: 1.18, brightness: 0 },
-  golden: { temperature: 5200, contrast: 1.07, saturation: 1.24, brightness: 0.02 },
+  golden: { temperature: 5200, contrast: 1.07, saturation: 1.24, brightness: -0.01 },
   clean:  { temperature: 6500, contrast: 1.07, saturation: 1.08, brightness: 0 },
   moody:  { temperature: 6800, contrast: 1.09, saturation: 0.86, brightness: -0.04 },
 }
