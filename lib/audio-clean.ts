@@ -25,7 +25,6 @@ import { exec } from 'child_process'
 import { isolateVoiceInPlace } from './voice-isolation'
 import { pollSubmagicJob } from './video-pipeline'
 import { uploadToStorage, sweepStoragePrefix } from './storage'
-import { notifyOps } from './notify'
 
 const POLL_INTERVAL_MS = 5_000
 const POLL_DEADLINE_MS = 6 * 60_000
@@ -118,12 +117,6 @@ export async function cleanAudioInPlace(videoPath: string): Promise<AudioCleaner
       return 'submagic'
     } catch (e) {
       console.warn('[audio-clean] Submagic clean-audio failed/over-limit, falling back to ElevenLabs isolation:', (e as Error).message)
-      // A fallback hop usually means a plan limit or dead key — the render
-      // still succeeds, so without this alert nobody would ever know.
-      notifyOps(
-        `🟠 Audio clean: Submagic failed/over-limit, falling back to ElevenLabs isolation — ${(e as Error).message.slice(0, 200)}`,
-        { key: 'audio-clean:submagic-fallback' },
-      )
     }
   } else {
     console.warn('[audio-clean] SUBMAGIC_API_KEY not set — falling back to ElevenLabs isolation')

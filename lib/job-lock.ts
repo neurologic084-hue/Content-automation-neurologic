@@ -12,7 +12,6 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { VideoVariant } from './video-pipeline'
-import { notifyOps } from './notify'
 
 const chains = new Map<string, Promise<unknown>>()
 
@@ -50,15 +49,6 @@ export async function patchVariant(
   patch: Partial<VideoVariant>,
   opts: { completeWhenAllDone?: boolean; jobStatus?: string } = {},
 ): Promise<void> {
-  // Every variant failure in the app funnels through this write (render errors,
-  // launch errors, stale sweeps) — alert ops here so no failure is silent, even
-  // if the DB write below gets clobbered.
-  if (patch.status === 'failed') {
-    notifyOps(
-      `🔴 Variant failed — job \`${jobId}\` ${variantId}: ${patch.error ?? 'no error message'}`,
-      { key: `variant-failed:${jobId}:${variantId}` },
-    )
-  }
   await withJobLock(jobId, async () => {
     const MAX_TRIES = 4
     for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {

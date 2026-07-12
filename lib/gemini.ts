@@ -8,7 +8,6 @@
 // Model is overridable via GEMINI_MODEL (default below) so we can bump
 // versions without a code change if the id ever 404s.
 
-import { notifyOps } from './notify'
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'google/gemini-3.5-flash'
@@ -136,15 +135,6 @@ export async function geminiGenerate(opts: GenerateOptions): Promise<string> {
           console.warn(`[gemini] ${model} attempt ${attempt}/${MAX_ATTEMPTS} failed (${res.status}), retrying`)
           await sleep(RETRY_BASE_MS * attempt)
           continue
-        }
-        // Callers degrade silently on failure (fallback profile, no graphics),
-        // so a dead key would hide itself — alert ops directly. Shares the
-        // dedupe key with lib/openrouter.ts: same account, one alert.
-        if (res.status === 401 || res.status === 402 || res.status === 403) {
-          notifyOps(
-            `🔴 OpenRouter auth/credit failure (HTTP ${res.status}) — AI stages are silently degrading on every render until this is fixed: ${err.slice(0, 300)}`,
-            { key: 'openrouter-credits', dedupeMs: 60 * 60 * 1000 },
-          )
         }
         throw e
       }

@@ -8,7 +8,6 @@ import { explainFailure } from '@/lib/error-explain'
 import { rendersDir } from '@/lib/paths'
 import { patchVariant } from '@/lib/job-lock'
 import { sweepStaleVariants } from '@/lib/stale-sweep'
-import { notifyOps } from '@/lib/notify'
 import fs from 'fs'
 import path from 'path'
 
@@ -173,12 +172,6 @@ export async function GET(
         target.error = explainFailure(poll.error)
         target.progress = null
         variantsChanged = true
-        // This write bypasses patchVariant (bulk array update below), so alert
-        // ops here directly — same shape as the patchVariant failure alert.
-        notifyOps(
-          `🔴 Variant failed — job \`${jobId}\` ${target.id}: ${target.error}`,
-          { key: `variant-failed:${jobId}:${target.id}` },
-        )
       }
     }
   }

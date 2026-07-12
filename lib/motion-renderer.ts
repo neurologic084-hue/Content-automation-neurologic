@@ -15,7 +15,6 @@ import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { patchVariant } from './job-lock'
-import { notifyOps } from './notify'
 import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
@@ -2304,12 +2303,6 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
   } catch (e) {
     console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
-    // This bulk write bypasses patchVariant, so alert ops directly — one alert
-    // for the whole job, not one per variant.
-    notifyOps(
-      `🔴 Source prep failed — job \`${jobId}\` (all variants failed): ${(e as Error).message}`,
-      { key: `prep-failed:${jobId}` },
-    )
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     const failedVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => ({
       ...v,
