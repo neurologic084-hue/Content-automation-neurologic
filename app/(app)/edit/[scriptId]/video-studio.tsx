@@ -39,6 +39,7 @@ const BROLL_OPTIONS: { value: BrollMode; label: string; hint: string }[] = [
   { value: 'none',   label: 'None',   hint: 'Talking head only' },
 ]
 const DEFAULT_BROLL_PERCENT = 25
+const MIN_BROLL_PERCENT = 5   // 0% isn't a slider stop — that's the None option
 const MAX_BROLL_PERCENT = 50
 
 interface Script {
@@ -486,7 +487,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                 </div>
                 <input
                   type="range"
-                  min={0}
+                  min={MIN_BROLL_PERCENT}
                   max={MAX_BROLL_PERCENT}
                   step={5}
                   value={brollPercent}
@@ -495,7 +496,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                   style={{ accentColor: '#FF4F17' }}
                 />
                 <div className="flex justify-between text-[10px] text-[#A1A1AA] mt-0.5">
-                  <span>0% · none</span>
+                  <span>{MIN_BROLL_PERCENT}% · light</span>
                   <span>{MAX_BROLL_PERCENT}% · max</span>
                 </div>
               </div>
