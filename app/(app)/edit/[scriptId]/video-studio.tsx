@@ -28,7 +28,7 @@ const GRADE_OPTIONS: { value: GradeMode; label: string; hint: string }[] = [
   { value: 'off',    label: 'Natural', hint: 'As filmed' },
 ]
 
-// B-roll amount for the Motion Lab variants (v4-v6). 'smart' lets the pipeline
+// B-roll amount for every variant (v1-v6). 'smart' lets the pipeline
 // read the footage and decide; 'manual' honors the slider percent; 'none'
 // renders a pure talking head. Mirrors BrollMode in lib/broll.ts (kept inline
 // so no server module reaches the client bundle).
@@ -500,7 +500,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                 </div>
               </div>
             )}
-            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the Motion Lab variants (Concept Pro, Viral Energy, Cinematic). Smart reads your footage and picks the amount that fits it.</p>
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to every variant. Smart reads your footage and picks the amount that fits each style; None renders a pure talking head.</p>
           </div>
 
           {error && <p className="text-xs text-[#EF4444] mb-3">{error}</p>}

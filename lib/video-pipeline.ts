@@ -79,9 +79,9 @@ export interface VideoVariant extends VideoVariantDef {
   // variant's signature look; otherwise a single look forced across all.
   // Stored per-variant in this jsonb so it needs no schema migration.
   grade_mode?: GradeMode
-  // B-roll amount for this job (same for every variant; only the Remotion
-  // variants v4-v6 read it). 'smart' adapts to the footage, 'manual' honors
-  // broll_percent (0-50), 'none' turns B-roll off. Same jsonb trick as above.
+  // B-roll amount for this job (same for every variant, v1-v6). 'smart'
+  // adapts to the footage, 'manual' honors broll_percent (0-50, Submagic
+  // caps at 49), 'none' turns B-roll off. Same jsonb trick as above.
   broll_mode?: BrollMode
   broll_percent?: number | null
   // ISO timestamp stamped when the variant enters 'processing', cleared when it

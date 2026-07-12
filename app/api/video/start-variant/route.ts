@@ -16,6 +16,7 @@ import {
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
+import { normalizeBrollSetting } from '@/lib/broll'
 import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
 import { rendersDir } from '@/lib/paths'
@@ -273,6 +274,15 @@ export async function POST(req: NextRequest) {
           console.warn('[start-variant] no Submagic audio track available — rendering without music')
         }
 
+        // The studio's per-job B-roll setting governs v1-v3 too, matching the
+        // Remotion variants: 'smart' keeps the footage-adaptive amount below,
+        // 'manual' forces the exact percent onto Submagic's stock B-roll, and
+        // 'none' turns every cutaway off — creator-supplied clips included.
+        const brollSetting = normalizeBrollSetting(variant.broll_mode, variant.broll_percent)
+        if (brollSetting.mode !== 'smart') {
+          console.log(`[start-variant] B-roll mode for ${variantId}: ${brollSetting.mode}${brollSetting.percent !== null ? ` (${brollSetting.percent}%)` : ''}`)
+        }
+
         if (spec) {
           const profile = await ensureContentProfile(jobId, job.source_drive_url as string)
           // A custom theme (exact caption style) needs no template resolution at
@@ -292,7 +302,9 @@ export async function POST(req: NextRequest) {
           // clip to Submagic user-media and planned transcript-matched
           // placements. Turn those into timed items and turn STOCK B-roll
           // off — the creator's clips fully replace generated footage.
-          const customEntries = (job.custom_broll ?? null) as CustomBrollEntry[] | null
+          const customEntries = brollSetting.mode === 'none'
+            ? null
+            : (job.custom_broll ?? null) as CustomBrollEntry[] | null
           const customItems = (customEntries ?? [])
             .filter(e => e.submagicMediaId && e.placements?.length)
             .flatMap(e => e.placements!.map(p => ({
@@ -312,8 +324,12 @@ export async function POST(req: NextRequest) {
             ...SUBMAGIC_ALWAYS_ON,
             templateName: resolved.templateName,
             userThemeId: resolved.userThemeId,
-            magicBrolls: customItems.length ? false : resolved.magicBrolls,
-            magicBrollsPercentage: customItems.length ? undefined : resolved.magicBrollsPercentage,
+            magicBrolls: customItems.length || brollSetting.mode === 'none'
+              ? false
+              : brollSetting.mode === 'manual' ? brollSetting.percent! > 0 : resolved.magicBrolls,
+            magicBrollsPercentage: customItems.length || brollSetting.mode === 'none' || (brollSetting.mode === 'manual' && brollSetting.percent! <= 0)
+              ? undefined
+              : brollSetting.mode === 'manual' ? Math.min(brollSetting.percent!, 49) : resolved.magicBrollsPercentage,
             magicZooms: resolved.magicZooms,
             hookTitle: resolved.hookTitle,
             removeSilencePace: resolved.removeSilencePace,
@@ -363,8 +379,12 @@ export async function POST(req: NextRequest) {
             title: `${variantId}-${jobId.slice(0, 8)}`,
             ...SUBMAGIC_ALWAYS_ON,
             templateName: smart.templateName,
-            magicBrolls: smart.magicBrolls,
-            magicBrollsPercentage: smart.magicBrollsPercentage,
+            magicBrolls: brollSetting.mode === 'none'
+              ? false
+              : brollSetting.mode === 'manual' ? brollSetting.percent! > 0 : smart.magicBrolls,
+            magicBrollsPercentage: brollSetting.mode === 'none' || (brollSetting.mode === 'manual' && brollSetting.percent! <= 0)
+              ? undefined
+              : brollSetting.mode === 'manual' ? Math.min(brollSetting.percent!, 49) : smart.magicBrollsPercentage,
             hookTitle: smart.hookTitle,
             removeSilencePace: smart.removeSilencePace,
             musicTrackId,

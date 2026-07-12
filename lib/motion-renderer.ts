@@ -2083,6 +2083,17 @@ async function renderSmartCinematic(
       hookTitle = resolved.hookTitle
     }
 
+    // The job's B-roll setting overrides the spec/flag amount for this
+    // Submagic pass too — same contract as the pure-Remotion edit and v1-v3.
+    const brollSetting = normalizeBrollSetting(opts.brollMode, opts.brollPercent)
+    if (brollSetting.mode === 'none') {
+      magicBrolls = false
+      magicBrollsPercentage = undefined
+    } else if (brollSetting.mode === 'manual') {
+      magicBrolls = brollSetting.percent! > 0
+      magicBrollsPercentage = magicBrolls ? Math.min(brollSetting.percent!, 49) : undefined
+    }
+
     const projectId = await submitSubmagicJob(submagicSourceUrl, {
       title: `${variantId}-${jobId.slice(0, 8)}`,
       templateName,
