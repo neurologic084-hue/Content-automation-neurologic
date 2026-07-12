@@ -15,6 +15,9 @@ interface Props {
   scriptId: string
   ideaId: string
   currentFolderId?: string | null
+  // Whether the script has at least one video edit — gates the "Remove edit"
+  // row and rewords the full-delete row/modal. Omitted = treated as no edit.
+  hasEdit?: boolean
 }
 
 interface MenuPos {
@@ -27,7 +30,7 @@ interface MenuPos {
 // fits below the button or should open upward instead of falling off-screen.
 const MENU_MAX_HEIGHT = 380
 
-export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) {
+export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId, hasEdit = false }: Props) {
   const [mounted, setMounted] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
@@ -253,17 +256,19 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
             </>
           )}
           <div style={{ height: 1, background: '#F0EFED', margin: '0 12px' }} />
-          <button
-            onClick={() => { closeMenu(); setShowDeleteEdit(true) }}
-            className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#EF4444] hover:bg-[#FEF2F2] active:bg-[#FEE2E2] cursor-pointer"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <polygon points="23 7 16 12 23 17 23 7" />
-              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-              <line x1="4" y1="2" x2="21" y2="22" />
-            </svg>
-            Remove edit
-          </button>
+          {hasEdit && (
+            <button
+              onClick={() => { closeMenu(); setShowDeleteEdit(true) }}
+              className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#EF4444] hover:bg-[#FEF2F2] active:bg-[#FEE2E2] cursor-pointer"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polygon points="23 7 16 12 23 17 23 7" />
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                <line x1="4" y1="2" x2="21" y2="22" />
+              </svg>
+              Remove edit
+            </button>
+          )}
           <button
             onClick={() => { closeMenu(); setShowDelete(true) }}
             className="w-full px-4 py-3 flex items-center gap-3 text-left text-[13px] text-[#EF4444] hover:bg-[#FEF2F2] active:bg-[#FEE2E2] cursor-pointer"
@@ -273,7 +278,7 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
               <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
               <path d="M10 11v6M14 11v6M9 6V4h6v2" />
             </svg>
-            Remove edit and script
+            {hasEdit ? 'Remove edit and script' : 'Remove script'}
           </button>
         </div>,
         document.body
@@ -410,9 +415,11 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId }: Props) 
       />
       <ConfirmModal
         open={showDelete}
-        title="Remove edit and script"
-        message="This permanently removes the script, its idea, and every video edit made from it. Cannot be undone."
-        confirmLabel="Yes, remove all"
+        title={hasEdit ? 'Remove edit and script' : 'Remove script'}
+        message={hasEdit
+          ? 'This permanently removes the script, its idea, and every video edit made from it. Cannot be undone.'
+          : 'This permanently removes the script and its idea. Cannot be undone.'}
+        confirmLabel={hasEdit ? 'Yes, remove all' : 'Yes, remove script'}
         cancelLabel="No, keep it"
         danger
         onConfirm={handleDelete}

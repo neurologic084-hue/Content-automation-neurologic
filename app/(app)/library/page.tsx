@@ -34,8 +34,10 @@ export default async function LibraryPage({
   // Approved scripts for the ACTIVE profile only — switching profiles swaps
   // the whole library. Falls back to folder-less select if that column is missing.
   let allScripts: { id: string; idea_id: string; hook: string; body: string; cta: string; mood_tag: string | null; approved_at: string | null; folder_id: string | null }[] | null = null
-  // Scripts and folders are independent — fetch together (one round trip, not two).
-  const [scriptsRes, foldersRes] = await Promise.all([
+  // Scripts, folders, and edit existence are independent — fetch together
+  // (one round trip, not three). The jobs query only carries script_id: it
+  // exists so each card's menu knows whether a "Remove edit" row applies.
+  const [scriptsRes, foldersRes, jobsRes] = await Promise.all([
     supabase
       .from('scripts')
       .select('id, idea_id, hook, body, cta, mood_tag, approved_at, folder_id')
@@ -43,7 +45,9 @@ export default async function LibraryPage({
       .eq('profile_slot', slot)
       .order('approved_at', { ascending: false }),
     supabase.from('folders').select('id, name').order('name'),
+    supabase.from('video_jobs').select('script_id'),
   ])
+  const scriptIdsWithEdits = new Set((jobsRes.data ?? []).map(j => j.script_id as string))
   const { data: withFolder, error: folderColError } = scriptsRes
 
   if (folderColError) {
@@ -162,6 +166,7 @@ export default async function LibraryPage({
                       scriptId={script.id}
                       ideaId={script.idea_id ?? ''}
                       currentFolderId={script.folder_id ?? null}
+                      hasEdit={scriptIdsWithEdits.has(script.id)}
                     />
                   </div>
                 </div>
