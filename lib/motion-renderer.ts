@@ -28,7 +28,7 @@ import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, normalizeBrollSetting, type BrollItem, type CustomClip, type BrollMode } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, normalizeBrollSetting, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode } from './broll'
 import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
@@ -2085,14 +2085,12 @@ async function renderSmartCinematic(
 
     // The job's B-roll setting overrides the spec/flag amount for this
     // Submagic pass too — same contract as the pure-Remotion edit and v1-v3.
-    const brollSetting = normalizeBrollSetting(opts.brollMode, opts.brollPercent)
-    if (brollSetting.mode === 'none') {
-      magicBrolls = false
-      magicBrollsPercentage = undefined
-    } else if (brollSetting.mode === 'manual') {
-      magicBrolls = brollSetting.percent! > 0
-      magicBrollsPercentage = magicBrolls ? Math.min(brollSetting.percent!, 49) : undefined
-    }
+    const brollKnobs = submagicBrollKnobs(
+      normalizeBrollSetting(opts.brollMode, opts.brollPercent),
+      { magicBrolls, magicBrollsPercentage },
+    )
+    magicBrolls = brollKnobs.magicBrolls
+    magicBrollsPercentage = brollKnobs.magicBrollsPercentage
 
     const projectId = await submitSubmagicJob(submagicSourceUrl, {
       title: `${variantId}-${jobId.slice(0, 8)}`,

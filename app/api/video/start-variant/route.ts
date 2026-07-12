@@ -16,7 +16,7 @@ import {
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
-import { normalizeBrollSetting } from '@/lib/broll'
+import { normalizeBrollSetting, submagicBrollKnobs } from '@/lib/broll'
 import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
 import { rendersDir } from '@/lib/paths'
@@ -324,12 +324,8 @@ export async function POST(req: NextRequest) {
             ...SUBMAGIC_ALWAYS_ON,
             templateName: resolved.templateName,
             userThemeId: resolved.userThemeId,
-            magicBrolls: customItems.length || brollSetting.mode === 'none'
-              ? false
-              : brollSetting.mode === 'manual' ? brollSetting.percent! > 0 : resolved.magicBrolls,
-            magicBrollsPercentage: customItems.length || brollSetting.mode === 'none' || (brollSetting.mode === 'manual' && brollSetting.percent! <= 0)
-              ? undefined
-              : brollSetting.mode === 'manual' ? Math.min(brollSetting.percent!, 49) : resolved.magicBrollsPercentage,
+            magicBrolls: customItems.length ? false : submagicBrollKnobs(brollSetting, resolved).magicBrolls,
+            magicBrollsPercentage: customItems.length ? undefined : submagicBrollKnobs(brollSetting, resolved).magicBrollsPercentage,
             magicZooms: resolved.magicZooms,
             hookTitle: resolved.hookTitle,
             removeSilencePace: resolved.removeSilencePace,
@@ -379,12 +375,8 @@ export async function POST(req: NextRequest) {
             title: `${variantId}-${jobId.slice(0, 8)}`,
             ...SUBMAGIC_ALWAYS_ON,
             templateName: smart.templateName,
-            magicBrolls: brollSetting.mode === 'none'
-              ? false
-              : brollSetting.mode === 'manual' ? brollSetting.percent! > 0 : smart.magicBrolls,
-            magicBrollsPercentage: brollSetting.mode === 'none' || (brollSetting.mode === 'manual' && brollSetting.percent! <= 0)
-              ? undefined
-              : brollSetting.mode === 'manual' ? Math.min(brollSetting.percent!, 49) : smart.magicBrollsPercentage,
+            magicBrolls: submagicBrollKnobs(brollSetting, smart).magicBrolls,
+            magicBrollsPercentage: submagicBrollKnobs(brollSetting, smart).magicBrollsPercentage,
             hookTitle: smart.hookTitle,
             removeSilencePace: smart.removeSilencePace,
             musicTrackId,

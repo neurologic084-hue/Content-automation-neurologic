@@ -108,6 +108,25 @@ export function normalizeBrollSetting(mode: unknown, percent: unknown): BrollSet
   return { mode: 'manual', percent: Math.round(Math.min(MAX_BROLL_PERCENT, Math.max(0, p))) }
 }
 
+// Applies the job's B-roll setting to a Submagic submission. 'smart' keeps the
+// caller's footage-adaptive knobs, 'manual' forces the exact percent (Submagic
+// rejects 50+, so it caps at 49; 0 turns B-roll off), 'none' turns it off.
+// One decision, used by every Submagic call site — keep them identical.
+export function submagicBrollKnobs(
+  setting: BrollSetting,
+  adaptive: { magicBrolls: boolean; magicBrollsPercentage?: number },
+): { magicBrolls: boolean; magicBrollsPercentage?: number } {
+  if (setting.mode === 'none') return { magicBrolls: false, magicBrollsPercentage: undefined }
+  if (setting.mode === 'manual') {
+    const on = (setting.percent ?? 0) > 0
+    return { magicBrolls: on, magicBrollsPercentage: on ? Math.min(setting.percent!, 49) : undefined }
+  }
+  return {
+    magicBrolls: adaptive.magicBrolls,
+    magicBrollsPercentage: adaptive.magicBrolls ? adaptive.magicBrollsPercentage : undefined,
+  }
+}
+
 // Average planned cutaway length: covers run 2.0-3.8s, the gap-filler uses
 // 2.6s — used to convert a coverage percent into a cutaway count.
 const AVG_CUT_SECONDS = 2.8
