@@ -99,6 +99,64 @@ function Section({
   )
 }
 
+const PLATFORM_LABEL: Record<string, string> = {
+  instagram: 'Instagram', tiktok: 'TikTok', youtube: 'YouTube',
+  facebook: 'Facebook', linkedin: 'LinkedIn', twitter: 'X / Twitter', threads: 'Threads',
+}
+
+// Live list of the social accounts connected in Blotato. Read-only on purpose:
+// connecting/swapping an account is an OAuth flow that has to run in Blotato's
+// own dashboard — this section makes that path obvious instead of hidden.
+function ConnectedAccounts() {
+  const [accounts, setAccounts] = useState<{ id: string; platform: string; username?: string; fullname?: string }[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/publish/accounts')
+      .then(r => r.json())
+      .then(d => d.accounts ? setAccounts(d.accounts) : setError(d.error ?? 'Could not load accounts.'))
+      .catch(e => setError((e as Error).message))
+  }, [])
+
+  return (
+    <div className="space-y-4">
+      {error ? (
+        <p className="text-[13px] text-[#EF4444]">{error}</p>
+      ) : !accounts ? (
+        <p className="text-[13px] text-[#9B9B97]">Loading connected accounts…</p>
+      ) : accounts.length === 0 ? (
+        <p className="text-[13px] text-[#9B9B97]">No accounts connected yet.</p>
+      ) : (
+        <div className="space-y-2">
+          {accounts.map(a => (
+            <div key={a.id} className="flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-[#FAFAF8] border border-[#F0F0EC]">
+              <span className="text-[13px] font-semibold text-[#333330] w-24 flex-shrink-0">
+                {PLATFORM_LABEL[a.platform.toLowerCase()] ?? a.platform}
+              </span>
+              <span className="text-[13px] text-[#71717A] truncate">
+                {a.username ? `@${a.username}` : a.fullname || '—'}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-[12px] text-[#9B9B97] leading-relaxed">
+          To connect a different account, open Blotato → Accounts, disconnect the old one and connect the new one. Changes appear here and in Publish automatically.
+        </p>
+        <a
+          href="https://my.blotato.com"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex-shrink-0 px-4 py-2 rounded-xl text-[13px] font-semibold border border-[#E4E4E0] text-[#333330] hover:border-[#FF4F17] hover:text-[#FF4F17] transition-colors"
+        >
+          Manage in Blotato ↗
+        </a>
+      </div>
+    </div>
+  )
+}
+
 function Field({
   label, hint, required, children,
 }: {
@@ -550,6 +608,14 @@ export default function SettingsPage() {
               Injected at the top of every prompt as non-negotiable constraints — they override tone, style, and everything else.
             </p>
           </div>
+        </Section>
+
+        <Section
+          num="08"
+          title="Connected social accounts"
+          description="Where your videos get published. Accounts are linked through Blotato — connect or swap them there and they show up here automatically."
+        >
+          <ConnectedAccounts />
         </Section>
 
       </div>
