@@ -534,7 +534,7 @@ export default function ScriptDetailPage() {
       )}
 
       {/* Filming Plan */}
-      {(script.filming_plan?.shot_type || script.filming_plan?.setup || script.filming_plan?.wardrobe) && (
+      {(script.filming_plan?.shot_type || script.filming_plan?.setup || script.filming_plan?.wardrobe || script.filming_plan?.b_roll?.length) && (
         <div className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl p-5 mb-6" style={{ animationDelay: '460ms' }}>
           <h2
             className="font-semibold text-[#18181B] mb-4 flex items-center gap-2"
@@ -550,13 +550,26 @@ export default function ScriptDetailPage() {
             {[
               { label: 'Shot type', value: script.filming_plan?.shot_type },
               { label: 'Setup', value: script.filming_plan?.setup || script.filming_plan?.setup_notes || script.filming_plan?.location },
-              { label: 'Wardrobe', value: script.filming_plan?.wardrobe },
+              { label: 'Outfit', value: script.filming_plan?.wardrobe },
             ].filter(item => item.value).map((item) => (
               <div key={item.label} className="flex gap-3">
                 <span className="text-xs font-semibold text-[#A1A1AA] w-20 flex-shrink-0 pt-0.5">{item.label}</span>
                 <span className="text-sm text-[#18181B]">{item.value}</span>
               </div>
             ))}
+            {(script.filming_plan?.b_roll?.length ?? 0) > 0 && (
+              <div className="flex gap-3">
+                <span className="text-xs font-semibold text-[#A1A1AA] w-20 flex-shrink-0 pt-0.5">B-roll ideas</span>
+                <ul className="text-sm text-[#18181B] space-y-1">
+                  {script.filming_plan!.b_roll!.map((shot, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="text-[#FF4F17] flex-shrink-0">·</span>
+                      {shot}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </div>
       )}

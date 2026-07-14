@@ -213,6 +213,7 @@ Structure (total 160–220 words):
 FORMAT 3: PERSONAL STORY (story arc)
 Best for: transformations, struggles, "I used to... now I...", moments of discovery, client results.
 Structure (total 150–210 words):
+  Never state credentials or say "I've helped X people" as a standalone trust line — including for case-study-style stories (client results, before/afters). The proof must live inside the specific numbers and details of the story itself, never a bolted-on credibility statement.
   HOOK (max 15w): Drop the viewer into the middle of the story at its most interesting or unexpected moment.
   BODY — exactly 3 beats, separated by blank lines, no labels in the text:
     Beat 1 SETUP (35–50w): Paint the specific situation in enough detail that the viewer can picture it completely — not "things were hard" but exactly what was happening, what they were doing, and what wasn't working. The more specific and honest this beat is, the more trust it builds.
@@ -286,7 +287,8 @@ Respond ONLY in this exact JSON format:
   "filming_plan": {
     "shot_type": "talking head | b-roll with voiceover | walk-and-talk",
     "setup": "One sentence: where to stand, how to light it, how to frame it.",
-    "wardrobe": "One line: what to wear.",
+    "wardrobe": "One-line outfit recommendation that fits THIS topic and mood — e.g. a soft casual sweater for a vulnerable story, smart casual for a myth-busting piece, athletic wear for an energy topic. Keep it simple and practical.",
+    "b_roll": ["2-4 specific B-roll shot ideas tied to actual lines or beats of THIS script — footage the creator could easily film themselves (or that stock can match). Each under 12 words, e.g. 'Slow push-in on brain scan printout during beat 2' or 'Pouring tea, hands only, over the hook'. Order them to match the script's flow."],
     "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
   "delivery_cues": ["3-5 short coaching notes for the creator ON CAMERA, each tied to a specific line or beat: where to pause, which word to punch, when to slow down, when to lean in or smile. E.g. 'Pause a full beat after the hook — let it land before explaining.' Write them for THIS script, not generic advice."],
@@ -386,7 +388,8 @@ Respond ONLY in this exact JSON format:
   "filming_plan": {
     "shot_type": "talking head | b-roll with voiceover | walk-and-talk",
     "setup": "One sentence: where to stand, how to light it, how to frame it.",
-    "wardrobe": "One line: what to wear.",
+    "wardrobe": "One-line outfit recommendation that fits this topic and mood. Keep it simple and practical.",
+    "b_roll": ["2-4 specific B-roll shot ideas tied to actual lines or beats of THIS script, each under 12 words, ordered to match the script's flow."],
     "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
   "delivery_cues": ["3-5 short coaching notes for delivering THIS script on camera: where to pause, which word to punch, when to slow down or lean in."],

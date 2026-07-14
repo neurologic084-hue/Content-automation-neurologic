@@ -58,6 +58,8 @@ export interface FilmingPlan {
   alt_hooks?: string[]
   // Per-script on-camera coaching notes (pauses, emphasis, tone shifts)
   delivery_cues?: string[]
+  // Script-specific B-roll shot ideas, ordered to match the script's flow
+  b_roll?: string[]
   // legacy fields (older scripts)
   location?: string
   props?: string[]
