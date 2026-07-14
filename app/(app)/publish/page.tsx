@@ -839,6 +839,14 @@ function PublishForm() {
           <div className="flex items-center gap-2.5 mb-4">
             <span className="w-5 h-5 rounded-full bg-[#FF4F17] text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0">1</span>
             <p className="text-[11px] font-bold text-[#A1A1AA] uppercase tracking-widest">Choose platforms</p>
+            <a
+              href="https://my.blotato.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ml-auto text-[11px] font-medium text-[#A1A1AA] hover:text-[#FF4F17] transition-colors"
+            >
+              Manage accounts ↗
+            </a>
           </div>
           {loadingAccounts ? (
             <div className="flex items-center gap-2">
