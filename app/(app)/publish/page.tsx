@@ -878,7 +878,7 @@ function PublishForm() {
                       style={{ background: selected ? 'rgba(255,255,255,0.2)' : meta.color, color: 'white' }}>
                       {meta.icon}
                     </span>
-                    <span>{acc.fullname || acc.username || meta.label}</span>
+                    <span>{meta.label}</span>
                     {selected
                       ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
                       : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
