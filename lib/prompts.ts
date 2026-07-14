@@ -288,7 +288,7 @@ Respond ONLY in this exact JSON format:
     "shot_type": "talking head | b-roll with voiceover | walk-and-talk",
     "setup": "One sentence: where to stand, how to light it, how to frame it.",
     "wardrobe": "One-line outfit recommendation that fits THIS topic and mood — e.g. a soft casual sweater for a vulnerable story, smart casual for a myth-busting piece, athletic wear for an energy topic. Keep it simple and practical.",
-    "b_roll": ["2-4 specific B-roll shot ideas tied to actual lines or beats of THIS script — footage the creator could easily film themselves (or that stock can match). Each under 12 words, e.g. 'Slow push-in on brain scan printout during beat 2' or 'Pouring tea, hands only, over the hook'. Order them to match the script's flow."],
+    "b_roll": ["2-4 B-roll shot ideas tied to actual lines or beats of THIS script. HARD CONSTRAINT: each must be filmable ALONE, AT HOME, with just a phone propped up or held — everyday actions and objects only (pouring tea, journaling, opening curtains, scrolling a phone, walking to the window, hands on a keyboard). Never suggest clinics, equipment, other people, or anything needing a second pair of hands. Each under 12 words, e.g. 'Pouring tea, hands only, over the hook'. Order them to match the script's flow."],
     "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
   "delivery_cues": ["3-5 short coaching notes for the creator ON CAMERA, each tied to a specific line or beat: where to pause, which word to punch, when to slow down, when to lean in or smile. E.g. 'Pause a full beat after the hook — let it land before explaining.' Write them for THIS script, not generic advice."],
@@ -389,7 +389,7 @@ Respond ONLY in this exact JSON format:
     "shot_type": "talking head | b-roll with voiceover | walk-and-talk",
     "setup": "One sentence: where to stand, how to light it, how to frame it.",
     "wardrobe": "One-line outfit recommendation that fits this topic and mood. Keep it simple and practical.",
-    "b_roll": ["2-4 specific B-roll shot ideas tied to actual lines or beats of THIS script, each under 12 words, ordered to match the script's flow."],
+    "b_roll": ["2-4 B-roll shot ideas tied to actual lines or beats of THIS script, each under 12 words, ordered to match the script's flow. Each must be filmable alone at home with just a phone — everyday actions only, no clinics, equipment, or other people."],
     "body_labels": ["3-5 word label for beat/tip 1", "3-5 word label for beat/tip 2", "3-5 word label for beat/tip 3"]
   },
   "delivery_cues": ["3-5 short coaching notes for delivering THIS script on camera: where to pause, which word to punch, when to slow down or lean in."],

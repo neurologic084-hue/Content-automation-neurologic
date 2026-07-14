@@ -7,9 +7,10 @@ import { createClient } from '@/lib/supabase/client'
 import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 
 // Custom B-roll works end-to-end (all 6 variants) but the input is hidden to
-// keep the client UI simple. Set to false to show it again — nothing else
-// needs to change.
-const HIDE_CUSTOM_BROLL = true
+// keep the client UI simple. The pipeline underneath works end-to-end, so the
+// field shows as a visible "Coming soon" teaser instead of disappearing
+// entirely. Set to false to fully enable it — nothing else needs to change.
+const CUSTOM_BROLL_COMING_SOON = true
 
 const MUSIC_OPTIONS: { value: MusicMode; label: string; hint: string }[] = [
   { value: 'smart', label: 'Smart',    hint: 'Mood-matched track from the library' },
@@ -382,22 +383,35 @@ export function VideoStudio({ script, existingJobId }: Props) {
             onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
           />
 
-          {/* Custom B-roll (optional) — feature works end-to-end but is hidden
-              for now to keep the client UI simple. Flip HIDE_CUSTOM_BROLL to
-              false to bring the field back; the whole pipeline reactivates. */}
-          <div className="mb-4" hidden={HIDE_CUSTOM_BROLL}>
-            <p className="text-xs font-semibold text-[#71717A] mb-1.5">Your own B-roll <span className="font-normal text-[#A1A1AA]">(optional)</span></p>
-            <textarea
-              placeholder={"Google Drive links to your own B-roll clips, one per line.\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
-              value={customBrollText}
-              onChange={e => setCustomBrollText(e.target.value)}
-              rows={3}
-              className="w-full px-4 py-3 rounded-xl border border-[#E4E4E0] text-sm outline-none resize-y"
-              style={{ background: '#FAFAFA' }}
-              onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
-              onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
-            />
-            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the Edit variants (Concept Pro, Viral Energy, Cinematic). Leave empty to use auto-picked stock B-roll.</p>
+          {/* Custom B-roll — the pipeline works end-to-end; shown as a Coming
+              soon teaser while it's polished. Flip CUSTOM_BROLL_COMING_SOON to
+              false to enable the input; the whole pipeline reactivates. */}
+          <div className="mb-4">
+            <div className="flex items-center gap-2 mb-1.5">
+              <p className="text-xs font-semibold text-[#71717A]">Your own B-roll</p>
+              {CUSTOM_BROLL_COMING_SOON && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#FFF3EF] text-[#FF4F17] uppercase tracking-wide">Coming soon</span>
+              )}
+            </div>
+            {CUSTOM_BROLL_COMING_SOON ? (
+              <div className="w-full px-4 py-3 rounded-xl border border-dashed border-[#E4E4E0] text-[12px] text-[#A1A1AA] leading-relaxed" style={{ background: '#FAFAFA' }}>
+                Soon you&rsquo;ll be able to drop Google Drive links to your own clips here — the Edit variants will place each one exactly where it fits what you&rsquo;re saying, instead of stock footage.
+              </div>
+            ) : (
+              <>
+                <textarea
+                  placeholder={"Google Drive links to your own B-roll clips, one per line.\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
+                  value={customBrollText}
+                  onChange={e => setCustomBrollText(e.target.value)}
+                  rows={3}
+                  className="w-full px-4 py-3 rounded-xl border border-[#E4E4E0] text-sm outline-none resize-y"
+                  style={{ background: '#FAFAFA' }}
+                  onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
+                  onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
+                />
+                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the Edit variants (Concept Pro, Viral Energy, Cinematic). Leave empty to use auto-picked stock B-roll.</p>
+              </>
+            )}
           </div>
 
           {/* Background music */}
