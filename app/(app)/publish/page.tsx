@@ -853,8 +853,8 @@ function PublishForm() {
           ) : accounts.length === 0 && !accountsError ? (
             <p className="text-xs text-[#A1A1AA]">
               No supported accounts connected.{' '}
-              <a href="https://app.blotato.com" target="_blank" rel="noopener noreferrer" className="text-[#FF4F17] underline">
-                Connect at app.blotato.com →
+              <a href="https://my.blotato.com" target="_blank" rel="noopener noreferrer" className="text-[#FF4F17] underline">
+                Connect at my.blotato.com →
               </a>
             </p>
           ) : (
