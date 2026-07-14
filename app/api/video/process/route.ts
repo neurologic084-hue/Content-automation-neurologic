@@ -23,12 +23,12 @@ export async function POST(req: NextRequest) {
   }
 
   // Optional creator-supplied B-roll: Drive share links (files OR a whole
-  // folder), resolved to direct download form. A folder link expands to every
-  // video inside it, so the creator maintains one Drive folder of B-roll and
+  // folder), resolved to direct download form. A folder link expands to the
+  // videos inside it, so the creator maintains one Drive folder of B-roll and
   // pastes a single link. Invalid lines are rejected up front, not at render
-  // time. Up to 24 clips are stored; at render time Gemini watches each one
-  // and the best 12 for THIS script are used (selectBestClips in lib/broll).
-  const MAX_CUSTOM_BROLL = 24
+  // time. Hard cap: 12 clips — a folder with more uses its first 12 (raise
+  // this toward selectBestClips's curation if that ever changes).
+  const MAX_CUSTOM_BROLL = 12
   const customBrollEntries: { url: string }[] = []
   if (Array.isArray(customBroll)) {
     for (const raw of customBroll.slice(0, MAX_CUSTOM_BROLL)) {
