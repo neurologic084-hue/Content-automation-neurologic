@@ -185,6 +185,36 @@ export function extractDriveFileId(url: string): string | null {
   return match?.[1] ?? null
 }
 
+export function extractDriveFolderId(url: string): string | null {
+  const match = url.match(/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/([a-zA-Z0-9_-]+)/)
+  return match?.[1] ?? null
+}
+
+// Lists the video files inside a PUBLIC Google Drive folder with no API key,
+// via Drive's embedded folder view (the same page Drive serves for folder
+// embeds). Requires the folder to be shared "Anyone with the link". Names are
+// used only to filter to video files — downloads go through the usual
+// uc?export=download URL per file id.
+export async function listDriveFolderVideos(folderId: string): Promise<{ id: string; name: string }[]> {
+  const res = await fetch(`https://drive.google.com/embeddedfolderview?id=${folderId}#list`, {
+    signal: AbortSignal.timeout(30_000),
+    headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36' },
+  })
+  if (!res.ok) {
+    throw new Error(`Drive folder listing failed (HTTP ${res.status}) — make sure the folder is shared "Anyone with the link".`)
+  }
+  const html = await res.text()
+  const entries: { id: string; name: string }[] = []
+  const re = /id="entry-([a-zA-Z0-9_-]+)"[\s\S]*?flip-entry-title">([^<]*)</g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) entries.push({ id: m[1], name: m[2].trim() })
+  const videos = entries.filter(f => /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(f.name))
+  // Phone uploads sometimes surface without a recognizable extension; if no
+  // names matched but the folder has entries, take everything — the per-clip
+  // ffmpeg normalize step downstream skips anything that isn't video.
+  return videos.length ? videos : entries
+}
+
 // ── ElevenLabs   Transcription ────────────────────────────────────────────────
 
 export async function transcribeVideo(videoUrl: string): Promise<{

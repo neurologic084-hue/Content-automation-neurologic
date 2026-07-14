@@ -31,6 +31,11 @@ export interface BrollItem {
   // are assigned pipeline-side (eubank layout rotation) — the planner itself
   // only emits card/cover.
   layout: 'card' | 'cover' | 'split' | 'panel'
+  // Seconds into the source clip to start playing from (video kind only).
+  // Lets a long creator clip yield different cuts: a 10s clip can fill one
+  // slot with 0-2.5s and a later slot with its tail, instead of repeating
+  // the same opening seconds.
+  srcOffset?: number
   // Per-cover transition override (eubank combo rotation): each cover carries
   // its own move instead of the render's single global style.
   transition?: TransitionStyle
@@ -452,12 +457,18 @@ export async function planCustomBrollSlots(
     const dur = Math.min(3.8, Math.min(clip.duration, Math.max(1.8, c.duration as number)))
     if (start + dur > duration - 1.5) continue
     if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
+    // A long clip only ever needs `dur` seconds of itself. First use plays
+    // from the top; a second use cuts to the clip's tail so the same footage
+    // never repeats on screen.
+    const nthUse = uses.get(idx) ?? 0
+    const srcOffset = nthUse > 0 ? Math.max(0, Number((clip.duration - dur).toFixed(2))) : 0
     items.push({
       start: Number(start.toFixed(2)),
       duration: Number(dur.toFixed(2)),
       file: clip.file,
       kind: 'video',
       layout: 'cover',
+      ...(srcOffset > 0 ? { srcOffset } : {}),
       query: clip.description.slice(0, 60),
     })
     uses.set(idx, (uses.get(idx) ?? 0) + 1)

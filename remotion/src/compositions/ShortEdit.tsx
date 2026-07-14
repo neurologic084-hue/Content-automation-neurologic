@@ -140,6 +140,9 @@ export type ShortEditBroll = {
   // split: footage slides to the top ~55%, media fills the bottom, captions
   // ride the seam. panel: translucent rounded panel over the speaker.
   layout: 'card' | 'cover' | 'split' | 'panel'
+  // Seconds into the source clip to start from (video kind only) — lets a
+  // second use of the same creator clip show a different cut of it.
+  srcOffset?: number
   // Per-cover transition (eubank combo rotation) — overrides transitionStyle.
   transition?: 'blur' | 'flash' | 'punch' | 'slide' | 'zoom' | 'whip'
   // panel: which edge it slides in from (rotated by the planner).
@@ -525,6 +528,7 @@ const DesignedCover: React.FC<{
   widthPx: number
 }> = ({ item, durationInFrames, widthPx }) => {
   const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
   const drift = interpolate(frame, [0, durationInFrames], [1.0, 1.09], {
     extrapolateRight: 'clamp',
     easing: Easing.bezier(0.3, 0, 0.7, 1),
@@ -533,7 +537,7 @@ const DesignedCover: React.FC<{
   const palette = POSTER_PALETTES[item.design?.palette ?? 'champagne']
   const hasMedia = !!item.file
   const media = !hasMedia ? null : item.kind === 'video'
-    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} startFrom={Math.round((item.srcOffset ?? 0) * fps)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
 
   const kickerIn = interpolate(frame, [4, 10], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
@@ -902,7 +906,7 @@ const BrollClip: React.FC<{
   })
   // file may be '' for typography-only designed posters (DesignedCover guards).
   const media = !item.file ? null : item.kind === 'video'
-    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    ? <OffthreadVideo src={staticFile(item.file)} muted toneMapping={false} startFrom={Math.round((item.srcOffset ?? 0) * fps)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
     : <Img src={staticFile(item.file)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
 
   // Split: FootageStage carries the footage to the top while the media rises

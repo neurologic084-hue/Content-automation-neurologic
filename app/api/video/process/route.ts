@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
 import { createClient } from '@/lib/supabase/server'
-import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, verifyDriveFile } from '@/lib/video-pipeline'
+import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, extractDriveFolderId, listDriveFolderVideos, verifyDriveFile } from '@/lib/video-pipeline'
 import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
 import { normalizeGradeMode } from '@/lib/color-grade'
 import { normalizeBrollSetting } from '@/lib/broll'
@@ -22,21 +22,46 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing scriptId or driveUrl.' }, { status: 400 })
   }
 
-  // Optional creator-supplied B-roll: Drive share links, resolved to direct
-  // download form. Invalid lines are rejected up front, not at render time.
+  // Optional creator-supplied B-roll: Drive share links (files OR a whole
+  // folder), resolved to direct download form. A folder link expands to every
+  // video inside it, so the creator maintains one Drive folder of B-roll and
+  // pastes a single link. Invalid lines are rejected up front, not at render
+  // time. Cap of 12 clips total across all lines.
+  const MAX_CUSTOM_BROLL = 12
   const customBrollEntries: { url: string }[] = []
   if (Array.isArray(customBroll)) {
-    for (const raw of customBroll.slice(0, 12)) {
+    for (const raw of customBroll.slice(0, MAX_CUSTOM_BROLL)) {
       if (typeof raw !== 'string' || !raw.trim()) continue
+      if (customBrollEntries.length >= MAX_CUSTOM_BROLL) break
       const link = raw.trim()
-      const brollFileId = extractDriveFileId(link)
-      if (brollFileId) {
+      const brollFolderId = extractDriveFolderId(link)
+      const brollFileId = brollFolderId ? null : extractDriveFileId(link)
+      if (brollFolderId) {
+        try {
+          const files = await listDriveFolderVideos(brollFolderId)
+          if (!files.length) {
+            return NextResponse.json(
+              { error: 'That Drive folder looks empty (or not shared). Put your B-roll clips inside and share the folder as "Anyone with the link".' },
+              { status: 400 }
+            )
+          }
+          for (const f of files.slice(0, MAX_CUSTOM_BROLL - customBrollEntries.length)) {
+            customBrollEntries.push({ url: `https://drive.google.com/uc?export=download&id=${f.id}` })
+          }
+          console.log(`[process] expanded B-roll folder ${brollFolderId} → ${files.length} clip(s)`)
+        } catch (e) {
+          return NextResponse.json(
+            { error: `Could not read the B-roll folder: ${(e as Error).message}` },
+            { status: 400 }
+          )
+        }
+      } else if (brollFileId) {
         customBrollEntries.push({ url: `https://drive.google.com/uc?export=download&id=${brollFileId}` })
       } else if (/^https?:\/\//.test(link) && !link.includes('drive.google.com')) {
         customBrollEntries.push({ url: link })
       } else {
         return NextResponse.json(
-          { error: `Invalid B-roll link: "${link.slice(0, 60)}". Use Google Drive share links (one per line).` },
+          { error: `Invalid B-roll link: "${link.slice(0, 60)}". Paste a Google Drive folder link (or file links, one per line).` },
           { status: 400 }
         )
       }

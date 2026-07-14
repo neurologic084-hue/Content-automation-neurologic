@@ -395,12 +395,12 @@ export function VideoStudio({ script, existingJobId }: Props) {
             </div>
             {CUSTOM_BROLL_COMING_SOON ? (
               <div className="w-full px-4 py-3 rounded-xl border border-dashed border-[#E4E4E0] text-[12px] text-[#A1A1AA] leading-relaxed" style={{ background: '#FAFAFA' }}>
-                Soon you&rsquo;ll be able to drop Google Drive links to your own clips here — the Edit variants will place each one exactly where it fits what you&rsquo;re saying, instead of stock footage.
+                Soon you&rsquo;ll be able to paste one Google Drive folder link with your own clips — the Edit variants will watch each clip, place it exactly where it fits what you&rsquo;re saying (muted, trimmed to size), and skip stock footage entirely.
               </div>
             ) : (
               <>
                 <textarea
-                  placeholder={"Google Drive links to your own B-roll clips, one per line.\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
+                  placeholder={"Paste a Google Drive FOLDER link with your B-roll clips (or file links, one per line).\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
                   value={customBrollText}
                   onChange={e => setCustomBrollText(e.target.value)}
                   rows={3}
