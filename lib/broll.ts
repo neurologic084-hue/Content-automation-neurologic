@@ -373,6 +373,61 @@ export interface CustomClip {
   file: string          // staged filename relative to remotion/public/
   description: string   // one line of what the clip shows (Gemini)
   duration: number      // seconds
+  // Index of this clip's row in the job's custom_broll entries. Clips that
+  // fail staging are skipped, so positions do NOT line up — always map back
+  // to entries through this, never through array position.
+  entryIndex?: number
+}
+
+// A folder can hold more clips than one short video can use. Renders work
+// from at most this many, chosen by content when the folder exceeds it.
+export const MAX_CUSTOM_CLIPS_PER_RENDER = 12
+
+// Picks the clips whose CONTENT best serves this transcript when the creator
+// supplied more than `max`. One fast LLM pass over the vision descriptions —
+// topical fit first, then variety. Falls back to the first `max` on failure
+// (matching the old behavior). Returned clips keep their original order.
+export async function selectBestClips(
+  clips: CustomClip[],
+  editedWords: EditedWord[],
+  max = MAX_CUSTOM_CLIPS_PER_RENDER,
+): Promise<CustomClip[]> {
+  if (clips.length <= max) return clips
+  const transcript = editedWords.map(w => w.text).join(' ').slice(0, 4000)
+  const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.fast,
+      temperature: 0.2,
+      max_tokens: 300,
+      json: true,
+      messages: [{
+        role: 'user',
+        content: [
+          `A creator gave ${clips.length} of their own B-roll clips for a short talking-head video, but only ${max} can be used.`,
+          'Clips (index: length, what the clip shows):',
+          ...clipLines,
+          '',
+          'Transcript of what the creator says:',
+          transcript,
+          '',
+          `Choose the ${max} clips whose content best matches moments in the transcript.`,
+          'Prefer topical fit first, then visual variety (avoid near-duplicates).',
+          `Return JSON only: {"keep":[${max} clip indices]}`,
+        ].join('\n'),
+      }],
+    })
+    const parsed = parseJsonLoose<{ keep?: number[] }>(raw)
+    const keep = [...new Set((parsed.keep ?? []).filter(i => Number.isInteger(i) && i >= 0 && i < clips.length))].slice(0, max)
+    if (keep.length >= Math.min(3, max)) {
+      const chosen = keep.sort((a, b) => a - b).map(i => clips[i])
+      console.log(`[broll] selected ${chosen.length}/${clips.length} custom clip(s) by content`)
+      return chosen
+    }
+  } catch (e) {
+    console.warn('[broll] clip selection failed, using the first clips:', (e as Error).message)
+  }
+  return clips.slice(0, max)
 }
 
 export async function planCustomBrollSlots(

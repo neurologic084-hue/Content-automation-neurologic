@@ -27,7 +27,7 @@ import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, normalizeBrollSetting, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, selectBestClips, normalizeBrollSetting, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode } from './broll'
 import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
@@ -1471,7 +1471,7 @@ async function stageCustomBroll(
         }
       }
 
-      clips.push({ file: `${publicPrefix}/${fileName}`, description: description || `creator clip ${i + 1}`, duration })
+      clips.push({ file: `${publicPrefix}/${fileName}`, description: description || `creator clip ${i + 1}`, duration, entryIndex: i })
       console.log(`[motion-renderer] custom B-roll ${i}: ${duration.toFixed(1)}s — "${description.slice(0, 70)}"`)
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
@@ -1653,8 +1653,11 @@ async function renderRemotionEdit(
         if (usingCustomBroll) {
           // The creator supplied their own clips — stock sourcing is skipped
           // entirely. Clips are matched to transcript moments by content.
-          const clips = await stageCustomBroll(jobId, opts.customBroll!, cacheDir, 'edit-cache')
-          for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
+          // A big folder gets curated first: the render works from the clips
+          // whose vision descriptions best fit THIS script.
+          const stagedClips = await stageCustomBroll(jobId, opts.customBroll!, cacheDir, 'edit-cache')
+          for (const c of stagedClips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
+          const clips = await selectBestClips(stagedClips, plan.editedWords)
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
         } else {
           const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
@@ -2227,14 +2230,17 @@ async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string):
   if (!clips.length) return
 
   // Host each normalized clip in R2 ({jobId}/custom-broll-i.mp4 — cleaned up
-  // by deleteJobStorage) and register it with Submagic.
-  for (let i = 0; i < clips.length; i++) {
+  // by deleteJobStorage) and register it with Submagic. Entries are matched
+  // through clip.entryIndex — staging skips failed clips, so positions in
+  // `clips` do not line up with `entries`.
+  for (const clip of clips) {
+    const i = clip.entryIndex ?? -1
     const entry = entries[i]
     if (!entry) continue
-    entry.duration = clips[i].duration
+    entry.duration = clip.duration
     if (!entry.r2Url) {
       try {
-        entry.r2Url = await uploadToStorage(path.join(REMOTION_DIR, 'public', clips[i].file), `custom-broll-${i}.mp4`, jobId)
+        entry.r2Url = await uploadToStorage(path.join(REMOTION_DIR, 'public', clip.file), `custom-broll-${i}.mp4`, jobId)
       } catch (e) {
         console.warn(`[custom-broll] R2 upload failed for clip ${i}:`, (e as Error).message)
       }
@@ -2249,15 +2255,20 @@ async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string):
   try {
     const words = await transcribeLocalFile(sourceLocalPath)
     const duration = await getVideoDuration(sourceLocalPath)
-    const placed = await planCustomBrollSlots(words.map(w => ({ ...w, segmentIndex: 0 })), duration, null, clips, [], false)
+    // Same curation as the Remotion path: a big folder narrows to the clips
+    // whose content best fits this video before placements are planned.
+    const timedWords = words.map(w => ({ ...w, segmentIndex: 0 }))
+    const chosen = await selectBestClips(clips, timedWords)
+    const placed = await planCustomBrollSlots(timedWords, duration, null, chosen, [], false)
     for (const entry of entries) entry.placements = []
     for (const item of placed) {
-      const idx = clips.findIndex(c => c.file === item.file)
-      if (idx >= 0 && entries[idx]) {
-        entries[idx].placements!.push({ start: item.start, end: Number((item.start + item.duration).toFixed(2)) })
+      const clip = chosen.find(c => c.file === item.file)
+      const entry = clip ? entries[clip.entryIndex ?? -1] : undefined
+      if (entry) {
+        entry.placements!.push({ start: item.start, end: Number((item.start + item.duration).toFixed(2)) })
       }
     }
-    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${clips.length} clip(s)`)
+    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${chosen.length} clip(s)`)
   } catch (e) {
     console.warn('[custom-broll] placement planning failed (v1-v3 will render without items):', (e as Error).message)
   }

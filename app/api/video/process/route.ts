@@ -26,8 +26,9 @@ export async function POST(req: NextRequest) {
   // folder), resolved to direct download form. A folder link expands to every
   // video inside it, so the creator maintains one Drive folder of B-roll and
   // pastes a single link. Invalid lines are rejected up front, not at render
-  // time. Cap of 12 clips total across all lines.
-  const MAX_CUSTOM_BROLL = 12
+  // time. Up to 24 clips are stored; at render time Gemini watches each one
+  // and the best 12 for THIS script are used (selectBestClips in lib/broll).
+  const MAX_CUSTOM_BROLL = 24
   const customBrollEntries: { url: string }[] = []
   if (Array.isArray(customBroll)) {
     for (const raw of customBroll.slice(0, MAX_CUSTOM_BROLL)) {
