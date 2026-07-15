@@ -405,6 +405,12 @@ export async function planCustomBrollSlots(
   const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
 
   let candidates: Array<{ start?: number; duration?: number; clip?: number }> = []
+  // Did we get a real placement decision back? Only a genuine planner FAILURE
+  // (API error, or a response that isn't the expected shape) justifies the
+  // force-spread fallback below. A planner that ran fine and chose to place few
+  // or no cutaways is a judgment we respect — forcing in clips that don't match
+  // reads as AI slop and breaks the "never AI-looking" bar.
+  let plannerFailed = false
   try {
     const raw = await chatCompletion({
       model: MODELS.fast,
@@ -435,10 +441,11 @@ export async function planCustomBrollSlots(
       }],
     })
     const parsed = parseJsonLoose<{ items?: Array<{ start?: number; duration?: number; clip?: number }> }>(raw)
-    candidates = Array.isArray(parsed.items) ? parsed.items : []
+    if (Array.isArray(parsed.items)) candidates = parsed.items
+    else plannerFailed = true   // model didn't answer in the expected shape — treat as a failure, not "nothing fits"
   } catch (e) {
     console.warn('[broll] custom-clip planning failed:', (e as Error).message)
-    candidates = []
+    plannerFailed = true
   }
 
   // Enforce the rules in code (the model proposes, the code disposes), then
@@ -476,9 +483,17 @@ export async function planCustomBrollSlots(
     if (items.length >= targetCount) break
   }
 
-  // Fallback spread: at minimum, each clip lands once, evenly spaced — but
-  // never more cutaways than the coverage target asked for.
-  if (!items.length) {
+  // Planner ran fine but matched nothing → respect it, keep the video clean
+  // rather than forcing footage that doesn't fit what's being said.
+  if (!items.length && !plannerFailed) {
+    console.log('[broll] planner matched no custom clips to the transcript — leaving custom cutaways out')
+  }
+
+  // Fallback spread: ONLY when the planner failed to return a usable answer
+  // (API error / malformed response). The creator gave us clips and we couldn't
+  // decide where they go, so spread them evenly as a safety net — each clip
+  // lands once, evenly spaced, never more than the coverage target asked for.
+  if (!items.length && plannerFailed) {
     const usable = Math.min(targetCount, clips.length, Math.max(1, Math.floor((duration - 6) / (3 + minGap))))
     const step = (duration - 6) / usable
     for (let i = 0; i < usable; i++) {
