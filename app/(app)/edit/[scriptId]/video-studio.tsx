@@ -10,7 +10,7 @@ import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 // keep the client UI simple. The pipeline underneath works end-to-end, so the
 // field shows as a visible "Coming soon" teaser instead of disappearing
 // entirely. Set to false to fully enable it — nothing else needs to change.
-const CUSTOM_BROLL_COMING_SOON = true
+const CUSTOM_BROLL_COMING_SOON = false
 
 const MUSIC_OPTIONS: { value: MusicMode; label: string; hint: string }[] = [
   { value: 'smart', label: 'Smart',    hint: 'Mood-matched track from the library' },

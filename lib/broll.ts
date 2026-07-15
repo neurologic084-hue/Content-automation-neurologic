@@ -460,6 +460,12 @@ export async function planCustomBrollSlots(
   const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
 
   let candidates: Array<{ start?: number; duration?: number; clip?: number }> = []
+  // Did we get a real placement decision back? Only a genuine planner FAILURE
+  // (API error, or a response that isn't the expected shape) justifies the
+  // force-spread fallback below. A planner that ran fine and chose to place few
+  // or no cutaways is a judgment we respect — forcing in clips that don't match
+  // reads as AI slop and breaks the "never AI-looking" bar.
+  let plannerFailed = false
   try {
     const raw = await chatCompletion({
       model: MODELS.fast,
@@ -470,18 +476,23 @@ export async function planCustomBrollSlots(
         role: 'user',
         content: [
           "Place the creator's OWN B-roll clips as full-screen cutaways on a talking-head video.",
-          `Video duration: ${duration.toFixed(1)}s. Place up to ${targetCount} cutaway(s).`,
+          `Video duration: ${duration.toFixed(1)}s. Place AT MOST ${targetCount} cutaway(s) — this is a hard ceiling, not a goal. Placing FEWER, or ZERO, is the correct answer whenever the clips do not clearly fit.`,
           'Available clips (index: length, what it shows):',
           ...clipLines,
           '',
           'Transcript with word start times:',
           timed,
           '',
-          'Rules:',
-          '- Assign each cutaway the clip whose CONTENT best matches what the speaker is',
-          '  saying at that moment. Only place a cutaway where a clip genuinely fits —',
-          '  fewer well-matched cutaways beat forced ones.',
-          '- Each clip may be used at most twice; prefer using every clip once first.',
+          'How to decide (do this per clip):',
+          '- Ask: does what the clip SHOWS directly illustrate something the speaker actually',
+          '  says? e.g. a laptop clip fits "I opened my laptop"; a clip of flames, a night sky,',
+          '  or a spinning clock illustrates almost nothing in a normal talking-head video.',
+          '- Place a clip ONLY at a moment its content genuinely illustrates. If a clip does not',
+          '  clearly match ANY moment in the transcript, DO NOT use it at all — leave it out.',
+          '- Never place a clip just to reach the ceiling. An irrelevant cutaway is worse than',
+          '  none and makes the video look auto-generated. Returning an empty list is normal.',
+          'Constraints for any cutaway you DO place:',
+          '- Each clip may be used at most twice; prefer using every fitting clip once first.',
           '- duration: 1.8 to 3.8 seconds, and never longer than the clip itself.',
           '- Never start before 2.5s, never end within the last 1.5s of the video.',
           `- At least ${minGap} seconds of talking-head between cutaways. No overlaps.`,
@@ -490,10 +501,11 @@ export async function planCustomBrollSlots(
       }],
     })
     const parsed = parseJsonLoose<{ items?: Array<{ start?: number; duration?: number; clip?: number }> }>(raw)
-    candidates = Array.isArray(parsed.items) ? parsed.items : []
+    if (Array.isArray(parsed.items)) candidates = parsed.items
+    else plannerFailed = true   // model didn't answer in the expected shape — treat as a failure, not "nothing fits"
   } catch (e) {
     console.warn('[broll] custom-clip planning failed:', (e as Error).message)
-    candidates = []
+    plannerFailed = true
   }
 
   // Enforce the rules in code (the model proposes, the code disposes), then
@@ -531,9 +543,17 @@ export async function planCustomBrollSlots(
     if (items.length >= targetCount) break
   }
 
-  // Fallback spread: at minimum, each clip lands once, evenly spaced — but
-  // never more cutaways than the coverage target asked for.
-  if (!items.length) {
+  // Planner ran fine but matched nothing → respect it, keep the video clean
+  // rather than forcing footage that doesn't fit what's being said.
+  if (!items.length && !plannerFailed) {
+    console.log('[broll] planner matched no custom clips to the transcript — leaving custom cutaways out')
+  }
+
+  // Fallback spread: ONLY when the planner failed to return a usable answer
+  // (API error / malformed response). The creator gave us clips and we couldn't
+  // decide where they go, so spread them evenly as a safety net — each clip
+  // lands once, evenly spaced, never more than the coverage target asked for.
+  if (!items.length && plannerFailed) {
     const usable = Math.min(targetCount, clips.length, Math.max(1, Math.floor((duration - 6) / (3 + minGap))))
     const step = (duration - 6) / usable
     for (let i = 0; i < usable; i++) {
