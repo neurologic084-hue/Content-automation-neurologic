@@ -1431,6 +1431,17 @@ async function stageCustomBroll(
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
     try {
+      // KNOWN LIMITATION (inline mode only): this filename is job-scoped, not
+      // variant-scoped, and renderRemotionEdit deletes these files in its finally
+      // (see the `staged` cleanup). In prod each variant renders in its own
+      // isolated filesystem (Vercel sandbox / GitHub Actions), so v4/v5/v6 never
+      // touch the same files — safe. But when dispatchPipelineTask runs inline
+      // (local dev / a self-hosted long-lived server), all three variants share
+      // one fs: they race on these paths and the first to finish deletes clips the
+      // others are still rendering, so a variant can silently ship with fewer or
+      // zero custom cutaways. Reproduced 2026-07-15 via scripts/edge-test-parallel.
+      // Not fixed on purpose (prod is isolated); variant-scope this name if inline
+      // parallel rendering ever becomes a supported path.
       const fileName = `custom-${jobId.slice(0, 8)}-${i}.mp4`
       const outPath = path.join(cacheDir, fileName)
       if (!fs.existsSync(outPath)) {
