@@ -278,11 +278,11 @@ export default function ScriptDetailPage() {
             className="flex items-center justify-between w-full px-5 py-4 rounded-2xl text-white transition-all"
             style={{ background: '#FF4F17', boxShadow: '0 4px 14px rgba(255,79,23,0.25)' }}
           >
-            <div>
+            <div className="min-w-0">
               <p className="text-[11px] font-bold uppercase tracking-widest opacity-80 mb-0.5">When you are ready</p>
               <p className="text-sm font-semibold">Upload footage and start editing</p>
             </div>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg className="flex-shrink-0" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 18l6-6-6-6" />
             </svg>
           </a>
@@ -310,7 +310,7 @@ export default function ScriptDetailPage() {
             )}
           </div>
           {idea?.raw_idea && (
-            <p className="text-xs text-[#A1A1AA]">Idea: "{idea.raw_idea}"</p>
+            <p className="text-xs text-[#A1A1AA] break-words">Idea: "{idea.raw_idea}"</p>
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -336,7 +336,7 @@ export default function ScriptDetailPage() {
           {!editing && (
             <button
               onClick={copyScript}
-              className="text-xs font-medium px-2 sm:px-3 py-1.5 rounded-lg border border-[#E4E4E0] text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer"
+              className="flex items-center justify-center w-10 h-10 sm:w-auto sm:h-auto text-xs font-medium sm:px-3 sm:py-1.5 rounded-lg border border-[#E4E4E0] text-[#71717A] hover:bg-[#F4F3F0] transition-all cursor-pointer flex-shrink-0"
             >
               <span className="hidden sm:inline">{copyLabel}</span>
               <span className="sm:hidden">
@@ -363,7 +363,7 @@ export default function ScriptDetailPage() {
       <div className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl mb-5 px-4 sm:px-6 py-4 sm:py-5 space-y-5 sm:space-y-6" style={{ animationDelay: '120ms' }}>
 
         {/* 1   Hook */}
-        <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '160ms' }}>
+        <div className="animate-fadeInUp flex items-start gap-3 sm:gap-4" style={{ animationDelay: '160ms' }}>
           <div
             className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
             style={{ background: '#FF4F17' }}
@@ -416,7 +416,7 @@ export default function ScriptDetailPage() {
 
         {/* Re-hook   tips & tricks only */}
         {!editing && script.filming_plan?.re_hook && (
-          <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '190ms' }}>
+          <div className="animate-fadeInUp flex items-start gap-3 sm:gap-4" style={{ animationDelay: '190ms' }}>
             <div
               className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
               style={{ background: '#F59E0B' }}
@@ -435,7 +435,7 @@ export default function ScriptDetailPage() {
 
         {/* Body beats */}
         {editing ? (
-          <div className="flex items-start gap-4">
+          <div className="flex items-start gap-3 sm:gap-4">
             <div className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]" style={{ background: '#6366F1' }}>
               2
             </div>
@@ -457,7 +457,7 @@ export default function ScriptDetailPage() {
             const label = customLabels[i] || BEAT_FALLBACK_LABELS[i] || `Beat ${i + 2}`
             const color = BEAT_COLORS[i] ?? '#A1A1AA'
             return (
-              <div key={i} className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: `${220 + i * 60}ms` }}>
+              <div key={i} className="animate-fadeInUp flex items-start gap-3 sm:gap-4" style={{ animationDelay: `${220 + i * 60}ms` }}>
                 <div
                   className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
                   style={{ background: color }}
@@ -479,7 +479,7 @@ export default function ScriptDetailPage() {
         )}
 
         {/* CTA */}
-        <div className="animate-fadeInUp flex items-start gap-4" style={{ animationDelay: '400ms' }}>
+        <div className="animate-fadeInUp flex items-start gap-3 sm:gap-4" style={{ animationDelay: '400ms' }}>
           <div
             className="w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center text-[10px] font-bold text-white mt-[3px]"
             style={{ background: '#22C55E' }}
@@ -552,14 +552,14 @@ export default function ScriptDetailPage() {
               { label: 'Setup', value: script.filming_plan?.setup || script.filming_plan?.setup_notes || script.filming_plan?.location },
               { label: 'Outfit', value: script.filming_plan?.wardrobe },
             ].filter(item => item.value).map((item) => (
-              <div key={item.label} className="flex gap-3">
-                <span className="text-xs font-semibold text-[#A1A1AA] w-20 flex-shrink-0 pt-0.5">{item.label}</span>
+              <div key={item.label} className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+                <span className="text-xs font-semibold text-[#A1A1AA] sm:w-20 sm:flex-shrink-0 sm:pt-0.5">{item.label}</span>
                 <span className="text-sm text-[#18181B]">{item.value}</span>
               </div>
             ))}
             {(script.filming_plan?.b_roll?.length ?? 0) > 0 && (
-              <div className="flex gap-3">
-                <span className="text-xs font-semibold text-[#A1A1AA] w-20 flex-shrink-0 pt-0.5">B-roll ideas</span>
+              <div className="flex flex-col gap-1 sm:flex-row sm:gap-3">
+                <span className="text-xs font-semibold text-[#A1A1AA] sm:w-20 sm:flex-shrink-0 sm:pt-0.5">B-roll ideas</span>
                 <ul className="text-sm text-[#18181B] space-y-1">
                   {script.filming_plan!.b_roll!.map((shot, i) => (
                     <li key={i} className="flex gap-2">
@@ -682,29 +682,31 @@ export default function ScriptDetailPage() {
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-3 gap-3">
-                <button
-                  onClick={handleReject}
-                  disabled={saving}
-                  className="py-3 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#EF4444] hover:bg-[#FEE2E2] hover:border-[#EF4444] disabled:opacity-40 transition-all cursor-pointer"
-                >
-                  Reject
-                </button>
-                <button
-                  onClick={() => setShowRevisionInput(true)}
-                  disabled={saving}
-                  className="py-3 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#6366F1] hover:bg-[#EEF2FF] hover:border-[#6366F1] disabled:opacity-40 transition-all cursor-pointer"
-                >
-                  Revise
-                </button>
+              <div className="space-y-2.5">
                 <button
                   onClick={handleApprove}
                   disabled={saving}
-                  className="shine-sweep py-3 rounded-xl text-white text-sm font-semibold active:scale-[0.98] disabled:opacity-40 transition-all cursor-pointer"
+                  className="shine-sweep w-full py-3.5 rounded-xl text-white text-[15px] font-semibold active:scale-[0.98] disabled:opacity-40 transition-all cursor-pointer"
                   style={{ background: 'linear-gradient(120deg, #FF5C26 0%, #FF4F17 45%, #F03D05 100%)', boxShadow: '0 4px 12px rgba(255,79,23,0.25)' }}
                 >
-                  {saving ? '...' : 'Approve'}
+                  {saving ? 'Approving...' : 'Approve'}
                 </button>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    onClick={handleReject}
+                    disabled={saving}
+                    className="py-3 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#EF4444] hover:bg-[#FEE2E2] hover:border-[#EF4444] disabled:opacity-40 transition-all cursor-pointer"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    onClick={() => setShowRevisionInput(true)}
+                    disabled={saving}
+                    className="py-3 rounded-xl border border-[#E4E4E0] text-sm font-medium text-[#6366F1] hover:bg-[#EEF2FF] hover:border-[#6366F1] disabled:opacity-40 transition-all cursor-pointer"
+                  >
+                    Revise
+                  </button>
+                </div>
               </div>
             )}
           </>
