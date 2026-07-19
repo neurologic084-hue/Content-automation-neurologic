@@ -1576,6 +1576,10 @@ async function stageChosenWindows(
   jobId: string,
   cacheDir: string,
   publicPrefix: string,
+  // ALL candidates, not just winners — their raw downloads must be cleaned up
+  // too, or a losing clip's full-length file stays in remotion/public where
+  // the render server can serve it and the bundler can copy it.
+  allCandidates: ClipCandidate[] = chosen,
 ): Promise<CustomClip[]> {
   const clips: CustomClip[] = []
   for (let n = 0; n < chosen.length; n++) {
@@ -1600,7 +1604,8 @@ async function stageChosenWindows(
   }
   // The raw downloads are only needed to cut windows out of — drop them so the
   // render server never serves (or the bundler copies) the full-length files.
-  for (const raw of new Set(chosen.map(c => c.rawPath))) {
+  // EVERY candidate's raw, not just the winners'.
+  for (const raw of new Set(allCandidates.map(c => c.rawPath))) {
     try { if (fs.existsSync(raw)) fs.unlinkSync(raw) } catch { /* best-effort */ }
   }
   console.log(`[motion-renderer] staged ${clips.length} window(s), ${clips.reduce((s, c) => s + c.duration, 0).toFixed(1)}s total`)
@@ -1779,7 +1784,7 @@ async function renderRemotionEdit(
           // renderer never decodes footage that can't reach the screen.
           const candidates = await collectCustomBrollCandidates(jobId, opts.customBroll!, cacheDir)
           const chosen = await selectBestClips(candidates, plan.editedWords)
-          const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache')
+          const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
           for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
         } else {
@@ -2372,7 +2377,7 @@ async function prepareCustomBrollForJob(
       return forEntry.length ? forEntry[Math.floor(forEntry.length / 2)] : null
     })
     .filter((c): c is ClipCandidate => !!c)
-  const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache')
+  const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
   if (!clips.length) return
 
   // Host each normalized clip in R2 ({jobId}/custom-broll-i.mp4 — cleaned up
