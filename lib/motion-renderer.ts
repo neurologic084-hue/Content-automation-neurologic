@@ -1430,6 +1430,14 @@ async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
   fs.writeFileSync(scriptPath, script)
   await run(`bash "${scriptPath}"`, 300_000)
 }
+// Hard cap on how much of each creator clip is kept. The planner gives a clip
+// at most two 3.8s cutaways, so anything past ~7.6s can never reach the screen;
+// 10s leaves headroom for the tail-cut on a second use (srcOffset) while
+// keeping the compositor's decode work small. Raise only with a measured
+// reason — this ceiling is what stops a folder of long clips from starving the
+// render host.
+const MAX_CLIP_SECONDS = 10
+
 // Downloads, normalizes, and describes the creator's OWN B-roll clips (Drive
 // links stored on the job). Descriptions are written back to the job row so
 // each clip is watched once per JOB, not once per variant. Returns clips
@@ -1465,9 +1473,19 @@ async function stageCustomBroll(
         // to Drive's confirm-page quirks on re-renders.
         await downloadFile((entry as CustomBrollEntry).r2Url ?? entry.url, rawPath)
         // Normalize to h264/yuv420p 30fps, audio stripped — OffthreadVideo-safe
-        // regardless of what the phone/Drive produced (HEVC, odd rotation).
+        // regardless of what the phone/Drive produced (HEVC, odd rotation) —
+        // and TRIM to MAX_CLIP_SECONDS.
+        //
+        // The trim is what keeps renders alive. A clip can occupy at most two
+        // 3.8s cutaways (~7.6s on screen), but the full file was being decoded
+        // by the render compositor for the whole render. One real job staged
+        // 243s / 130MB of 1080p footage to produce 9s of finished cutaways, and
+        // that volume starved the GitHub runner until font loading timed out —
+        // 12-clip jobs failed 3/3 while 0-clip jobs passed 3/3. Trimming costs
+        // nothing visible: the frames past the cap could never be shown, and
+        // Gemini already describes each clip from its first 8s.
         await run(
-          `ffmpeg -y -i "${rawPath}" -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
+          `ffmpeg -y -i "${rawPath}" -t ${MAX_CLIP_SECONDS} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
           300_000,
         )
         try { fs.unlinkSync(rawPath) } catch { /* best-effort */ }
