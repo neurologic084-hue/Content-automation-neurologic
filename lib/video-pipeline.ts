@@ -25,6 +25,13 @@ export interface CustomBrollEntry {
   duration?: number | null
   submagicMediaId?: string | null
   placements?: { start: number; end: number }[]
+  // Which source timeline `placements` were measured against: the pre-cut
+  // Submagic source ('cut') or the uncut compressed one ('full'). Submagic is
+  // handed whichever getSubmagicSourceUrl picks, and the two differ materially
+  // (one real job: 140.9s vs 113.4s) — so timings from the wrong basis land on
+  // the wrong words, or past the end of the video, which Submagic rejects.
+  // Absent on rows written before this was tracked; treated as 'full'.
+  placementBasis?: 'cut' | 'full'
 }
 
 export interface SubmagicPreset {

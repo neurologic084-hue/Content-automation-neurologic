@@ -507,9 +507,13 @@ export async function prepareJobSource(
   jobId: string,
   sourceUrl: string,
   onProgress?: ProgressCallback,
-): Promise<{ localPath: string }> {
+): Promise<{ localPath: string; cutPath: string | null }> {
   const outDir = rendersDir(jobId)
   const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir, onProgress)
+  // Set when the pre-cut Submagic source is built below. Custom B-roll
+  // placements MUST be planned against whichever file Submagic actually
+  // receives, so the caller needs to know which one that is.
+  let submagicCutPath: string | null = null
   // Back the compressed copy up to R2 right away rather than waiting for the
   // first Submagic variant to start -- so the job survives a server restart
   // without needing to re-pull from Drive, and every variant just reuses this
@@ -535,6 +539,7 @@ export async function prepareJobSource(
     const built = await buildSubmagicCutSource(localPath, cutPath)
     if (built) {
       await uploadToStorage(built, 'source-cut.mp4', jobId)
+      submagicCutPath = built
       console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId})`)
     }
   } catch (e) {
@@ -547,7 +552,7 @@ export async function prepareJobSource(
   await onProgress?.(99, 'Analyzing footage')
   ensureContentProfile(jobId, sourceUrl).catch(() => { /* best-effort; falls back at read time */ })
   await onProgress?.(100, 'Footage ready')
-  return { localPath }
+  return { localPath, cutPath: submagicCutPath }
 }
 
 // A Remotion delayRender failure quotes the component's props back at you, and
@@ -2327,7 +2332,11 @@ export function startSingleVariant(
 // Submagic user-media id, a one-line description, and transcript-matched
 // placements. v1-v3 turn those into timed Submagic items; v4-v6 reuse the
 // R2 copies + descriptions for their own per-variant planning.
-async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string): Promise<void> {
+async function prepareCustomBrollForJob(
+  jobId: string,
+  sourceLocalPath: string,
+  basis: 'cut' | 'full',
+): Promise<void> {
   const db = supabaseAdmin()
   const { data: job } = await db.from('video_jobs').select('custom_broll').eq('id', jobId).single()
   const entries = (job?.custom_broll ?? null) as CustomBrollEntry[] | null
@@ -2384,7 +2393,7 @@ async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string):
     // more clips than a single video can carry.
     const ranked = await selectBestClips(clips, timedWords)
     const placed = await planCustomBrollSlots(timedWords, duration, null, ranked, [], false)
-    for (const entry of entries) entry.placements = []
+    for (const entry of entries) { entry.placements = []; entry.placementBasis = basis }
     for (const item of placed) {
       const clip = ranked.find(c => c.file === item.file)
       const entry = clip ? entries[clip.entryIndex ?? -1] : undefined
@@ -2426,7 +2435,16 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     // creator's clips, host them in R2, register them with Submagic, and plan
     // transcript-matched placements that every Submagic variant will reuse.
     try {
-      await prepareCustomBrollForJob(jobId, prepared.localPath)
+      // Plan against the PRE-CUT file when there is one. getSubmagicSourceUrl
+      // hands Submagic source-cut.mp4 in preference to the compressed source,
+      // and the cut is materially shorter (one real job: 140.9s -> 113.4s), so
+      // placements timed on the uncut source land in the wrong place — or past
+      // the end of the video entirely, which Submagic rejects outright.
+      await prepareCustomBrollForJob(
+        jobId,
+        prepared.cutPath ?? prepared.localPath,
+        prepared.cutPath ? 'cut' : 'full',
+      )
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll prep failed (renders proceed without it):`, (e as Error).message)
     }

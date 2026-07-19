@@ -305,7 +305,23 @@ export async function POST(req: NextRequest) {
           const customEntries = brollSetting.mode === 'none'
             ? null
             : (job.custom_broll ?? null) as CustomBrollEntry[] | null
-          const customItems = (customEntries ?? [])
+          // Placements are only valid for the timeline they were measured on.
+          // We send source-cut.mp4 when it exists, and it is materially shorter
+          // than the compressed source, so items timed on the wrong one land on
+          // the wrong words — or run past the end, which makes Submagic reject
+          // the whole submission (observed: every v1-v3 failed with no project
+          // ever created). On a mismatch, drop the items and render without
+          // them rather than fail the variant.
+          const wantBasis: 'cut' | 'full' = isPrecut ? 'cut' : 'full'
+          const usableEntries = (customEntries ?? []).filter(
+            e => (e.placementBasis ?? 'full') === wantBasis,
+          )
+          if ((customEntries?.length ?? 0) > 0 && usableEntries.length === 0) {
+            console.warn(
+              `[start-variant] custom B-roll placements were timed on the '${customEntries![0]?.placementBasis ?? 'full'}' source but this render sends the '${wantBasis}' one — skipping them (re-run source prep to re-time)`,
+            )
+          }
+          const customItems = usableEntries
             .filter(e => e.submagicMediaId && e.placements?.length)
             .flatMap(e => e.placements!.map(p => ({
               type: 'user-media' as const,
