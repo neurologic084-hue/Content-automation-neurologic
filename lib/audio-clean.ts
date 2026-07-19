@@ -109,8 +109,18 @@ export type AudioCleaner = 'submagic' | 'elevenlabs' | 'none'
 // inside their own render and are never passed through here; see
 // retrieveAndStoreSubmagicResult.
 export async function cleanAudioInPlace(videoPath: string): Promise<AudioCleaner> {
+  // Escape hatch for TEST renders: Submagic Clean Audio spends a real Submagic
+  // project per variant, which is pure waste when the point of the render is to
+  // prove the pipeline works. SKIP_SUBMAGIC_CLEAN=1 goes straight to ElevenLabs
+  // isolation. Never set in normal operation — client renders want the primary
+  // cleaner.
+  const skipSubmagic = process.env.SKIP_SUBMAGIC_CLEAN === '1'
+  if (skipSubmagic) {
+    console.warn('[audio-clean] SKIP_SUBMAGIC_CLEAN=1 — test render, going straight to ElevenLabs isolation')
+  }
+
   // 1. Submagic (primary — plan-included voice enhancement).
-  if (process.env.SUBMAGIC_API_KEY) {
+  if (process.env.SUBMAGIC_API_KEY && !skipSubmagic) {
     try {
       await submagicCleanInPlace(videoPath)
       console.log('[audio-clean] Submagic: cleaned dialogue remuxed over original picture')

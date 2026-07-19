@@ -43,6 +43,10 @@ jobs:
           # into the script) so its contents can never be shell-interpreted.
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
           RENDERS_DIR: /tmp/renders
+          # Test renders only: dispatch with client_payload.skipSubmagicClean="1"
+          # to skip Submagic Clean Audio (a paid project per variant) and use the
+          # ElevenLabs fallback instead. Absent on real client renders.
+          SKIP_SUBMAGIC_CLEAN: ${{ github.event.client_payload.skipSubmagicClean }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
