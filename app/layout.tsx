@@ -1,4 +1,4 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import { Plus_Jakarta_Sans, DM_Sans, Geist_Mono } from 'next/font/google'
 import './globals.css'
 
@@ -25,6 +25,17 @@ export const metadata: Metadata = {
     template: '%s | Olympus',
   },
   description: 'Turn any idea into a scroll-stopping short-form script. AI picks the audience, writes the script, learns from every approval.',
+}
+
+// viewportFit: 'cover' is what actually makes env(safe-area-inset-*) non-zero on
+// notched iPhones — without it the .pb-safe padding under the bottom nav
+// resolves to 0 and the tab bar sits under the home indicator. No maximum-scale
+// so pinch-zoom stays available.
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+  themeColor: '#FAFAF9',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

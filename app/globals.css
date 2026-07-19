@@ -146,6 +146,25 @@ body {
   animation: slideInLeft 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* ── Safe-area helpers (iPhone home indicator / notch) ──
+   Needs viewport-fit=cover (set in app/layout.tsx) for the insets to be
+   non-zero; they fall back to 0 everywhere else, so these are no-ops on
+   desktop and Android. `pb-safe` was used by the bottom nav long before it
+   was defined anywhere — the tab bar was sitting under the home indicator. */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Clears the fixed bottom nav (h-16) PLUS the home indicator, so the last
+   element on a page is never trapped behind the tab bar. */
+.pb-nav {
+  padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+}
+
 /* ── Hover lift for interactive cards ── */
 .hover-lift {
   transition: transform 0.18s ease, box-shadow 0.18s ease !important;

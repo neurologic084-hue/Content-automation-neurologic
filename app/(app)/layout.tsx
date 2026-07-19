@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import { Sidebar } from '@/components/layout/sidebar'
 import { BottomNav } from '@/components/layout/bottom-nav'
+import { MobileHeader } from '@/components/layout/mobile-header'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient()
@@ -33,7 +34,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <div className="flex min-h-dvh bg-[#FAFAF9]">
       <Sidebar hasSettings={hasSettings} />
-      <main className="flex-1 flex flex-col min-w-0 pb-20 md:pb-0">
+      <main className="flex-1 flex flex-col min-w-0 pb-nav md:pb-0">
+        <MobileHeader />
         {children}
       </main>
       <BottomNav />

@@ -124,14 +124,22 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
               <p className="text-[10px] font-bold tracking-[0.14em] uppercase" style={{ color: '#FF4F17' }}>
                 WELCOME TO OLYMPUS
               </p>
+              {/* 44px tap target with the 32px circle kept as an inner span —
+                  this is the only way out of a modal that opens over the whole
+                  dashboard on a phone, so it must not be a 32px dot. */}
               <button
                 onClick={dismiss}
-                className="w-8 h-8 rounded-full flex items-center justify-center cursor-pointer"
-                style={{ background: '#F4F3F0', color: '#9B9B97' }}
+                aria-label="Close"
+                className="w-11 h-11 -mr-1.5 rounded-full flex items-center justify-center cursor-pointer"
               >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
+                <span
+                  className="w-8 h-8 rounded-full flex items-center justify-center"
+                  style={{ background: '#F4F3F0', color: '#9B9B97' }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </span>
               </button>
             </div>
 
@@ -180,14 +188,14 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
           <div className="px-8 py-5 flex items-center justify-between">
             <button
               onClick={dismiss}
-              className="px-4 py-2 rounded-xl text-[13px] font-medium border cursor-pointer"
+              className="px-4 py-3 rounded-xl text-[13px] font-medium border cursor-pointer"
               style={{ borderColor: '#E4E0DA', color: '#9B9B97' }}
             >
               Maybe later
             </button>
             <button
               onClick={startTour}
-              className="px-6 py-2.5 rounded-xl text-[13px] font-semibold text-white cursor-pointer"
+              className="px-6 py-3 rounded-xl text-[13px] font-semibold text-white cursor-pointer"
               style={{ background: '#111111', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}
             >
               Start tour →

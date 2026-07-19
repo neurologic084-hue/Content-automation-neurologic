@@ -506,7 +506,11 @@ export function VideoStudio({ script, existingJobId }: Props) {
                   step={5}
                   value={brollPercent}
                   onChange={e => setBrollPercent(Number(e.target.value))}
-                  className="w-full cursor-pointer"
+                  // h-10: the native track renders ~16px tall, which is well
+                  // under a thumb-sized target — the extra height is invisible
+                  // (accentColor keeps the track thin) but makes the drag
+                  // actually catchable on a phone.
+                  className="w-full h-10 cursor-pointer"
                   style={{ accentColor: '#FF4F17' }}
                 />
                 <div className="flex justify-between text-[10px] text-[#A1A1AA] mt-0.5">
