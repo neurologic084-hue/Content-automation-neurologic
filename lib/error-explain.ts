@@ -25,6 +25,19 @@ export function explainFailure(raw: unknown): string {
     return trim(msg)
   }
 
+  // ── Remotion render (v4-v6) ──────────────────────────────────────────────────
+  // A delayRender() handle that never cleared: headless Chrome couldn't finish
+  // loading an asset inside the timeout. The raw message quotes the handle's
+  // label, which embeds a multi-MB base64 font — and because callers keep only
+  // the TAIL of stderr, the readable half is already gone by the time it lands
+  // here, leaving cards showing "[binary], format: truetype, weight: undefined…".
+  // Catch it before the generic trim so the card says something actionable.
+  // "not cleared after" is the whole tell — it survives the tail-cut even when
+  // "delayRender()"/"Loading font" don't, and no other service phrases it that way.
+  if (mentions('delayrender', 'not cleared after')) {
+    return 'The render host ran out of time loading fonts/assets (it was overloaded). Please retry this variant.'
+  }
+
   // ── OpenRouter / Gemini (video analysis, cut plan, b-roll, graphics) ──────────
   if (mentions('openrouter', 'gemini')) {
     if (has(402) || mentions('insufficient', 'credit', 'payment required', 'quota', 'balance'))

@@ -615,6 +615,21 @@ function isEphemeralHost(): boolean {
   return process.env.SANDBOX === '1' || process.env.GITHUB_ACTIONS === 'true'
 }
 
+// True when the render runs on a SMALL shared box (Vercel Sandbox VM or a
+// GitHub Actions runner) rather than a dev machine. Those hosts need fewer
+// parallel Chrome tabs and a longer delayRender budget.
+//
+// This used to key off process.env.SANDBOX alone, so GitHub runners silently
+// took the dev-machine profile (4 tabs, 10-minute timeout). That held until
+// custom B-roll shipped: with a dozen creator clips to decode, 4 tabs each
+// also parsing the embedded-font bundle starved the 4-core runner and the
+// FIRST font load never cleared inside 10 minutes — every v4-v6 render died
+// with `A delayRender() "Loading font ..." was called but not cleared after
+// 598000ms`. Same profile as the Sandbox fixes it.
+function isConstrainedRenderHost(): boolean {
+  return process.env.SANDBOX === '1' || process.env.GITHUB_ACTIONS === 'true'
+}
+
 async function finishVariant(
   jobId: string,
   variantId: string,
@@ -1966,12 +1981,18 @@ async function renderRemotionEdit(
       // past the old 240s wall, and the OffthreadVideo compositor drops
       // connections ("Request closed") under the memory pressure. Fewer tabs
       // (concurrency 4) each get enough headroom to load fonts and decode video.
-      const sandboxFlags = process.env.SANDBOX
-        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2 --binaries-directory="${gnuDir}"`
+      // Constrained hosts (Sandbox VM + GitHub runner) share the tab/cache caps;
+      // only the Sandbox additionally needs the glibc-patched compositor, since
+      // GitHub runners are Ubuntu and their stock compositor is fine.
+      const constrained = isConstrainedRenderHost()
+      const sandboxFlags = constrained
+        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2` +
+          (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
         : ' --concurrency=4'
-      // 600s local / 900s sandbox delayRender: headless-Chrome startup + that
-      // first font/asset load need real room before the render is declared dead.
-      const renderTimeout = process.env.SANDBOX ? 900000 : 600000
+      // 600s dev machine / 900s constrained host delayRender: headless-Chrome
+      // startup + that first font/asset load need real room on a small box
+      // before the render is declared dead.
+      const renderTimeout = constrained ? 900000 : 600000
       await run(
         // Generous delayRender timeout: headless-Chrome startup + asset loads
         // can crawl on a busy/constrained machine and fail renders that would

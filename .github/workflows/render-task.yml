@@ -12,7 +12,10 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The Remotion render alone is allowed 25 min (see run() in motion-renderer),
+    # on top of checkout + npm ci + browser install + footage prep. 30 min killed
+    # renders that were still healthy; 45 leaves real headroom.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
