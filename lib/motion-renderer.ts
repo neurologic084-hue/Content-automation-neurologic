@@ -1430,27 +1430,58 @@ async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
   fs.writeFileSync(scriptPath, script)
   await run(`bash "${scriptPath}"`, 300_000)
 }
-// Hard cap on how much of each creator clip is kept. The planner gives a clip
-// at most two 3.8s cutaways, so anything past ~7.6s can never reach the screen;
-// 10s leaves headroom for the tail-cut on a second use (srcOffset) while
-// keeping the compositor's decode work small. Raise only with a measured
-// reason — this ceiling is what stops a folder of long clips from starving the
-// render host.
-const MAX_CLIP_SECONDS = 10
+// How much of a creator clip is kept per WINDOW. A cutaway is 1.8-3.8s, so 5s
+// covers the longest one with headroom. Keeping windows short is what stops a
+// folder of long clips from starving the render host: one real job staged 243s
+// of 1080p footage to show 9s of cutaways, and 12-clip jobs failed 3/3 while
+// 0-clip jobs passed 3/3.
+const CLIP_WINDOW_SECONDS = 5
 
-// Downloads, normalizes, and describes the creator's OWN B-roll clips (Drive
-// links stored on the job). Descriptions are written back to the job row so
-// each clip is watched once per JOB, not once per variant. Returns clips
-// ready for the custom planner; a clip that fails is skipped, never fatal.
-async function stageCustomBroll(
+// A long clip is not one moment — a 100s walk-through has several usable beats,
+// and the good one is rarely at the head. Rather than blindly keeping the first
+// slice, carve up to this many windows spread across the clip; each is described
+// separately and competes on content, so the planner can pick the beat that
+// actually matches what the creator is saying.
+const MAX_WINDOWS_PER_CLIP = 3
+
+// Windows (start seconds) to carve out of a clip of `duration` seconds. Short
+// clips stay whole. Longer ones get evenly spaced windows, insetting from both
+// ends because the first and last moments of a phone clip are usually the hand
+// reaching for the record button.
+function clipWindows(duration: number): number[] {
+  if (!Number.isFinite(duration) || duration <= CLIP_WINDOW_SECONDS * 1.6) return [0]
+  const count = Math.max(1, Math.min(MAX_WINDOWS_PER_CLIP, Math.round(duration / 30)))
+  if (count === 1) return [Math.max(0, (duration - CLIP_WINDOW_SECONDS) / 2)] // middle beats the head
+  const usable = Math.max(0, duration - CLIP_WINDOW_SECONDS)
+  const inset = Math.min(1.5, usable * 0.08)
+  const span = usable - inset * 2
+  return Array.from({ length: count }, (_, i) =>
+    Number((inset + (span * i) / (count - 1)).toFixed(2)),
+  )
+}
+
+// One candidate window: described from a cheap low-res sample, cut to full
+// resolution only if it survives selection.
+interface ClipCandidate {
+  entryIndex: number
+  rawPath: string
+  offset: number     // seconds into the source
+  duration: number   // seconds of this window
+  description: string
+}
+
+// Downloads each of the creator's OWN B-roll clips (Drive links stored on the
+// job) and describes every candidate WINDOW inside it — one for a short clip,
+// up to MAX_WINDOWS_PER_CLIP spread across a long one. Nothing is cut to full
+// resolution here: the caller ranks the candidates first and only stages the
+// winners. A clip that fails is skipped, never fatal.
+async function collectCustomBrollCandidates(
   jobId: string,
   entries: { url: string; description?: string | null }[],
   cacheDir: string,
-  publicPrefix: string,
-): Promise<CustomClip[]> {
+): Promise<ClipCandidate[]> {
   fs.mkdirSync(cacheDir, { recursive: true })
-  const clips: CustomClip[] = []
-  let descriptionsChanged = false
+  const candidates: ClipCandidate[] = []
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
     try {
@@ -1465,40 +1496,27 @@ async function stageCustomBroll(
       // zero custom cutaways. Reproduced 2026-07-15 via scripts/edge-test-parallel.
       // Not fixed on purpose (prod is isolated); variant-scope this name if inline
       // parallel rendering ever becomes a supported path.
-      const fileName = `custom-${jobId.slice(0, 8)}-${i}.mp4`
-      const outPath = path.join(cacheDir, fileName)
-      if (!fs.existsSync(outPath)) {
-        const rawPath = outPath + '.raw'
+      const rawPath = path.join(cacheDir, `custom-${jobId.slice(0, 8)}-${i}.raw.mp4`)
+      if (!fs.existsSync(rawPath)) {
         // Prefer the normalized R2 copy from a previous prep — faster and immune
         // to Drive's confirm-page quirks on re-renders.
         await downloadFile((entry as CustomBrollEntry).r2Url ?? entry.url, rawPath)
-        // Normalize to h264/yuv420p 30fps, audio stripped — OffthreadVideo-safe
-        // regardless of what the phone/Drive produced (HEVC, odd rotation) —
-        // and TRIM to MAX_CLIP_SECONDS.
-        //
-        // The trim is what keeps renders alive. A clip can occupy at most two
-        // 3.8s cutaways (~7.6s on screen), but the full file was being decoded
-        // by the render compositor for the whole render. One real job staged
-        // 243s / 130MB of 1080p footage to produce 9s of finished cutaways, and
-        // that volume starved the GitHub runner until font loading timed out —
-        // 12-clip jobs failed 3/3 while 0-clip jobs passed 3/3. Trimming costs
-        // nothing visible: the frames past the cap could never be shown, and
-        // Gemini already describes each clip from its first 8s.
-        await run(
-          `ffmpeg -y -i "${rawPath}" -t ${MAX_CLIP_SECONDS} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
-          300_000,
-        )
-        try { fs.unlinkSync(rawPath) } catch { /* best-effort */ }
       }
-      const duration = await getVideoDuration(outPath)
+      const sourceDuration = await getVideoDuration(rawPath)
+      const windows = clipWindows(sourceDuration)
 
-      let description = entry.description?.trim() || ''
-      if (!description) {
-        // One short look per clip so the planner can match content to the
-        // transcript. Described from a tiny low-res sample, never the full
-        // file (keeps the request small no matter how big the upload was).
-        const samplePath = outPath + '.sample.mp4'
-        await run(`ffmpeg -y -i "${outPath}" -t 8 -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 -an "${samplePath}"`, 120_000)
+      for (let w = 0; w < windows.length; w++) {
+        const offset = windows[w]
+        const seconds = Math.min(CLIP_WINDOW_SECONDS, Math.max(1, sourceDuration - offset))
+        // Describe from a tiny low-res sample OF THIS WINDOW — never the full
+        // file, so the request stays small no matter how big the upload was,
+        // and each window is judged on its own content.
+        const samplePath = `${rawPath}.w${w}.sample.mp4`
+        let description = ''
+        await run(
+          `ffmpeg -y -ss ${offset.toFixed(2)} -i "${rawPath}" -t ${seconds.toFixed(2)} -vf scale=480:-2 -r 10 -c:v libx264 -preset veryfast -crf 30 -an "${samplePath}"`,
+          120_000,
+        )
         try {
           const media = { mimeType: 'video/mp4', data: fs.readFileSync(samplePath).toString('base64') }
           description = (await geminiGenerate({
@@ -1508,24 +1526,64 @@ async function stageCustomBroll(
             maxOutputTokens: 200,
             temperature: 0.2,
           })).trim()
-          entry.description = description
-          descriptionsChanged = true
+        } catch (e) {
+          console.warn(`[motion-renderer] describe failed for clip ${i} window ${w}: ${(e as Error).message}`)
         } finally {
           try { fs.unlinkSync(samplePath) } catch { /* best-effort */ }
         }
+        candidates.push({
+          entryIndex: i,
+          rawPath,
+          offset,
+          duration: seconds,
+          description: description || entry.description?.trim() || `creator clip ${i + 1}`,
+        })
+        console.log(
+          `[motion-renderer] candidate ${i}.${w}: ${offset.toFixed(1)}-${(offset + seconds).toFixed(1)}s of ${sourceDuration.toFixed(1)}s — "${description.slice(0, 70)}"`,
+        )
       }
-
-      clips.push({ file: `${publicPrefix}/${fileName}`, description: description || `creator clip ${i + 1}`, duration, entryIndex: i })
-      console.log(`[motion-renderer] custom B-roll ${i}: ${duration.toFixed(1)}s — "${description.slice(0, 70)}"`)
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
     }
   }
-  if (descriptionsChanged) {
+  return candidates
+}
+
+// Cuts the chosen windows to full resolution. Only winners get here, so the
+// render only ever decodes the seconds that can actually appear on screen.
+async function stageChosenWindows(
+  chosen: ClipCandidate[],
+  jobId: string,
+  cacheDir: string,
+  publicPrefix: string,
+): Promise<CustomClip[]> {
+  const clips: CustomClip[] = []
+  for (let n = 0; n < chosen.length; n++) {
+    const c = chosen[n]
     try {
-      await supabaseAdmin().from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
-    } catch { /* descriptions are a cache — losing them just re-describes next render */ }
+      const fileName = `custom-${jobId.slice(0, 8)}-${c.entryIndex}-w${n}.mp4`
+      const outPath = path.join(cacheDir, fileName)
+      if (!fs.existsSync(outPath)) {
+        // -ss before -i seeks fast; normalize to h264/yuv420p 30fps with audio
+        // stripped so OffthreadVideo is safe regardless of what the phone
+        // produced (HEVC, odd rotation).
+        await run(
+          `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
+          300_000,
+        )
+      }
+      const duration = await getVideoDuration(outPath)
+      clips.push({ file: `${publicPrefix}/${fileName}`, description: c.description, duration, entryIndex: c.entryIndex })
+    } catch (e) {
+      console.warn(`[motion-renderer] staging window for clip ${c.entryIndex} failed, skipping: ${(e as Error).message}`)
+    }
   }
+  // The raw downloads are only needed to cut windows out of — drop them so the
+  // render server never serves (or the bundler copies) the full-length files.
+  for (const raw of new Set(chosen.map(c => c.rawPath))) {
+    try { if (fs.existsSync(raw)) fs.unlinkSync(raw) } catch { /* best-effort */ }
+  }
+  console.log(`[motion-renderer] staged ${clips.length} window(s), ${clips.reduce((s, c) => s + c.duration, 0).toFixed(1)}s total`)
   return clips
 }
 
@@ -1696,12 +1754,13 @@ async function renderRemotionEdit(
         const usedMedia = new Set<string>()
         if (usingCustomBroll) {
           // The creator supplied their own clips — stock sourcing is skipped
-          // entirely. Clips are matched to transcript moments by content.
-          // A big folder gets curated first: the render works from the clips
-          // whose vision descriptions best fit THIS script.
-          const stagedClips = await stageCustomBroll(jobId, opts.customBroll!, cacheDir, 'edit-cache')
-          for (const c of stagedClips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
-          const clips = await selectBestClips(stagedClips, plan.editedWords)
+          // entirely. Every candidate window is described first, ranked against
+          // THIS script, and only the winners are cut to full resolution, so the
+          // renderer never decodes footage that can't reach the screen.
+          const candidates = await collectCustomBrollCandidates(jobId, opts.customBroll!, cacheDir)
+          const chosen = await selectBestClips(candidates, plan.editedWords)
+          const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache')
+          for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
         } else {
           const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
@@ -2276,7 +2335,20 @@ async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string):
 
   console.log(`[custom-broll] preparing ${entries.length} clip(s) for job ${jobId.slice(0, 8)}`)
   const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
-  const clips = await stageCustomBroll(jobId, entries, cacheDir, 'edit-cache')
+  const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir)
+  if (!candidates.length) return
+
+  // Submagic registers user-media per ENTRY (one media id per creator clip), so
+  // unlike the Remotion path this one keeps a single window per entry. Take the
+  // MIDDLE window of a long clip: the head is usually the creator still settling
+  // the phone, and the middle is the closest cheap guess at the real moment.
+  const chosen = entries
+    .map((_, i) => {
+      const forEntry = candidates.filter(c => c.entryIndex === i)
+      return forEntry.length ? forEntry[Math.floor(forEntry.length / 2)] : null
+    })
+    .filter((c): c is ClipCandidate => !!c)
+  const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache')
   if (!clips.length) return
 
   // Host each normalized clip in R2 ({jobId}/custom-broll-i.mp4 — cleaned up
@@ -2308,17 +2380,19 @@ async function prepareCustomBrollForJob(jobId: string, sourceLocalPath: string):
     // Same curation as the Remotion path: a big folder narrows to the clips
     // whose content best fits this video before placements are planned.
     const timedWords = words.map(w => ({ ...w, segmentIndex: 0 }))
-    const chosen = await selectBestClips(clips, timedWords)
-    const placed = await planCustomBrollSlots(timedWords, duration, null, chosen, [], false)
+    // One window per entry already, so this only narrows when the folder holds
+    // more clips than a single video can carry.
+    const ranked = await selectBestClips(clips, timedWords)
+    const placed = await planCustomBrollSlots(timedWords, duration, null, ranked, [], false)
     for (const entry of entries) entry.placements = []
     for (const item of placed) {
-      const clip = chosen.find(c => c.file === item.file)
+      const clip = ranked.find(c => c.file === item.file)
       const entry = clip ? entries[clip.entryIndex ?? -1] : undefined
       if (entry) {
         entry.placements!.push({ start: item.start, end: Number((item.start + item.duration).toFixed(2)) })
       }
     }
-    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${chosen.length} clip(s)`)
+    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${ranked.length} clip(s)`)
   } catch (e) {
     console.warn('[custom-broll] placement planning failed (v1-v3 will render without items):', (e as Error).message)
   }

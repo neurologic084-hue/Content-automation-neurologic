@@ -387,11 +387,14 @@ export const MAX_CUSTOM_CLIPS_PER_RENDER = 12
 // supplied more than `max`. One fast LLM pass over the vision descriptions —
 // topical fit first, then variety. Falls back to the first `max` on failure
 // (matching the old behavior). Returned clips keep their original order.
-export async function selectBestClips(
-  clips: CustomClip[],
+// Generic over the clip shape so it can also rank CANDIDATE windows that have
+// been described but not yet cut to disk — the caller then only pays to stage
+// the winners.
+export async function selectBestClips<T extends { description: string; duration: number }>(
+  clips: T[],
   editedWords: EditedWord[],
   max = MAX_CUSTOM_CLIPS_PER_RENDER,
-): Promise<CustomClip[]> {
+): Promise<T[]> {
   if (clips.length <= max) return clips
   const transcript = editedWords.map(w => w.text).join(' ').slice(0, 4000)
   const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
