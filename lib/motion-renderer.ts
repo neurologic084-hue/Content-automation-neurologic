@@ -1440,7 +1440,15 @@ async function patchSandboxCompositorGlibc(gnuDir: string): Promise<void> {
 // folder of long clips from starving the render host: one real job staged 243s
 // of 1080p footage to show 9s of cutaways, and 12-clip jobs failed 3/3 while
 // 0-clip jobs passed 3/3.
-const CLIP_WINDOW_SECONDS = 5
+// 8s, not 5: the planner can hand one clip two 3.8s cutaways and the second
+// one plays the tail (srcOffset). At 5s the tail started at 1.2s, so both
+// cutaways showed almost the same footage — 8s keeps them distinct.
+const CLIP_WINDOW_SECONDS = 8
+
+// Clips at or under this are used EXACTLY as filmed — no windowing, no trim.
+// A short clip is already the moment; cutting it can only lose the reason it
+// was filmed, and it costs the renderer almost nothing to carry.
+const KEEP_WHOLE_UNDER_SECONDS = 14
 
 // A long clip is not one moment — a 100s walk-through has several usable beats,
 // and the good one is rarely at the head. Rather than blindly keeping the first
@@ -1453,16 +1461,23 @@ const MAX_WINDOWS_PER_CLIP = 3
 // clips stay whole. Longer ones get evenly spaced windows, insetting from both
 // ends because the first and last moments of a phone clip are usually the hand
 // reaching for the record button.
-function clipWindows(duration: number): number[] {
-  if (!Number.isFinite(duration) || duration <= CLIP_WINDOW_SECONDS * 1.6) return [0]
+function clipWindows(duration: number): Array<{ offset: number; seconds: number }> {
+  if (!Number.isFinite(duration) || duration <= 0) return [{ offset: 0, seconds: CLIP_WINDOW_SECONDS }]
+  // Short clip: use it whole, untouched.
+  if (duration <= KEEP_WHOLE_UNDER_SECONDS) return [{ offset: 0, seconds: duration }]
   const count = Math.max(1, Math.min(MAX_WINDOWS_PER_CLIP, Math.round(duration / 30)))
-  if (count === 1) return [Math.max(0, (duration - CLIP_WINDOW_SECONDS) / 2)] // middle beats the head
-  const usable = Math.max(0, duration - CLIP_WINDOW_SECONDS)
+  // One window: take the middle. The head of a phone clip is usually the
+  // creator still settling the camera.
+  if (count === 1) {
+    return [{ offset: Number(((duration - CLIP_WINDOW_SECONDS) / 2).toFixed(2)), seconds: CLIP_WINDOW_SECONDS }]
+  }
+  const usable = duration - CLIP_WINDOW_SECONDS
   const inset = Math.min(1.5, usable * 0.08)
   const span = usable - inset * 2
-  return Array.from({ length: count }, (_, i) =>
-    Number((inset + (span * i) / (count - 1)).toFixed(2)),
-  )
+  return Array.from({ length: count }, (_, i) => ({
+    offset: Number((inset + (span * i) / (count - 1)).toFixed(2)),
+    seconds: CLIP_WINDOW_SECONDS,
+  }))
 }
 
 // One candidate window: described from a cheap low-res sample, cut to full
@@ -1511,8 +1526,8 @@ async function collectCustomBrollCandidates(
       const windows = clipWindows(sourceDuration)
 
       for (let w = 0; w < windows.length; w++) {
-        const offset = windows[w]
-        const seconds = Math.min(CLIP_WINDOW_SECONDS, Math.max(1, sourceDuration - offset))
+        const { offset } = windows[w]
+        const seconds = Math.min(windows[w].seconds, Math.max(1, sourceDuration - offset))
         // Describe from a tiny low-res sample OF THIS WINDOW — never the full
         // file, so the request stays small no matter how big the upload was,
         // and each window is judged on its own content.
