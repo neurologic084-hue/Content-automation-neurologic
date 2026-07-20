@@ -400,7 +400,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
             ) : (
               <>
                 <textarea
-                  placeholder={"Paste a Google Drive FOLDER link with your B-roll clips (max 12; or file links, one per line).\nWhen provided, the Edit variants use these instead of stock footage — each clip is placed where it fits what you're saying."}
+                  placeholder={"Paste a Google Drive FOLDER link with your B-roll clips (max 12; or file links, one per line).\nWhen provided, every variant uses these instead of stock footage — each clip is placed where it fits what you're saying."}
                   value={customBrollText}
                   onChange={e => setCustomBrollText(e.target.value)}
                   rows={3}
@@ -409,7 +409,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                   onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
                   onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
                 />
-                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the Edit variants (Concept Pro, Viral Energy, Cinematic). Leave empty to use auto-picked stock B-roll.</p>
+                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to all six variants — Calm &amp; Clean, Aesthetic, Creator Bold, Concept Pro, Viral Energy, Cinematic. Leave empty to use auto-picked stock B-roll.</p>
               </>
             )}
           </div>
