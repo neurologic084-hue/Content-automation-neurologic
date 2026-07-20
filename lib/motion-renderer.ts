@@ -349,8 +349,24 @@ async function buildSharedCleanAudio(jobId: string, compressedPath: string, outD
       console.log(`[shared-audio] ${words.length} word timings shared with every variant`)
       try { fs.unlinkSync(wordsPath) } catch { /* best-effort */ }
     }
+    // VERIFY, don't assume. These are the job's shared ARTIFACTS, not a
+    // best-effort cache: if they are not really readable, all six variants
+    // silently redo the paid work (another Submagic clean, another Auphonic
+    // production, another transcription each). Prove they landed, and say so
+    // loudly if they did not, so the cost is visible instead of quiet.
+    const ok = await Promise.all([
+      fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`, { method: 'HEAD', signal: AbortSignal.timeout(10_000) }).then(r => r.ok).catch(() => false),
+      fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_WORDS_NAME}`, { method: 'HEAD', signal: AbortSignal.timeout(10_000) }).then(r => r.ok).catch(() => false),
+    ])
+    if (ok[0] && ok[1]) {
+      console.log('[shared-audio] verified: every variant will reuse this clean + transcript')
+    } else {
+      console.error(`[shared-audio] NOT READABLE after upload (clean=${ok[0]} words=${ok[1]}) — each variant will redo the paid audio work`)
+    }
   } catch (e) {
-    console.warn(`[shared-audio] shared clean/transcribe failed — variants will each do their own: ${(e as Error).message}`)
+    console.error(`[shared-audio] shared clean/transcribe FAILED — each of the 6 variants will now redo it (extra Submagic/Auphonic/transcription spend): ${(e as Error).message}`)
+  } finally {
+    try { if (fs.existsSync(cleanPath)) fs.unlinkSync(cleanPath) } catch { /* best-effort */ }
   }
 }
 
@@ -1873,6 +1889,9 @@ async function renderRemotionEdit(
       await stageRenderWorkCopy(tmp, workPath)
       try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
     } else {
+      // Falling back means paying again: this variant runs the whole
+      // Submagic/Auphonic/ElevenLabs chain itself. Never let that be silent.
+      console.warn(`[motion-renderer] no shared clean for job ${jobId.slice(0, 8)} — ${variantId} is cleaning its own audio (extra paid call)`)
       await cleanAudioInPlace(workPath)
     }
 
