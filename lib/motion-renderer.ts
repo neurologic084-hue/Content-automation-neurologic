@@ -1542,6 +1542,11 @@ function clipWindows(duration: number): Array<{ offset: number; seconds: number 
 interface ClipCandidate {
   entryIndex: number
   rawPath: string
+  // Where rawPath can be (re)fetched from. The cached fast path below never
+  // downloads anything, so on a fresh runner rawPath does not exist yet and
+  // staging MUST be able to pull it — without this every window silently
+  // failed to cut and the render shipped with no B-roll at all.
+  sourceUrl: string
   offset: number     // seconds into the source
   duration: number   // seconds of this window
   description: string
@@ -1580,7 +1585,10 @@ async function collectCustomBrollCandidates(
       // each one shows. Reuse them — no download, no ffmpeg sample, no Gemini.
       if (entry.windows?.length) {
         for (const w of entry.windows) {
-          candidates.push({ entryIndex: i, rawPath, offset: w.offset, duration: w.seconds, description: w.description })
+          candidates.push({
+            entryIndex: i, rawPath, sourceUrl: (entry as CustomBrollEntry).r2Url ?? entry.url,
+            offset: w.offset, duration: w.seconds, description: w.description,
+          })
         }
         console.log(`[motion-renderer] clip ${i}: reusing ${entry.windows.length} cached window(s)`)
         continue
@@ -1621,7 +1629,10 @@ async function collectCustomBrollCandidates(
           try { fs.unlinkSync(samplePath) } catch { /* best-effort */ }
         }
         const finalDescription = description || entry.description?.trim() || `creator clip ${i + 1}`
-        candidates.push({ entryIndex: i, rawPath, offset, duration: seconds, description: finalDescription })
+        candidates.push({
+          entryIndex: i, rawPath, sourceUrl: (entry as CustomBrollEntry).r2Url ?? entry.url,
+          offset, duration: seconds, description: finalDescription,
+        })
         ;(entry.windows ??= []).push({ offset, seconds, description: finalDescription })
         learnedWindows = true
         console.log(
@@ -1662,6 +1673,9 @@ async function stageChosenWindows(
       const fileName = `custom-${jobId.slice(0, 8)}-${c.entryIndex}-w${n}.mp4`
       const outPath = path.join(cacheDir, fileName)
       if (!fs.existsSync(outPath)) {
+        // Cached windows carry no local file — each variant renders on its own
+        // fresh machine. Pull the source once per clip before cutting.
+        if (!fs.existsSync(c.rawPath)) await downloadFile(c.sourceUrl, c.rawPath)
         // -ss before -i seeks fast; normalize to h264/yuv420p 30fps with audio
         // stripped so OffthreadVideo is safe regardless of what the phone
         // produced (HEVC, odd rotation).
@@ -1683,6 +1697,13 @@ async function stageChosenWindows(
     try { if (fs.existsSync(raw)) fs.unlinkSync(raw) } catch { /* best-effort */ }
   }
   console.log(`[motion-renderer] staged ${clips.length} window(s), ${clips.reduce((s, c) => s + c.duration, 0).toFixed(1)}s total`)
+  // Loud on the silent failure: the creator supplied clips and NONE survived
+  // staging, so the render is about to ship with no B-roll while looking
+  // perfectly healthy. That is exactly how a caching regression hid for a
+  // whole render cycle.
+  if (chosen.length && !clips.length) {
+    console.error(`[motion-renderer] WARNING: ${chosen.length} B-roll window(s) were selected but NONE could be staged — this render will have no custom B-roll`)
+  }
   return clips
 }
 
