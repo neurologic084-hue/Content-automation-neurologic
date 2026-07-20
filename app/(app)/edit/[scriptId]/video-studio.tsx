@@ -389,6 +389,24 @@ export function VideoStudio({ script, existingJobId }: Props) {
               </div>
             </>
           )}
+          {/* Prep runs on the server, not in this tab — closing the page does
+              not cancel it. Say so and offer the exit, because the honest wait
+              here is several minutes and staring at a spinner reads as "if I
+              leave, I lose it". Not offered during 'submitting': that step is
+              a second or two and there is no job to come back to yet. */}
+          {isPreparingSource && (
+            <>
+              <p className="text-[11px] text-[#A1A1AA] mt-4">
+                This keeps running if you leave — we&apos;ll have it waiting in your library.
+              </p>
+              <button
+                onClick={() => router.push('/library')}
+                className="mt-3 w-full py-2.5 rounded-xl border border-[#E4E4E0] text-[#18181B] text-xs font-semibold hover:bg-[#FAFAF9] transition-colors"
+              >
+                Leave it running
+              </button>
+            </>
+          )}
           {error && <p className="text-xs text-[#EF4444] mt-4">{error}</p>}
         </div>
       </div>

@@ -92,6 +92,27 @@ async function getVideoDuration(filePath: string): Promise<number> {
   })
 }
 
+// Does this file actually contain a decodable video stream?
+//
+// getVideoDuration above answers 60 for anything it cannot probe, which is a
+// fine default for a real video with odd metadata but a trap for a file that is
+// truncated, empty, or an HTML error page saved with an .mp4 name: it sails
+// through as a valid 60s clip and only fails inside the renderer, as
+// "Compositor error: No video stream found in input file". Ask the direct
+// question instead — a staged B-roll window is only usable if it has a video
+// stream.
+async function hasVideoStream(filePath: string): Promise<boolean> {
+  try {
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).size < 1024) return false
+  } catch { return false }
+  return new Promise((resolve) => {
+    exec(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "${filePath}"`,
+      (err, stdout) => resolve(!err && stdout.trim().startsWith('video')),
+    )
+  })
+}
+
 type ProgressCallback = (percent: number, label: string) => void | Promise<void>
 
 async function streamBodyToFile(
@@ -594,7 +615,12 @@ export async function ensureContentProfile(jobId: string, sourceUrl: string): Pr
       // local upload path is what the caption/graphics steps already use reliably.
       if (!transcript) {
         try {
-          const words = await transcribeLocalFile(localPath)
+          // Prep already transcribed this job's audio once and stored the
+          // timings — reuse them. Same uncut timeline, so the text is identical
+          // and this saves a second paid transcription of the same footage.
+          const shared = await sharedWords(jobId)
+          if (shared?.length) console.log('[content-profile] reusing the job transcript (no second transcription)')
+          const words = shared?.length ? shared : await transcribeLocalFile(localPath)
           transcript = words.map(w => w.text).join(' ').trim() || null
           if (transcript) await db.from('video_jobs').update({ transcript }).eq('id', jobId)
         } catch (e) {
@@ -742,11 +768,18 @@ export async function prepareJobSource(
   // the content profile is ready before any variant starts. Best-effort — never
   // block source prep on it.
   await onProgress?.(99, 'Analyzing footage')
-  ensureContentProfile(jobId, sourceUrl).catch(() => { /* best-effort; falls back at read time */ })
+  const profileRunning = ensureContentProfile(jobId, sourceUrl)
+    .catch(() => { /* best-effort; falls back at read time */ })
 
   // CHECKLIST: prep is re-runnable and skips whatever is already done, so print
   // what this job actually has. Re-running to repair a job then costs only the
   // missing pieces instead of another full round of paid work.
+  //
+  // Two items are deliberately NOT owned by this function: the content profile
+  // is running right now (kicked off above, never awaited so it cannot stall
+  // prep) and the creator's B-roll is prepared by the task that follows this
+  // one. Reporting either as ✗ would read as "this failed" when it simply has
+  // not happened yet — so they get their own state. Only ✗ means missing.
   try {
     const base = process.env.R2_PUBLIC_URL ? `${process.env.R2_PUBLIC_URL}/${jobId}` : null
     const has = async (f: string) => base
@@ -756,11 +789,21 @@ export async function prepareJobSource(
     const clips = (row?.custom_broll ?? []) as CustomBrollEntry[]
     const [src, cut, clean] = await Promise.all([has('source-compressed.mp4'), has('source-cut.mp4'), has(SHARED_CLEAN_NAME)])
     const tick = (b: boolean) => (b ? '✓' : '✗')
+
+    // Give the profile a moment to land so a fast one reports ✓ rather than
+    // "running" — but never wait on it, that is the whole point of not awaiting.
+    const profile = await Promise.race([
+      profileRunning.then(() => 'done' as const),
+      new Promise<'running'>(r => setTimeout(() => r('running'), 3_000)),
+    ]).catch(() => 'running' as const)
+
+    const ready = clips.filter(c => c.r2Url).length
     console.log(
       `[prep] job ${jobId.slice(0, 8)} ready — ` +
       `source ${tick(src)} | pre-cut ${tick(cut)} | clean audio ${tick(clean)} | ` +
-      `transcript ${tick(!!(await sharedWords(jobId)))} | analysis ${tick(!!row?.content_profile)} | ` +
-      `B-roll ${clips.length ? `${clips.filter(c => c.r2Url).length}/${clips.length} prepared` : 'none supplied'}`,
+      `transcript ${tick(!!(await sharedWords(jobId)))} | ` +
+      `analysis ${profile === 'done' || row?.content_profile ? '✓' : '⋯ running'} | ` +
+      `B-roll ${!clips.length ? 'none supplied' : ready ? `${ready}/${clips.length} prepared` : `⋯ ${clips.length} queued`}`,
     )
   } catch { /* the checklist is diagnostics only */ }
 
@@ -1917,16 +1960,36 @@ async function stageChosenWindows(
       // small download beats re-fetching the full clip and re-encoding it.
       const cacheName = windowCacheName(c.sourceUrl, c.offset, c.duration)
       const cacheUrl = process.env.R2_PUBLIC_URL ? `${process.env.R2_PUBLIC_URL}/broll-cache/shared/${cacheName}` : null
-      if (!fs.existsSync(outPath) && cacheUrl) {
+
+      // "Already staged" has to mean "staged and playable", not merely "a file
+      // exists here". A truncated download or a leftover from a killed render
+      // otherwise satisfies both guards below, skipping the download AND the
+      // cut, and ships a file with no video stream to the compositor.
+      let staged = await hasVideoStream(outPath)
+      if (!staged && fs.existsSync(outPath)) {
+        console.warn(`[motion-renderer] discarding unplayable staged window ${path.basename(outPath)}`)
+        try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
+      }
+
+      if (!staged && cacheUrl) {
         try {
           const head = await fetch(cacheUrl, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
           if (head.ok) {
             await downloadFile(cacheUrl, outPath)
-            console.log(`[motion-renderer] window ${c.entryIndex}.${n} reused from the shared B-roll cache`)
+            // A cache entry can itself be bad — an interrupted upload, or a
+            // window cut before this validation existed. Re-cutting is cheap;
+            // trusting it is what breaks the render.
+            staged = await hasVideoStream(outPath)
+            if (staged) {
+              console.log(`[motion-renderer] window ${c.entryIndex}.${n} reused from the shared B-roll cache`)
+            } else {
+              console.warn(`[motion-renderer] shared cache entry ${cacheName} is unplayable — re-cutting it`)
+              try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
+            }
           }
         } catch { /* cache miss is normal — fall through and cut it */ }
       }
-      if (!fs.existsSync(outPath)) {
+      if (!staged) {
         // Cached windows carry no local file — each variant renders on its own
         // fresh machine. Pull the source once per clip before cutting.
         if (!fs.existsSync(c.rawPath)) await downloadFile(c.sourceUrl, c.rawPath)
@@ -1937,6 +2000,13 @@ async function stageChosenWindows(
           `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
           300_000,
         )
+      }
+      // Last gate before it can reach the compositor — and before it can be
+      // published to a cache that every future job on this folder will trust.
+      // Throwing here drops just this window (the catch below skips it) instead
+      // of failing the whole render.
+      if (!(await hasVideoStream(outPath))) {
+        throw new Error(`cut produced no video stream (${path.basename(outPath)})`)
       }
       const duration = await getVideoDuration(outPath)
       clips.push({ file: `${publicPrefix}/${fileName}`, description: c.description, duration, entryIndex: c.entryIndex })
@@ -1989,11 +2059,15 @@ async function renderRemotionEdit(
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
-    await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
+    // Deliberately neutral until we know which path we took: saying "Cleaning
+    // audio" here would label every variant with work that prep already did
+    // once, making six reuses look like six paid cleans.
+    await setVariantProgress(jobId, variantId, 2, STEPS, 'Preparing audio')
     // Prep already cleaned this job's audio once for every variant. Reuse it;
     // only clean here when that shared step is unavailable.
     const sharedClean = await applySharedCleanAudio(jobId, workPath)
     if (sharedClean) {
+      await setVariantProgress(jobId, variantId, 2, STEPS, 'Reusing cleaned audio')
       console.log('[motion-renderer] reusing the job\'s shared cleaned audio (no second clean)')
       // The shared copy is the COMPRESSED source, so it still needs the 4K
       // downscale the work copy would have had.
@@ -2004,6 +2078,7 @@ async function renderRemotionEdit(
     } else {
       // Falling back means paying again: this variant runs the whole
       // Submagic/Auphonic/ElevenLabs chain itself. Never let that be silent.
+      await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
       console.warn(`[motion-renderer] no shared clean for job ${jobId.slice(0, 8)} — ${variantId} is cleaning its own audio (extra paid call)`)
       await cleanAudioInPlace(workPath)
     }
@@ -2883,7 +2958,12 @@ async function prepareCustomBrollForJob(
   // Transcript-matched placements from the SOURCE timeline (items are placed
   // on the source video Submagic receives, before its silence cuts).
   try {
-    const words = await transcribeLocalFile(sourceLocalPath)
+    // Prep's transcript covers this same uncut source timeline, which is
+    // exactly the timeline these placements are measured against — so reuse it
+    // instead of paying to transcribe the identical audio again.
+    const reusable = await sharedWords(jobId)
+    if (reusable?.length) console.log('[custom-broll] reusing the job transcript (no second transcription)')
+    const words = reusable?.length ? reusable : await transcribeLocalFile(sourceLocalPath)
     const duration = await getVideoDuration(sourceLocalPath)
     // Same curation as the Remotion path: a big folder narrows to the clips
     // whose content best fits this video before placements are planned.
