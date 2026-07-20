@@ -650,7 +650,10 @@ function PublishForm() {
   const canGenerate = hasScript && selectedPlatforms.length > 0
   const captionsFilled = selectedPlatforms.length > 0 &&
     selectedPlatforms.every(p => (captions[p] ?? '').trim().length > 0)
-  const canPublish = !!videoUrl.trim() && captionsFilled && selectedIds.size > 0 && !loadingAccounts && !dayTaken &&
+  // dayTaken deliberately does NOT gate publishing any more: the one-post-per-
+  // platform-per-day rule blocked legitimate double posts, so it is now a
+  // heads-up rather than a wall (owner's call, 2026-07-20).
+  const canPublish = !!videoUrl.trim() && captionsFilled && selectedIds.size > 0 && !loadingAccounts &&
     (scheduleMode === 'now' || (!!scheduledAt && !scheduledInPast))
 
   // ── Handlers ────────────────────────────────────────────────────────────────
@@ -1293,10 +1296,10 @@ function PublishForm() {
                       value={selectedTime}
                       onChange={e => setSelectedTime(e.target.value)}
                       className="h-11 px-4 rounded-xl border text-sm outline-none bg-[#FAFAFA] transition-colors"
-                      style={{ colorScheme: 'light', borderColor: dayTaken ? '#FCA5A5' : '#E4E4E0' }}
+                      style={{ colorScheme: 'light', borderColor: scheduledInPast ? '#FCA5A5' : '#E4E4E0' }}
                     />
                     {dayTaken ? (
-                      <span className="text-xs text-[#DC2626]">Already taken</span>
+                      <span className="text-xs text-[#D97706]">This day already has a post — posting anyway is fine</span>
                     ) : scheduledInPast ? (
                       <span className="text-xs text-[#DC2626]">That time has already passed</span>
                     ) : (
@@ -1320,26 +1323,23 @@ function PublishForm() {
                 )}
 
                 {dayTaken && (
-                  <div className="mt-3 flex items-start gap-2 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-3 py-2.5">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-0.5">
+                  <div className="mt-3 flex items-start gap-2 bg-[#FFFBEB] border border-[#FDE68A] rounded-xl px-3 py-2.5">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#D97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 mt-0.5">
                       <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
                     </svg>
-                    <div>
-                      <p className="text-xs font-semibold text-[#DC2626]">
-                        {conflictingPlatforms.map(p => getPlatformMeta(p).label).join(', ')} already {conflictingPlatforms.length > 1 ? 'have' : 'has'} a post scheduled this day.
-                      </p>
-                      <p className="text-[11px] text-[#DC2626] opacity-80 mt-0.5">Pick a different day, or deselect that platform   one post per platform per day.</p>
-                    </div>
+                    <p className="text-xs text-[#B45309]">
+                      {conflictingPlatforms.map(p => getPlatformMeta(p).label).join(', ')} already {conflictingPlatforms.length > 1 ? 'have' : 'has'} a post scheduled this day — this will be a second one, which is allowed.
+                    </p>
                   </div>
                 )}
 
-                {scheduledAt && !dayTaken && (
+                {scheduledAt && !scheduledInPast && (
                   <p className="mt-3 text-xs text-[#71717A]">
                     Scheduled for {new Date(scheduledAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}
                   </p>
                 )}
                 <p className="mt-3 text-[11px] text-[#A1A1AA]">
-                  One post per platform per day keeps your reach consistent   other platforms can still post the same day.{' '}
+                  Post as often as you like — the calendar shows existing scheduled posts so nothing overlaps by accident.{' '}
                   <a
                     href="https://my.blotato.com/queue/schedules"
                     target="_blank"
