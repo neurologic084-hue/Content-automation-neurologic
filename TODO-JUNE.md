@@ -33,7 +33,7 @@ left dormant — check the 2026-07-20 history to recover them.
 **What "working" has to mean:**
 
 - placements are timed against **whatever file Submagic actually receives**
-  (today that is `source-cut-clean.mp4` — see task 2), never a different cut
+  (today that is `source-cut-clean.mp4`), never a different cut
 - `both` genuinely mixes her clips with Submagic's stock, or the UI stops
   offering `both` on v1–v3
 - a clip that cannot be placed is skipped **without** taking the submission
@@ -42,7 +42,57 @@ left dormant — check the 2026-07-20 history to recover them.
   (see `planCustomBrollSlots` in `lib/broll.ts`, and the note about why the
   content-blind top-up was removed)
 
-## 2. End-to-end flow, no silent failures
+## 2. Custom B-roll: smart AND cheap
+
+Task 1 is "make it work on v1–v3". This one is the standard it has to meet on
+**all six** — because the naive version of task 1 is what made the pipeline
+slow and fragile in the first place.
+
+**Smart** means the placement is earned, not filled:
+
+- a clip goes in where its *content* matches what she is saying at that moment,
+  judged against the transcript — never on a timer or in upload order. A
+  content-blind filler that placed clips by array order was removed on
+  2026-07-20; it put an elevator over a line about captions
+- **if nothing fits, place nothing.** A low count is a correct answer, not a
+  failure to paper over. Daniel's rule verbatim: use them "when they make
+  sense, otherwise its fine"
+- never over her face in the opening `HOOK_PROTECT_SECONDS` (5s) or over the
+  closing call to action (`CTA_PROTECT_SECONDS`, 2.5s)
+- stock fills what is genuinely left, and never lands on top of her clips
+
+**Efficient** means the expensive parts happen once, ever:
+
+| Work | Cached as | Keyed by | Scope |
+|---|---|---|---|
+| Gemini describing a clip | `entry.windows` on the job + `broll-cache/shared/*-windows.json` | Drive file id | **across jobs** |
+| Cutting a chosen window | `broll-cache/shared/<key>-d<dur>-<offset>-<len>.mp4` | source + duration + offset | **across jobs** |
+
+So the second job that uses the same Drive folder should download nothing and
+call Gemini zero times. Verify that: run two jobs on one folder and confirm the
+second logs `reusing N cached window(s)` for every clip.
+
+Things that will quietly undo this — check each before shipping:
+
+- **do not key a cache by anything job-scoped.** A `jobId` in a cache key means
+  every job re-does the work and leaves an orphan behind. This exact bug
+  existed and was fixed on 2026-07-20
+- **do not cut windows from a staged file.** Cuts must come from the original
+  source; seeking into an already-cut file lands on the wrong footage. This is
+  what produced a clip labelled "a person walks down a sidewalk" that actually
+  showed elevator doors
+- **do not re-add per-job Submagic media registration.** Hosting and
+  registering 12 clips per job was slow enough to help blow the old 300s
+  request cap. If v1–v3 need her clips, find a way that does not scale with
+  clip count on the request path
+- keep the cut-window key wide enough that two different clips cannot collide —
+  the old 32-bit hash could, and served one clip's footage for another
+
+Worth measuring while you are in here: how many seconds does B-roll prep add to
+a cold job, and to a warm one? If the warm number is not close to zero, the
+caching is not doing its job.
+
+## 3. End-to-end flow, no silent failures
 
 Every step that can fail must fail **loudly, with a backup, and with a link**.
 
@@ -74,7 +124,7 @@ Rules to hold to:
 **Submagic still has no backup.** If it is down, v1–v3 cannot render. That is
 acceptable (v4–v6 are independent), but the message should say so plainly.
 
-## 3. Cutting quality — the AI cut is sometimes wrong
+## 4. Cutting quality — the AI cut is sometimes wrong
 
 Daniel's report: the cut is sometimes bad and should not have been made.
 
@@ -93,7 +143,7 @@ If you change the cut rules, **bump nothing and rebuild nothing manually** —
 a forced retry now re-cuts with current rules automatically
 (`refreshPrecutForRetry`). But old jobs keep their existing cut until retried.
 
-## 4. Colour is sometimes weird
+## 5. Colour is sometimes weird
 
 Retuned on 2026-07-20 after measuring shipped renders: `smart` had shifted her
 skin **−25% blue/red with 16% of face pixels clipping**. It now applies no
@@ -110,14 +160,14 @@ frames from a shipped render and from that job's ungraded
 saturation reads as yellow on skin, because blue is skin's weakest channel —
 that was the actual cause, not the temperature setting everyone assumed.
 
-## 5. Scripting — no action needed
+## 6. Scripting — no action needed
 
 Daniel considered asking for changes here and concluded it is fine. The jargon
 rules landed on 2026-07-20 (measured: 2.3 banned terms per script → 0) and the
 sentence-length rules were deliberately **reverted** — long sentences are fine,
 jargon is not. Leave it alone unless he raises it again.
 
-## 6. Storage — keep it small
+## 7. Storage — keep it small
 
 R2 grows and bills automatically, so nothing breaks, but it should not sprawl.
 
@@ -133,7 +183,7 @@ Also watch the **Docker image**: it hit 11 GB once because `.dockerignore`
 missed `public/renders`. It is ~3.4 GB now. If Railway builds start failing,
 check image size first.
 
-## 7. Verify all six variants, one at a time
+## 8. Verify all six variants, one at a time
 
 This is the acceptance test for everything above. Do not batch it — run them
 individually and actually **watch the output**.
