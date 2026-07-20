@@ -39,9 +39,60 @@ export async function searchWeb(query: string): Promise<TavilyResponse | null> {
       }),
     })
 
-    if (!res.ok) return null
+    if (!res.ok) {
+      console.warn(`[tavily] search failed (${res.status}) — falling back to OpenRouter web search`)
+      return openRouterWebSearch(query)
+    }
     return await res.json()
   } catch {
+    return openRouterWebSearch(query)
+  }
+}
+
+// Backup researcher for when Tavily is down or out of credits: OpenRouter's
+// web plugin, shaped into the same TavilyResponse the callers already consume.
+// Costs an LLM call instead of a Tavily credit, so it is strictly a fallback —
+// never the first choice while Tavily works.
+async function openRouterWebSearch(query: string): Promise<TavilyResponse | null> {
+  const key = process.env.OPENROUTER_API_KEY
+  if (!key) return null
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-4o-mini:online',
+        temperature: 0.2,
+        messages: [{
+          role: 'user',
+          content:
+            `Research this topic on the web and return ONLY JSON shaped as ` +
+            `{"answer": string, "results": [{"title": string, "url": string, "content": string}]} ` +
+            `with up to 6 results. Prefer medical/health sources (NIH, PubMed, Healthline). Topic: ${query}`,
+        }],
+      }),
+      signal: AbortSignal.timeout(45_000),
+    })
+    if (!res.ok) return null
+    const body = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
+    const text = body.choices?.[0]?.message?.content ?? ''
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) return null
+    const parsed = JSON.parse(match[0]) as { answer?: string; results?: Array<{ title?: string; url?: string; content?: string }> }
+    console.log('[tavily] OpenRouter web fallback answered')
+    return {
+      answer: parsed.answer,
+      query,
+      results: (parsed.results ?? [])
+        .filter(r => r.title && r.content)
+        .map(r => ({ title: r.title!, url: r.url ?? '', content: r.content!, score: 0.5 })),
+    }
+  } catch (e) {
+    console.warn('[tavily] OpenRouter web fallback failed too:', (e as Error).message)
     return null
   }
 }
@@ -118,7 +169,13 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
     results.push(...data.results.map(r => ({ ...r, title: `[Reddit] ${r.title}` })))
   }
 
-  if (!results.length) return null
+  // All three Tavily calls came back empty or failed (down, or out of
+  // credits) — fall through to the OpenRouter web fallback rather than
+  // generating a script with zero research behind it.
+  if (!results.length) {
+    console.warn('[tavily] all enhanced searches empty — trying the OpenRouter web fallback')
+    return openRouterWebSearch(`${idea} ${context} research mechanism`)
+  }
 
   return { query: idea, answer, results }
 }

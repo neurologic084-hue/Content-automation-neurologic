@@ -75,6 +75,20 @@ export default function NewIdeaPage() {
   const [ideaGenError, setIdeaGenError] = useState('')
 
   useEffect(() => {
+    // This check gates the WHOLE page behind a spinner, so it must be unable
+    // to hang: no error path may leave settingsReady at null. A thrown client
+    // error (expired session mid-refresh, network blip) or a query that never
+    // resolves used to pin "Loading..." forever — seen in production. On any
+    // failure or after 6s, assume settings exist and render; a genuinely
+    // missing profile still surfaces naturally when generation is attempted.
+    let settled = false
+    const settle = (ready: boolean) => {
+      if (settled) return
+      settled = true
+      setSettingsReady(ready)
+    }
+    const failOpen = setTimeout(() => settle(true), 6_000)
+
     async function checkSettings() {
       const supabase = createClient()
       const { data: active } = await supabase
@@ -83,7 +97,7 @@ export default function NewIdeaPage() {
         .eq('is_active', true)
         .limit(1)
         .maybeSingle()
-      if (active?.creator_name?.trim()) { setSettingsReady(true); return }
+      if (active?.creator_name?.trim()) { settle(true); return }
       // Fallback: any row with a name (handles missing is_active column)
       const { data: any } = await supabase
         .from('brand_settings')
@@ -91,9 +105,12 @@ export default function NewIdeaPage() {
         .neq('creator_name', '')
         .limit(1)
         .maybeSingle()
-      setSettingsReady(!!(any?.creator_name?.trim()))
+      settle(!!(any?.creator_name?.trim()))
     }
     checkSettings()
+      .catch(() => settle(true))
+      .finally(() => clearTimeout(failOpen))
+    return () => clearTimeout(failOpen)
   }, [])
 
   useEffect(() => {
