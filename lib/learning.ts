@@ -20,6 +20,44 @@ interface ScoredScript extends FewShotScript {
   score: number
 }
 
+/** Spoken delivery runs ~2.5 words/second, so 20 words is ~8 seconds of held-open
+ *  meaning before the sentence resolves. Same ceiling the prompt sets; kept here
+ *  so ranking and instruction never drift apart. */
+const SPOKEN_SENTENCE_CEILING = 20
+
+function sentences(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 3)
+}
+
+/** Share of sentences over the spoken ceiling. Deliberately structural and not a
+ *  word list: the banned-term lists are per-brand and live in prompts.ts, and
+ *  ranking every tenant's corpus against one clinician's vocabulary is the same
+ *  leak in a different place. Sentence length is niche-agnostic and is most of
+ *  what makes a script hard to follow anyway. */
+function longSentenceRatio(text: string): number {
+  const all = sentences(text)
+  if (all.length === 0) return 0
+  return all.filter((s) => s.split(/\s+/).length > SPOKEN_SENTENCE_CEILING).length / all.length
+}
+
+/** Not every approved row is a script. The corpus also holds raw transcript rips
+ *  (bodies carrying literal timecodes like "0:04" or "(0:18)") and stub rows
+ *  left over from testing. They pass `status = approved` and would otherwise
+ *  land in the strongest slot in the whole prompt while teaching nothing about
+ *  voice. Filtering these is safe because it is a judgement about whether the
+ *  row is a script at all, not about how the script is written. */
+function isUsableAsFewShot(s: { hook: string; body: string; cta: string }): boolean {
+  const body = s.body?.trim() ?? ''
+  if (!body || !s.hook?.trim()) return false
+  // Two or more, not one: a script may legitimately say "you hit 3:00 and crash",
+  // but only a transcript is stamped with timecodes all the way down.
+  if ((body.match(/\b\d{1,2}:\d{2}\b/g) ?? []).length >= 2) return false
+  return body.split(/\s+/).length >= 60
+}
+
 /** Pull everything the engine has learned from past posts, ranked for THIS
  *  generation. Recency alone buries the creator's best-matching examples, so
  *  approved scripts are scored: same lane + same format beat lane-only, which
@@ -75,6 +113,7 @@ export async function getLearningContext(
   // ── Rank approved scripts by relevance ──────────────────────────────────
   const scored: ScoredScript[] = (approvedRes.data ?? []).map((s, i) => {
     const idea = Array.isArray(s.idea) ? s.idea[0] : s.idea
+    const eligible = isUsableAsFewShot(s as { hook: string; body: string; cta: string })
     const sameLane = !!opts.lane && idea?.confirmed_lane === opts.lane
     const format = (s.filming_plan as { script_format?: string } | null)?.script_format
     const sameFormat = !!opts.scriptFormat && format === opts.scriptFormat
@@ -88,11 +127,19 @@ export async function getLearningContext(
     if (s.is_few_shot) score += 1
     // Recency tiebreak: earlier in the (already newest-first) list ranks higher
     score += (40 - i) / 100
+    // Nudge, not a gate. Measured against the live corpus, every approved script
+    // that is actually a script breaks the sentence-length bar somewhere, so a
+    // hard plainness filter would empty the corpus and promote the leftovers.
+    // A one-tier penalty floats the least dense examples up without ever
+    // reducing the model's calibration to nothing.
+    score -= 2 * longSentenceRatio(`${s.hook} ${s.body} ${s.cta}`)
+    if (!eligible) score = Number.NEGATIVE_INFINITY
 
     return { hook: s.hook, body: s.body, cta: s.cta, score }
   })
 
   const fewShots = scored
+    .filter((s) => Number.isFinite(s.score))
     .sort((a, b) => b.score - a.score)
     .slice(0, 10)
     .map(({ hook, body, cta }) => ({ hook, body, cta }))

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
-import { buildScriptGenerationMessages } from '@/lib/prompts'
+import { buildScriptGenerationMessages, buildPlainLanguageRules } from '@/lib/prompts'
 import { searchWebEnhanced, formatSearchContext } from '@/lib/tavily'
 import { parseJsonLoose } from '@/lib/json-loose'
 import { stripDashesDeep, buildHumanizerInstruction } from '@/lib/humanizer'
@@ -74,6 +74,8 @@ export async function POST(req: NextRequest) {
       {
         role: 'system',
         content: `You are an expert short-form video scriptwriter. Write compelling, direct scripts for social media (60-90 seconds when spoken aloud).
+
+${buildPlainLanguageRules()}
 
 ${buildHumanizerInstruction()}
 

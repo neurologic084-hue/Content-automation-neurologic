@@ -14,7 +14,7 @@
 
 import fs from 'fs'
 import { exec } from 'child_process'
-import { transcribeLocalFile } from './caption-renderer'
+import { transcribeLocalFile, type WordTimestamp } from './caption-renderer'
 import { detectSilences } from './audio-clean'
 import { planKeepSegments } from './edit-plan'
 
@@ -47,14 +47,30 @@ function probeDuration(filePath: string): Promise<number> {
 
 /** Produces a physically-trimmed copy of `compressedPath` at `outPath` using our
  *  cut planner, ready to feed Submagic for caption-only styling. Returns the
- *  output path, or null when disabled / nothing worth cutting / any failure. */
-export async function buildSubmagicCutSource(compressedPath: string, outPath: string): Promise<string | null> {
+ *  output path, or null when disabled / nothing worth cutting / any failure.
+ *
+ *  Pass `opts.words` to reuse a transcript prep already made (the shared clean
+ *  now runs before this) instead of paying for a second transcription of the
+ *  same footage. Those timings are on the CLEANED audio, which is remuxed in
+ *  sync with this same video, so they line up with the compressed source we cut
+ *  here; a list that overruns the clip (a stale re-prep) is rejected and we fall
+ *  back to transcribing. Submagic still receives the UNCLEANED cut — it runs its
+ *  own Clean Audio in-render, so cleaned input would double-process the voice. */
+export async function buildSubmagicCutSource(
+  compressedPath: string,
+  outPath: string,
+  opts: { words?: WordTimestamp[] } = {},
+): Promise<string | null> {
   if (!PRECUT_FOR_SUBMAGIC) return null
   try {
     const duration = await probeDuration(compressedPath)
     if (duration < 8) return null
 
-    const words = await transcribeLocalFile(compressedPath)
+    // Reuse the shared transcript when it fits this clip; otherwise transcribe.
+    let words = opts.words && opts.words.length >= 10 ? opts.words : null
+    if (words && (words[words.length - 1]?.end ?? 0) > duration + 2) words = null
+    if (words) console.log('[precut] reusing the job transcript (no second transcription)')
+    else words = await transcribeLocalFile(compressedPath)
     if (words.length < 10) return null
 
     // Energy-detected silence is the second cut signal (word timings alone miss

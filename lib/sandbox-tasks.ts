@@ -1,8 +1,10 @@
 // ── Pipeline task dispatcher ──────────────────────────────────────────────────
-// One entry point for all heavy background work. Two homes:
+// One entry point for all heavy background work. Homes, in the order dispatch
+// prefers them:
 //
-//   Long-lived server (local dev, VPS): run the task in-process,
-//   fire-and-forget — exactly the behavior the app has always had.
+//   Long-lived server (Railway, VPS, local dev): run the task in-process,
+//   fire-and-forget — exactly the behavior the app has always had. This is the
+//   home on Railway, where the server and the pipeline share one container.
 //
 //   Vercel: functions die shortly after responding, so each task runs in a
 //   Vercel Sandbox — an ephemeral Linux microVM that clones the repo, installs
@@ -19,6 +21,10 @@ import {
   finalizeSubmagicVariant,
 } from './motion-renderer'
 import { startSubmagicVariantTask } from './submagic-start'
+import { createClient } from '@supabase/supabase-js'
+import { patchVariant } from './job-lock'
+import { isDraining, trackTask, type DrainMode } from './shutdown'
+import type { VideoVariant } from './video-pipeline'
 
 export type PipelineTask =
   | { task: 'prepare-source'; jobId: string; sourceUrl: string }
@@ -199,17 +205,105 @@ async function runViaGitHubActions(payload: PipelineTask): Promise<void> {
   console.log(`[sandbox-tasks] dispatched ${payload.task} for ${payload.jobId} to GitHub Actions (${repo})`)
 }
 
+// True on any long-lived container that runs tasks in its own process. Railway
+// auto-injects RAILWAY_* into every service, and the Dockerfile bakes in
+// PIPELINE_INPROCESS=1 as an explicit belt-and-suspenders. Either wins over a
+// stray VERCEL var: RAILWAY.md tells operators to copy env from the old Vercel
+// project, so a VERCEL=1 dragged along with the rest must NOT silently route
+// every task into a Sandbox that no longer has SANDBOX_REPO_URL (which would
+// throw on launch and fail the variant for no real reason).
+function isLongLivedHost(): boolean {
+  return (
+    process.env.PIPELINE_INPROCESS === '1' ||
+    !!process.env.RAILWAY_ENVIRONMENT ||
+    !!process.env.RAILWAY_SERVICE_ID ||
+    !!process.env.RAILWAY_PROJECT_ID ||
+    !!process.env.RAILWAY_DEPLOYMENT_ID
+  )
+}
+
+// How the graceful-shutdown drain should treat each task if SIGTERM lands while
+// it is running (see lib/shutdown.ts).
+function drainModeFor(task: PipelineTask['task']): DrainMode {
+  switch (task) {
+    case 'render-variant':
+      return 'fail' // can't finish in a drain window and dies with the container
+    case 'start-submagic':
+    case 'finalize-submagic':
+      return 'wait' // short + state-critical (writes the permanent R2 / project id)
+    case 'prepare-source':
+      return 'abandon' // job-level; a retried start self-heals the source from R2/Drive
+    default:
+      return 'abandon'
+  }
+}
+
+// Last-ditch failure marker for the in-process home. runInline's tasks each fail
+// their OWN variant on error — except a throw from renderEditVariantTask's
+// preamble (job/script read) escapes before runSingleVariant's try/catch is set
+// up, which would leave the card 'processing' until the 45-min watchdog. Fail it
+// here, but only if it's still 'processing', so a result that already landed is
+// never clobbered. Best-effort and silent on its own failure.
+async function failStuckVariant(payload: PipelineTask): Promise<void> {
+  if (!('variantId' in payload) || !payload.variantId) return
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!url || !key) return
+  const db = createClient(url, key)
+  const { data: job } = await db.from('video_jobs').select('variants').eq('id', payload.jobId).single()
+  const v = ((job?.variants ?? []) as VideoVariant[]).find((x) => x.id === payload.variantId)
+  if (!v || v.status !== 'processing') return
+  await patchVariant(
+    db,
+    payload.jobId,
+    payload.variantId,
+    { status: 'failed', error: 'The render stopped unexpectedly. Please retry this variant.', progress: null },
+    { completeWhenAllDone: true },
+  )
+}
+
+// In-process home: run to completion in the background while dispatch returns
+// immediately. Registers with the shutdown tracker for the whole run so a
+// redeploy can give it a clean ending, and nets any escaped throw so a task
+// never dies silently with the card left spinning.
+async function runInProcess(payload: PipelineTask): Promise<void> {
+  const untrack = trackTask({
+    jobId: payload.jobId,
+    variantId: 'variantId' in payload ? payload.variantId : undefined,
+    task: payload.task,
+    mode: drainModeFor(payload.task),
+  })
+  try {
+    await runInline(payload)
+  } catch (e) {
+    console.error(`[sandbox-tasks] inline ${payload.task} failed:`, (e as Error).message)
+    await failStuckVariant(payload).catch((err) =>
+      console.warn(`[sandbox-tasks] could not fail stuck ${payload.task}:`, (err as Error).message),
+    )
+  } finally {
+    untrack()
+  }
+}
+
 /** Fire off a pipeline task in whichever home fits this deployment. Resolves
  *  once the task is RUNNING/QUEUED (not finished) — progress lands in the DB.
- *  Render host order: GitHub Actions (free, opt-in) → Vercel Sandbox → in-process. */
+ *  Home order: GitHub Actions (free, opt-in) → Vercel Sandbox (Vercel only) →
+ *  in-process (Railway / long-lived server). */
 export async function dispatchPipelineTask(payload: PipelineTask): Promise<void> {
+  // Mid-drain: the container is on its way down, so refuse new heavy work rather
+  // than start something that would be killed seconds later. The start routes
+  // turn this throw into a failed variant with a retry, which is honest — the
+  // user retries once the new deploy is up.
+  if (isDraining()) {
+    throw new Error('The server is restarting to finish a deploy — please retry in a moment.')
+  }
   if (process.env.RENDER_VIA_GITHUB === '1') {
     await runViaGitHubActions(payload)
-  } else if (process.env.VERCEL) {
+  } else if (process.env.VERCEL && !isLongLivedHost()) {
     await runInSandbox(payload)
   } else {
-    void runInline(payload).catch((e) =>
-      console.error(`[sandbox-tasks] inline ${payload.task} failed:`, (e as Error).message)
+    void runInProcess(payload).catch((e) =>
+      console.error(`[sandbox-tasks] in-process ${payload.task} crashed:`, (e as Error).message),
     )
   }
 }

@@ -14,24 +14,13 @@ export type MusicMode = 'smart' | 'off'
 
 export const DEFAULT_MUSIC_MODE: MusicMode = 'smart'
 
-// One creator-supplied B-roll clip attached to a job. Enriched in the
-// prepare-source task: normalized copy in R2, Submagic user-media id, a
-// one-line description (Gemini), and transcript-matched placements shared by
-// all Submagic variants.
+// One creator-supplied B-roll clip attached to a job. Only the Motion Lab
+// variants (v4-v6) use these — v1-v3 always render with Submagic's own stock
+// B-roll — and the prepare-source task enriches each one with the Gemini
+// analysis those variants read.
 export interface CustomBrollEntry {
   url: string
   description?: string | null
-  r2Url?: string | null
-  duration?: number | null
-  submagicMediaId?: string | null
-  placements?: { start: number; end: number }[]
-  // Which source timeline `placements` were measured against: the pre-cut
-  // Submagic source ('cut') or the uncut compressed one ('full'). Submagic is
-  // handed whichever getSubmagicSourceUrl picks, and the two differ materially
-  // (one real job: 140.9s vs 113.4s) — so timings from the wrong basis land on
-  // the wrong words, or past the end of the video, which Submagic rejects.
-  // Absent on rows written before this was tracked; treated as 'full'.
-  placementBasis?: 'cut' | 'full'
   // Candidate windows computed ONCE per job during source prep: where each
   // usable moment sits inside the clip and what Gemini saw there. Cached here
   // because every Motion Lab variant used to redo the whole thing — the full
@@ -101,6 +90,7 @@ export interface VideoVariant extends VideoVariantDef {
   // Where cutaways come from once the creator supplied her own clips:
   // 'both' (hers first, stock tops up), 'custom' (hers only), 'stock'
   // (ignore her folder this time). Absent on older rows = 'both'.
+  // v4-v6 only: v1-v3 always use Submagic's stock B-roll.
   broll_source?: BrollSource
   // Set when the render could NOT use the creator's clips and quietly used
   // stock instead (folder unreadable, downloads failed, nothing placeable).
@@ -343,10 +333,6 @@ export interface SubmagicJobOptions {
   removeBadTakes?: boolean
   cleanAudio?: boolean
   musicTrackId?: string
-  // Timed creator B-roll: clips previously uploaded to Submagic user-media,
-  // placed at source-timeline seconds. Layouts: full, split-50-50,
-  // pip-top-right, pip-bottom-right, split-35-65 (+ -bordered variants).
-  items?: Array<{ type: 'user-media'; startTime: number; endTime: number; userMediaId: string; layout: string }>
 }
 
 interface SubmagicTemplateOption {
@@ -739,30 +725,6 @@ export async function fetchSubmagicAudioTrack(
   }
 }
 
-// Upload a hosted clip (e.g. its R2 public URL) into Submagic's user-media
-// library so timed items can reference it. Returns the userMediaId, or null
-// on failure (custom B-roll then degrades to no cutaways, never a dead render).
-export async function createSubmagicUserMedia(url: string): Promise<string | null> {
-  try {
-    const res = await fetch('https://api.submagic.co/v1/user-media', {
-      method: 'POST',
-      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(120_000),
-    })
-    const text = await res.text()
-    if (!res.ok) {
-      console.warn(`[submagic] user-media upload failed (${res.status}): ${text.slice(0, 200)}`)
-      return null
-    }
-    const data = JSON.parse(text) as { userMediaId?: string; id?: string }
-    return data.userMediaId ?? data.id ?? null
-  } catch (e) {
-    console.warn('[submagic] user-media upload error:', (e as Error).message)
-    return null
-  }
-}
-
 export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
@@ -782,7 +744,6 @@ export async function submitSubmagicJob(
         templateName: opts.templateName,
         magicBrolls: opts.magicBrolls ?? false,
         magicZooms: opts.magicZooms ?? false,
-        ...(opts.items?.length ? { items: opts.items } : {}),
         cleanAudio: opts.cleanAudio ?? true,
         removeSilencePace: opts.removeSilencePace ?? 'extra-fast',
         removeBadTakes: opts.removeBadTakes ?? false,
@@ -852,22 +813,40 @@ export async function pollSubmagicJob(projectId: string): Promise<{
 
   const data = await res.json()
 
-  if (data.transcriptionStatus === 'FAILED') {
-    return { status: 'failed', previewUrl: null, downloadUrl: null, error: data.failureReason ?? 'Transcription failed' }
+  // Submagic reports some states in UPPERCASE — transcriptionStatus comes back
+  // as 'FAILED' — so every status read here is case-folded. Comparing
+  // data.status to lowercase literals (as before) silently mishandles a render
+  // reported as 'COMPLETED'/'DONE' (treated as still-processing → never pulled
+  // into R2, then falsely failed by the stale sweep) or 'FAILED' (also read as
+  // processing → the real reason never reaches the card).
+  const rawStatus = String(data.status ?? '').toLowerCase()
+  const transcriptionFailed = String(data.transcriptionStatus ?? '').toLowerCase() === 'failed'
+  const failed = transcriptionFailed || rawStatus === 'failed'
+
+  // Surface the actual reason: fall back across the field names Submagic has
+  // used so the card says WHY instead of a bare "Unknown error".
+  const reason = data.failureReason ?? data.error ?? data.errorMessage ?? data.message ?? null
+
+  if (failed) {
+    return {
+      status: 'failed',
+      previewUrl: null,
+      downloadUrl: null,
+      error: reason ?? (transcriptionFailed ? 'Transcription failed' : 'Unknown error'),
+    }
   }
 
   // A project can report completed with no rendered file yet (e.g. transcription
   // finished but the export hasn't produced a video). Only a completed status
   // WITH a download URL is truly ready.
   const hasFile = Boolean(data.videoUrl ?? data.downloadUrl ?? data.directUrl)
-  const done = (data.status === 'done' || data.status === 'completed') && hasFile
-  const processing = !done && data.status !== 'failed'
+  const done = (rawStatus === 'done' || rawStatus === 'completed') && hasFile
 
   return {
-    status: done ? 'ready' : processing ? 'processing' : 'failed',
+    status: done ? 'ready' : 'processing',
     previewUrl: data.previewUrl ?? null,
     downloadUrl: data.videoUrl ?? data.downloadUrl ?? data.directUrl ?? null,
-    error: done || processing ? null : (data.failureReason ?? 'Unknown error'),
+    error: null,
   }
 }
 

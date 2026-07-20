@@ -18,7 +18,7 @@
 //
 // No network, no API keys, no spend — pure functions over synthetic transcripts.
 
-import { isRestartedBy, findStutterDrops } from '../lib/edit-plan'
+import { isRestartedBy, findStutterDrops, findRepeatedTakes } from '../lib/edit-plan'
 import type { WordTimestamp } from '../lib/caption-renderer'
 
 // Build word timings from a sentence; timings are irrelevant to isRestartedBy
@@ -176,6 +176,83 @@ for (const c of STUTTER) {
   console.log(`      drops ${show(got)}  (expected ${show(c.expect)})`)
 }
 
-const total = CASES.length + STUTTER.length
+// ── findRepeatedTakes ────────────────────────────────────────────────────────
+// The client's report: "some of the cutting is not good on the repeting the same
+// sentence". A restated SENTENCE had no deterministic detector — only the Haiku
+// pass, which returns [] on any miss or network failure. These lock in both the
+// catches and, more importantly, the rhetorical figures that must survive.
+
+interface RepeatCase {
+  name: string
+  words: WordTimestamp[]
+  dropped: number[]
+  expect: number[]
+}
+
+const REPEATS: RepeatCase[] = [
+  {
+    name: 'whole sentence restated after a filler drops the FIRST take',
+    words: w('Number one you fall asleep fine uh Number one you fall asleep fine but you wake up at three'),
+    dropped: [6],                       // "uh" already dropped as filler
+    expect: [0, 1, 2, 3, 4, 5],         // first take goes, keeper stays
+  },
+  {
+    name: 'restate that rewords slightly still collapses to the later take',
+    words: w('Your nervous system is stuck in high gear Your nervous system is stuck in high gear and it cannot power down'),
+    dropped: [],
+    expect: [0, 1, 2, 3, 4, 5, 6, 7],
+  },
+  {
+    name: 'abandoned tail between the two attempts goes with the first take',
+    words: w('The racing thoughts are not the I mean The racing thoughts are not the cause of this'),
+    dropped: [],
+    expect: [0, 1, 2, 3, 4, 5, 6, 7],   // includes the "I mean" fragment
+  },
+  {
+    // THE FIGURE THAT MUST SURVIVE — named explicitly in the bug report triage.
+    name: 'rhetorical contrast "it is not X, it is Y" is never a retake',
+    words: w('This is not a sleep problem This is a cortisol timing issue that we can measure'),
+    dropped: [],
+    expect: [],
+  },
+  {
+    name: 'anaphora with different payloads is rhetoric, not a retake',
+    words: w('You deserve real rest You deserve real recovery and your brain deserves both'),
+    dropped: [],
+    expect: [],
+  },
+  {
+    name: 'conversational glue is never collapsed on its own',
+    words: w('and so then you know and so then you know'),
+    dropped: [],
+    expect: [],                          // fewer than 2 distinct substantial words
+  },
+  {
+    name: 'three takes of the same sentence collapse to the last',
+    words: w('Cortisol rises too early in the morning Cortisol rises too early in the morning Cortisol rises too early in the morning hours for you'),
+    dropped: [],
+    expect: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+  },
+  {
+    name: 'a phrase that recurs far later in the script is left alone',
+    words: w('slow wave sleep is the deep stage where your brain clears waste and repairs before you ever reach slow wave sleep again'),
+    dropped: [],
+    expect: [],                          // second occurrence is well past the skip window
+  },
+]
+
+console.log('\n── findRepeatedTakes (restated sentences) ───────────────────────')
+for (const c of REPEATS) {
+  const got = findRepeatedTakes(c.words, new Set(c.dropped))
+  const ok = JSON.stringify(got) === JSON.stringify(c.expect)
+  if (!ok) failed++
+  const show = (idx: number[]) => idx.length ? idx.map(i => `"${c.words[i].text}"`).join(' ') : '(none)'
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${c.name}`)
+  console.log(`      "${c.words.map(x => x.text).join(' ')}"`)
+  console.log(`      drops ${show(got)}`)
+  if (!ok) console.log(`      expected ${show(c.expect)}`)
+}
+
+const total = CASES.length + STUTTER.length + REPEATS.length
 console.log(`\n${total - failed}/${total} passed`)
 if (failed) process.exit(1)

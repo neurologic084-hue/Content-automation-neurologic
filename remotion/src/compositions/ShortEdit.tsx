@@ -322,9 +322,19 @@ const SegmentClip: React.FC<{
           objectFit: 'cover',
           // cinematic = moody desaturated (v6); warm = sunnier, richer color;
           // clean = crisp + slightly richer, no warmth shift (true-to-life)
+          //
+          // warm was sepia(0.08) saturate(1.22), measured on shipped v4/v5 at
+          // -6.7%/-8.8% blue on her face against the ungraded source. Sepia is a
+          // blunt instrument — it pulls everything toward one hue rather than
+          // shifting white balance, so it yellows the whites of the eyes and any
+          // white clothing along with the skin. Cut hard, and saturation with it:
+          // on skin, saturation costs blue (skin's minimum channel), so it reads
+          // as yellow too. `smart` can land here via a variant's kit default, and
+          // smart is the default look, so this has to be natural rather than
+          // characterful. See the measurements in lib/color-grade.ts.
           filter: grade === 'cinematic' ? 'contrast(1.07) saturate(0.86) brightness(0.96)'
-            : grade === 'warm' ? 'contrast(1.06) sepia(0.08) saturate(1.22) brightness(0.98)'
-            : grade === 'clean' ? 'contrast(1.07) saturate(1.08)'
+            : grade === 'warm' ? 'contrast(1.05) sepia(0.02) saturate(1.03) brightness(0.97)'
+            : grade === 'clean' ? 'contrast(1.05) saturate(1.03) brightness(0.985)'
             : undefined,
         }}
       />

@@ -4,28 +4,25 @@
 // through here — Submagic cleans their audio inside its own render and Olympus
 // leaves that dialogue verbatim.
 //
-//   1. Submagic Clean Audio (plan-included, primary) — a caption-less,
-//      edit-less Submagic project with cleanAudio only; the cleaned audio is
-//      extracted and remuxed over the ORIGINAL video stream so no cuts or
-//      re-encodes ever touch the picture.
-//   2. Auphonic (auphonic.com) — the BACKUP when Submagic fails or is over its
-//      usage limit, so a full Submagic quota never blocks the render. Denoise +
-//      reverb removal + adaptive leveler. Needs AUPHONIC_API_TOKEN; skipped
-//      silently when unset. (Briefly removed 2026-07 while the account was out
-//      of credits — restored once it was topped up.)
-//   3. ElevenLabs audio isolation as the final fallback (lib/voice-isolation.ts).
-//   4. Original audio if all are unavailable — a noisy render beats no render.
+//   1. Auphonic (auphonic.com) — primary. Denoise + reverb removal + adaptive
+//      leveler; the cleaned audio is remuxed over the ORIGINAL video stream so
+//      no cuts or re-encodes ever touch the picture. Needs AUPHONIC_API_TOKEN.
+//   2. ElevenLabs audio isolation as the fallback (lib/voice-isolation.ts).
+//   3. Original audio if both are unavailable — a noisy render beats no render.
+//
+// Submagic Clean Audio used to lead this chain and was removed 2026-07-20 when
+// Auphonic moved to a paid plan. It made the Motion Lab variants spend a
+// Submagic project each purely to clean audio, despite having nothing else to
+// do with Submagic — so a Submagic quota could block a render that never needed
+// it. v4-v6 now touch Submagic nowhere.
 //
 // Also exports detectSilences(): energy-based silence intervals from the
 // CLEANED track, used as the second cut signal (transcript word timings often
 // stretch across real pauses and hide them from gap-based cutting).
 
 import fs from 'fs'
-import path from 'path'
 import { exec } from 'child_process'
 import { isolateVoiceInPlace } from './voice-isolation'
-import { pollSubmagicJob } from './video-pipeline'
-import { uploadToStorage, sweepStoragePrefix } from './storage'
 
 const POLL_INTERVAL_MS = 5_000
 const POLL_DEADLINE_MS = 6 * 60_000
@@ -95,7 +92,7 @@ async function detectPromoOffset(sentPath: string, returnedPath: string): Promis
   return bestLag / ENV_HZ
 }
 
-// ── Auphonic backup cleaner ───────────────────────────────────────────────────
+// ── Auphonic (primary cleaner) ────────────────────────────────────────────────
 const AUPHONIC_BASE = 'https://auphonic.com/api'
 
 // Auphonic algorithm settings (field names verified against the account's
@@ -207,70 +204,6 @@ async function auphonicCleanInPlace(videoPath: string, auth: string): Promise<vo
   }
 }
 
-// Submagic Clean Audio as a pure audio processor: submit a project with every
-// editing feature off, wait for the render, then pull ONLY its audio track
-// back onto the original video (c:v copy — zero picture quality loss, and no
-// cuts were requested so durations match). Throws on failure so the caller
-// can fall down the chain.
-async function submagicCleanInPlace(videoPath: string): Promise<void> {
-  const fileName = path.basename(videoPath)
-  const publicUrl = await uploadToStorage(videoPath, fileName, `clean-${Date.now()}`, 'audio-clean')
-
-  // These uploads are one-shot (Submagic downloads the file within minutes)
-  // but were previously kept forever. Sweep yesterday's leftovers each run;
-  // the fresh upload above is well inside the age cutoff.
-  void sweepStoragePrefix('audio-clean/', 24)
-
-  const res = await fetch('https://api.submagic.co/v1/projects', {
-    method: 'POST',
-    headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title: `audio-clean-${fileName.slice(0, 40)}`,
-      language: 'en',
-      videoUrl: publicUrl,
-      cleanAudio: true,
-      disableCaptions: true,
-      magicBrolls: false,
-      magicZooms: false,
-      removeBadTakes: false,
-      // removeSilencePace deliberately omitted — no cutting of any kind here.
-    }),
-    signal: AbortSignal.timeout(60_000),
-  })
-  if (!res.ok) throw new Error(`Submagic clean-audio submit failed (${res.status}): ${(await res.text()).slice(0, 200)}`)
-  const { id } = await res.json() as { id: string }
-  if (!id) throw new Error('Submagic returned no project id')
-
-  const deadline = Date.now() + POLL_DEADLINE_MS
-  let downloadUrl: string | null = null
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
-    const result = await pollSubmagicJob(id).catch(() => null)
-    if (!result || result.status === 'processing') continue
-    if (result.status === 'failed') throw new Error(result.error ?? 'Submagic clean-audio processing failed')
-    downloadUrl = result.downloadUrl
-    break
-  }
-  if (!downloadUrl) throw new Error('Submagic clean-audio timed out or returned no output')
-
-  const cleanedVideo = `${videoPath}.smclean.mp4`
-  const remuxed = `${videoPath}.clean.mp4`
-  try {
-    const dl = await fetch(downloadUrl, { signal: AbortSignal.timeout(180_000) })
-    if (!dl.ok) throw new Error(`Submagic clean-audio download failed: HTTP ${dl.status}`)
-    fs.writeFileSync(cleanedVideo, Buffer.from(await dl.arrayBuffer()))
-
-    await run(
-      `ffmpeg -y -i "${videoPath}" -i "${cleanedVideo}" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart "${remuxed}"`
-    )
-    if (!fs.existsSync(remuxed)) throw new Error('Submagic clean-audio remux produced no output')
-    fs.renameSync(remuxed, videoPath)
-  } finally {
-    for (const f of [cleanedVideo, remuxed]) {
-      try { if (fs.existsSync(f)) fs.unlinkSync(f) } catch { /* best-effort */ }
-    }
-  }
-}
 
 export type AudioCleaner = 'submagic' | 'auphonic' | 'elevenlabs' | 'none'
 
@@ -279,30 +212,15 @@ export type AudioCleaner = 'submagic' | 'auphonic' | 'elevenlabs' | 'none'
 // inside their own render and are never passed through here; see
 // retrieveAndStoreSubmagicResult.
 export async function cleanAudioInPlace(videoPath: string): Promise<AudioCleaner> {
-  // Escape hatch for TEST renders: Submagic Clean Audio spends a real Submagic
-  // project per variant, which is pure waste when the point of the render is to
-  // prove the pipeline works. SKIP_SUBMAGIC_CLEAN=1 goes straight to ElevenLabs
-  // isolation. Never set in normal operation — client renders want the primary
-  // cleaner.
-  const skipSubmagic = process.env.SKIP_SUBMAGIC_CLEAN === '1'
-  if (skipSubmagic) {
-    console.warn('[audio-clean] SKIP_SUBMAGIC_CLEAN=1 — test render, skipping the Submagic cleaner')
-  }
-
-  // 1. Submagic (primary — plan-included voice enhancement).
-  if (process.env.SUBMAGIC_API_KEY && !skipSubmagic) {
-    try {
-      await submagicCleanInPlace(videoPath)
-      console.log('[audio-clean] Submagic: cleaned dialogue remuxed over original picture')
-      return 'submagic'
-    } catch (e) {
-      console.warn('[audio-clean] Submagic clean-audio failed/over-limit, falling back to Auphonic:', (e as Error).message)
-    }
-  } else if (!skipSubmagic) {
-    console.warn('[audio-clean] SUBMAGIC_API_KEY not set — falling back to Auphonic')
-  }
-
-  // 2. Auphonic (backup — keeps a full Submagic quota from blocking the render).
+  // Auphonic is the primary cleaner, and Submagic is deliberately NOT in this
+  // chain at all.
+  //
+  // It used to lead here, which meant the Motion Lab variants — which have
+  // nothing else to do with Submagic — spent a Submagic project each just to
+  // clean their audio. Now that Auphonic is on a paid plan there is no reason
+  // to: v4-v6 never touch Submagic, and a Submagic quota can no longer block a
+  // render that has no other use for it. v1-v3 still go through Submagic for
+  // the edit itself, which is a different thing entirely.
   const auth = auphonicAuth()
   if (auth) {
     try {
@@ -316,7 +234,7 @@ export async function cleanAudioInPlace(videoPath: string): Promise<AudioCleaner
     console.warn('[audio-clean] AUPHONIC_API_TOKEN not set — falling back to ElevenLabs isolation')
   }
 
-  // 3. ElevenLabs isolation. 4. Original audio if that fails too.
+  // 2. ElevenLabs isolation. 3. Original audio if that fails too.
   const isolated = await isolateVoiceInPlace(videoPath)
   return isolated ? 'elevenlabs' : 'none'
 }

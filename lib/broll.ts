@@ -150,13 +150,59 @@ export function submagicBrollKnobs(
 // 2.6s — used to convert a coverage percent into a cutaway count.
 const AVG_CUT_SECONDS = 2.8
 
+// ── Face-safe windows ─────────────────────────────────────────────────────────
+// Nothing covers the speaker's face for the opening HOOK_PROTECT_SECONDS.
+//
+// WHY, so this is not tuned down to buy coverage later: on a 60-90s vertical
+// short the retention curve is decided in the opening beat, and what wins it is
+// a face making a claim — the viewer is deciding whether to trust the person,
+// not whether the topic has good stock footage. A cutaway there trades the
+// whole video for one illustrated word. 5s is one spoken hook sentence at
+// conversational pace (~12 words), so the window covers the CLAIM, not just the
+// first syllable.
+//
+// This is a backstop, not a preference. The planner prompts already ask the
+// model to "hold on her face for the hook" and it ignored them: a shipped
+// render put a cutaway at 3.40s, over the hook, under a bare `start >= 2.5`.
+// A prompt is a request; code is the guarantee. Coverage is what the other
+// 55-85s of timeline is for.
+export const HOOK_PROTECT_SECONDS = 5.0
+
+// The closing ask gets the same protection over a shorter window. The CTA is
+// the second most face-dependent beat — "follow me / DM me" is a person asking,
+// and stock footage over it reads as an ad — but unlike the hook it is not
+// where retention is won, and the video's payoff visual often wants to live
+// near the end. So: protected, more narrowly. This replaces an unnamed 1.5s
+// tail that only stopped a cutaway from ENDING inside it.
+export const CTA_PROTECT_SECONDS = 2.5
+
+// The stretch of timeline a cutaway may legally occupy.
+const faceSafeSpan = (duration: number) => duration - HOOK_PROTECT_SECONDS - CTA_PROTECT_SECONDS
+
+// THE one place a cutaway start is decided. Three separate code paths invent
+// starts — the LLM plan, the deterministic gap-filler, the fallback spread —
+// and each used to carry its own copy of the numbers (2.5 / 3.0 / duration-1.5),
+// which is exactly how the hook ended up unguarded.
+//
+// A cutaway proposed inside the hook is SHIFTED to the boundary, not dropped:
+// the model picked that moment off a visual phrase, and in a 60-90s script the
+// next phrase is nearly always the same idea continuing. Dropping it also backs
+// the plan under its coverage target, and the gap-filler then drops a generic
+// lifestyle clip at roughly the same spot — a cutaway with no semantic tie at
+// all, which is strictly worse. One that no longer fits ahead of the CTA is
+// dropped: there is nowhere left to shift it to.
+function faceSafeStart(start: number, dur: number, duration: number): number | null {
+  const shifted = Math.max(HOOK_PROTECT_SECONDS, start)
+  return shifted + dur > duration - CTA_PROTECT_SECONDS ? null : shifted
+}
+
 // A coverage percent becomes a cutaway count: percent of the timeline under
-// B-roll at the average cutaway length, bounded by what physically fits (2.5s
-// head, 1.5s tail, minGap of talking head between cutaways). 0 is honest: a
+// B-roll at the average cutaway length, bounded by what physically fits inside
+// the face-safe span (minGap of talking head between cutaways). 0 is honest: a
 // 5% ask on a short clip may round to no cutaways at all.
 export function coverageTargetCount(duration: number, percent: number, minGap: number): number {
   const wanted = Math.round((duration * percent) / 100 / AVG_CUT_SECONDS)
-  const fits = Math.floor((duration - 2.5 - 1.5 + minGap) / (AVG_CUT_SECONDS + minGap))
+  const fits = Math.floor((faceSafeSpan(duration) + minGap) / (AVG_CUT_SECONDS + minGap))
   return Math.max(0, Math.min(wanted, fits))
 }
 
@@ -211,6 +257,11 @@ export async function planBrollSlots(
   coverage: number | null = null,
 ): Promise<PlannedSlot[]> {
   if (media === 'none' || duration < 8 || editedWords.length < 10) return []
+  // No legal window for even the shortest cutaway (1.8s) once the hook and the
+  // CTA are protected — a pure talking head IS a sane video, and it's the one
+  // outcome that can never be wrong. Checked before the model call so a clip
+  // this short costs nothing.
+  if (faceSafeSpan(duration) < 1.8) return []
   const minGap = cutawayMinGap(dense)
   // Adaptive cadence for EVERY flavor, driven by the Gemini profile's read of
   // the footage: rich content gets a cutaway every ~6.5s (≈ the reference
@@ -279,7 +330,9 @@ export async function planBrollSlots(
           '',
           'Rules:',
           '- Each cutaway illustrates a concrete, visual phrase — start at that phrase\'s time.',
-          '- duration: 1.8 to 3.2 seconds. Never start before 2.5s, never end within the last 1.5s.',
+          `- duration: 1.8 to 3.2 seconds. Never start before ${HOOK_PROTECT_SECONDS}s — hold on the`,
+          '  speaker\'s face for the hook. Never end within the last',
+          `  ${CTA_PROTECT_SECONDS}s: her call to action plays on her face too.`,
           `- At least ${dense ? '1.2' : '2'} seconds of talking-head between cutaways. No overlaps.`,
           '- query: a 2-4 word STOCK-SEARCH query naming something FILMABLE — a person doing a',
           '  specific action, a physical object, or a place ("woman eating dinner", "hands',
@@ -318,9 +371,9 @@ export async function planBrollSlots(
   for (const c of candidates
     .filter(c => typeof c.start === 'number' && typeof c.duration === 'number' && typeof c.query === 'string' && c.query.trim())
     .sort((a, b) => (a.start as number) - (b.start as number))) {
-    const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
     const dur = Math.min(maxDur, Math.max(1.8, c.duration as number))
-    if (start + dur > duration - 1.5) continue
+    const start = faceSafeStart(Math.max(lastEnd + minGap, c.start as number), dur, duration)
+    if (start === null) continue
     if (avoid.some(a => start < a.start + a.duration + padOf(a) && start + dur > a.start - padOf(a))) continue
     // Viral cutaways are always full-screen — once the cover budget is spent,
     // extra slots are dropped rather than demoted to floating cards (the
@@ -341,8 +394,9 @@ export async function planBrollSlots(
         headline: d.headline.trim().slice(0, 48),
         palette: PALETTES[(variation + designsUsed) % PALETTES.length],
       }
-      // The designed card needs room for its text build.
-      slot.duration = Math.max(slot.duration, 3.0)
+      // The designed card needs room for its text build — but growing it must
+      // not push the card's tail into the protected CTA.
+      if (start + 3.0 <= duration - CTA_PROTECT_SECONDS) slot.duration = Math.max(slot.duration, 3.0)
       designsUsed++
     }
     slots.push(slot)
@@ -372,9 +426,16 @@ export async function planBrollSlots(
     // between fillers is already MORE air than it gives.
     const FILL_DUR = 2.6
     let qi = 0
-    let cursor = 3.0
+    // Fillers are the LEAST earned cutaways in the video — generic lifestyle
+    // stock, chosen with no read of the words. They start at the hook boundary
+    // like everything else; there is no version of "we were short on coverage"
+    // that justifies one over the opening.
+    let cursor = HOOK_PROTECT_SECONDS
     let filled = 0
-    while (slots.length < targetCount && qi < pool.length && cursor + FILL_DUR <= duration - 1.5) {
+    while (slots.length < targetCount && qi < pool.length) {
+      const legal = faceSafeStart(cursor, FILL_DUR, duration)
+      if (legal === null) break
+      cursor = legal
       const hit = busy.find(b => cursor < b.end + 0.6 && cursor + FILL_DUR > b.start - 0.6)
       if (hit) { cursor = hit.end + 0.6; continue }
       const layout: PlannedSlot['layout'] =
@@ -486,10 +547,14 @@ export async function planCustomBrollSlots(
   // silently dropped most of them (12 uploaded -> 2 used). So on 'smart' the
   // target is simply EVERY clip once, bounded by what the timeline physically
   // fits. The manual slider still overrides with an explicit coverage number.
-  const fits = Math.floor((duration - 2.5 - 1.5 + minGap) / (AVG_CUT_SECONDS + minGap))
+  const fits = Math.floor((faceSafeSpan(duration) + minGap) / (AVG_CUT_SECONDS + minGap))
+  // No Math.max(1, …) here: on a clip too short to hold a face-safe cutaway,
+  // forcing one in is the bug this guard exists to stop. Zero cutaways is a
+  // sane video — her talking head, uncovered — and the fallback spread below
+  // inherits this count, so the floor would have leaked straight past the hook.
   const targetCount = coverage !== null
     ? coverageTargetCount(duration, coverage, minGap)
-    : Math.max(1, Math.min(clips.length, fits))
+    : Math.min(clips.length, Math.max(0, fits))
   if (targetCount === 0) return []
 
   const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
@@ -540,7 +605,8 @@ export async function planCustomBrollSlots(
           'Constraints for any cutaway you DO place:',
           '- Each clip may be used at most twice; prefer using every fitting clip once first.',
           '- duration: 3.0 to 4.0 seconds, and never longer than the clip itself.',
-          '- Never start before 2.5s, never end within the last 1.5s of the video.',
+          `- Never start before ${HOOK_PROTECT_SECONDS}s: the opening seconds hold on her face, always.`,
+          `- Never end within the last ${CTA_PROTECT_SECONDS}s of the video: the call to action is her too.`,
           `- At least ${minGap} seconds of talking-head between cutaways. No overlaps.`,
           '- Return JSON only: {"items":[{"start":number,"duration":number,"clip":number}]}',
         ].join('\n'),
@@ -566,9 +632,9 @@ export async function planCustomBrollSlots(
     const idx = Math.max(0, Math.min(clips.length - 1, Math.round(c.clip as number)))
     if ((uses.get(idx) ?? 0) >= 2) continue
     const clip = clips[idx]
-    const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
     const dur = Math.min(4.0, Math.min(clip.duration, Math.max(3.0, c.duration as number)))
-    if (start + dur > duration - 1.5) continue
+    const start = faceSafeStart(Math.max(lastEnd + minGap, c.start as number), dur, duration)
+    if (start === null) continue
     if (avoid.some(a => start < a.start + a.duration + padOf(a) && start + dur > a.start - padOf(a))) continue
     // A long clip only ever needs `dur` seconds of itself. First use plays
     // from the top; a second use cuts to the clip's tail so the same footage
@@ -618,14 +684,19 @@ export async function planCustomBrollSlots(
   // decide where they go, so spread them evenly as a safety net — each clip
   // lands once, evenly spaced, never more than the coverage target asked for.
   if (!items.length && plannerFailed) {
-    const usable = Math.min(targetCount, clips.length, Math.max(1, Math.floor((duration - 6) / (3 + minGap))))
-    const step = (duration - 6) / usable
+    // The spread walks the face-safe span only. It used to start at 3.0s and
+    // divide `duration - 6`, so the very first clip of a failed plan landed on
+    // the hook by construction — and this path runs precisely when nothing
+    // smarter is available to catch it.
+    const span = faceSafeSpan(duration)
+    const usable = Math.min(targetCount, clips.length, Math.max(0, Math.floor(span / (3 + minGap))))
+    const step = usable ? span / usable : 0
     for (let i = 0; i < usable; i++) {
       const clip = clips[i]
-      const start = Number((3 + i * step).toFixed(2))
       const dur = Math.min(3.2, clip.duration)
-      if (start + dur > duration - 1.5) break
-      items.push({ start, duration: Number(dur.toFixed(2)), file: clip.file, kind: 'video', layout: 'cover', query: clip.description.slice(0, 60) })
+      const start = faceSafeStart(HOOK_PROTECT_SECONDS + i * step, dur, duration)
+      if (start === null) break
+      items.push({ start: Number(start.toFixed(2)), duration: Number(dur.toFixed(2)), file: clip.file, kind: 'video', layout: 'cover', query: clip.description.slice(0, 60) })
     }
     console.log(`[broll] custom-clip fallback spread: ${items.length} cutaway(s)`)
   }

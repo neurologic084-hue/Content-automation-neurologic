@@ -69,6 +69,276 @@ Respond ONLY in valid JSON (no markdown, no explanation outside the JSON):
 }`
 }
 
+// The only anti-jargon guidance used to live in brand.extra_context, phrased as
+// "avoid unnecessary clinical jargon unless explaining a scientific concept
+// clearly". The model took that escape hatch every single time: across the last
+// 38 generated scripts, 49 sentences name the prefrontal cortex, almost always
+// glossed inline ("your amygdala, the brain's threat-detection center"). It was
+// also outnumbered by six separate instructions demanding "mechanism" and
+// "specificity", which a model satisfies most cheaply by naming a brain region.
+// These rules ban the terms outright, close the gloss loophole, and are stated
+// as an override so neither the specificity instructions nor the creator's own
+// extra_context can win the conflict.
+//
+// The word lists below are per-brand and deliberately NOT shared. A banned-word
+// list is the most niche-specific thing in the whole prompt: "amygdala" is
+// jargon to a neurofeedback audience and plain vocabulary to a neuroscience
+// channel, and "the people I work with" is one clinician's phrasing, not a
+// house style. Brands with no profile here get the niche-agnostic core, which
+// bans jargon by description rather than by list.
+interface PlainLanguageProfile {
+  /** Who is on the other end of the video, in this brand's own terms. */
+  audience: string
+  /** Terms that fail the script outright. */
+  bannedTerms: string
+  /** Machine-checkable form of bannedTerms, used to stamp the few-shot examples
+   *  with their own violations. Kept separate so bannedTerms can stay readable
+   *  prose ("delta/theta/alpha waves") while the scanner stays accurate. */
+  scanTerms: string[]
+  /** BAD/GOOD rewrite pairs proving the inline definition does not rescue a banned term. */
+  glossExamples: string
+  /** BAD/GOOD pairs for SENTENCE LENGTH rather than vocabulary. The BAD sides are
+   *  real lines from this brand's own approved scripts, so the model sees the
+   *  failure in the exact register it is being calibrated on. */
+  lengthExamples: string
+  /** Field words the audience uses about itself   banning these flattens the voice. */
+  allowedTerms: string
+  /** What this creator's authority rests on, e.g. "A DOCTOR". */
+  credential: string
+}
+
+// Keyed by normalised creator_name so a profile survives "Dr. Jessica Wendling"
+// vs "Jessica Wendling". Renaming a brand in settings drops it back to the core
+// rules, which is the intended failure direction: a brand quietly losing its
+// term list is recoverable, another tenant's scripts quietly inheriting a
+// neurofeedback clinician's vocabulary is not.
+const PLAIN_LANGUAGE_PROFILES: Record<string, PlainLanguageProfile> = {
+  'jessica wendling': {
+    audience:
+      'a worried parent, an exhausted 42-year-old, someone watching on their phone at 11pm. Not a colleague, not a conference room. If a line would read as normal in a chart note or a lecture slide, it is wrong here.',
+    bannedTerms:
+      'prefrontal cortex, cortex, amygdala, limbic, hippocampus, HPA axis, autonomic, sympathetic nervous system, parasympathetic, vagus, vagal, dysregulated, dysregulation, hyperarousal, hypoarousal, neuroplasticity, neural pathway, circuitry, reward circuitry, EEG, qEEG, delta/theta/alpha/beta/high-beta/SMR waves, norepinephrine, cortisol elevation, elevated baseline, metabolic efficiency, physiologic, psychophysiology, executive function, white matter, comorbid, etiology, reward prediction error, threshold, protocol, intervention, modality, contraindicated, clinical, patients, symptoms, presentation, assessment.',
+    scanTerms: [
+      'prefrontal', 'cortex', 'amygdala', 'limbic', 'hippocamp', 'hpa axis', 'autonomic',
+      'sympathetic nervous', 'parasympathetic', 'vagus', 'vagal', 'dysregulat', 'hyperarous',
+      'hypoarous', 'neuroplastic', 'neural pathway', 'circuitry', 'eeg', 'delta wave',
+      'theta', 'alpha wave', 'high-beta', 'slow-wave', 'brainwave', 'norepinephrine',
+      // Bare "cortisol" is allowed once per script, so only the clinical
+      // constructions of it count as violations worth flagging on an example.
+      'cortisol elevation', 'elevated baseline', 'metabolic', 'physiolog', 'psychophysiolog',
+      'executive function', 'white matter', 'comorbid', 'etiology', 'reward prediction',
+      'contraindicat', 'clinical', 'patients', 'symptom', 'modality', 'protocol',
+    ],
+    lengthExamples: `  BAD (45 words, from an approved script):  "Cortisol is supposed to rise gradually in the early morning hours to prepare your body to wake up, but when your HPA axis, the system that regulates your stress hormones, has been dysregulated by chronic stress, that cortisol rise happens too early and too sharply."
+  GOOD: "Your body is supposed to warm up slowly before you wake. After years of stress, that switch starts flipping early. So you're wide awake at 4am, heart going, for no reason you can name."
+  BAD (40 words, from an approved script):  "The prefrontal cortex, the region responsible for focus, decision-making, and clear thinking, is the most metabolically expensive part of your brain, and it's the first thing to go offline when your system decides it needs to conserve resources for survival."
+  GOOD: "The thinking part of your brain is expensive to run. It burns more fuel than anything else up there. So the moment your body decides it's in trouble, that's the first thing it shuts off."
+  BAD (38 words, from an approved script):  "High-beta brainwave activity, which is the electrical signature of an aroused, vigilant brain, stays elevated even when you're exhausted, because the nervous system learned to stay on guard and doesn't automatically know when it's safe to power down."
+  GOOD: "Your brain stays on watch even when you're wrecked. It learned that years ago. Nobody ever told it the danger passed, so it keeps standing guard while you lie there staring at the ceiling."
+  Notice what survived every rewrite: 4am, the fuel cost, the staring at the ceiling. The facts stayed. Only the register changed.`,
+    glossExamples: `  BAD:  "That's your amygdala, the brain's threat-detection center, running at a chronically elevated baseline."
+  GOOD: "That's your brain's alarm system, stuck in the on position."
+  BAD:  "The prefrontal cortex, the region responsible for focus and clear thinking, loses the metabolic fuel it needs to stay online."
+  GOOD: "The part of your brain that does the hard thinking runs out of fuel and quietly goes offline."
+  BAD:  "when your HPA axis, the system that regulates your stress hormones, has been dysregulated by chronic stress"
+  GOOD: "your body's stress dial got turned up years ago and nothing ever turned it back down"
+  BAD:  "Brain fog isn't a personality trait. It's a dysregulation pattern."
+  GOOD: "Brain fog isn't who you are. It's a pattern your brain got stuck in."
+  BAD:  "We'll talk through your symptoms and figure out if neurofeedback is a good fit for you."
+  GOOD: "We'll talk through what's been going on and see if this is a good fit for you."`,
+    allowedTerms:
+      'brain, neurofeedback, brain fog, burnout, anxiety, ADHD, trauma, PTSD, sleep, stress, fight-or-flight, dopamine. "Nervous system" is allowed at most twice per script and never as the explanation itself. "Cortisol" is allowed once, described plainly as a stress hormone. Say "the people I work with", never "patients". Say "what you\'re dealing with", never "symptoms".',
+    credential: 'A DOCTOR',
+  },
+}
+
+/** Same ceiling lib/learning.ts ranks against, restated here because the model
+ *  needs the number and the ranker needs the number and they must not drift. */
+const SPOKEN_SENTENCE_CEILING = 20
+
+function plainLanguageProfileKey(creatorName: string): string {
+  return creatorName
+    .toLowerCase()
+    .replace(/^(dr|doctor|prof|professor)\.?\s+/, '')
+    .replace(/[^a-z0-9 ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** Pass the ACTIVE brand so a tenant only ever gets its own vocabulary. Called
+ *  with no brand (the lean, brand-free pipeline) it returns the core rules,
+ *  which still ban jargon   just by description instead of by term list. */
+export function buildPlainLanguageRules(brand?: Pick<BrandSettings, 'creator_name'>): string {
+  const creatorName = brand?.creator_name?.trim() ?? ''
+  const profile = creatorName ? PLAIN_LANGUAGE_PROFILES[plainLanguageProfileKey(creatorName)] : undefined
+
+  const audience =
+    profile?.audience ??
+    'whoever is watching on their phone at 11pm, not a colleague and not a conference room. If a line would read as normal in a professional report or a lecture slide, it is wrong here.'
+
+  const bannedSection = profile
+    ? `BANNED WORDS. If even one appears in the hook, body, or CTA, the script has failed. No context makes them acceptable:
+${profile.bannedTerms}`
+    : `BANNED VOCABULARY. Any word a viewer outside this field would have to look up fails the script, wherever it appears in the hook, body, or CTA: anatomy and biochemistry names, diagnostic and clinical labels, industry or academic terminology, and the abstract nouns professionals only use with each other. If you know the word from training rather than from conversation, it does not go in.`
+
+  const glossSection = `THE GLOSS LOOPHOLE IS CLOSED. Defining a banned term inline does not license it. All of these are violations:
+${
+  profile?.glossExamples ??
+  `  BAD:  "The system enters a state of sustained elevated activation, meaning it never fully powers down."
+  GOOD: "It never fully switches off."
+  BAD:  "That's cognitive load, the amount of mental effort a task demands, exceeding capacity."
+  GOOD: "You're being asked to hold more at once than anyone can hold."`
+}`
+
+  const allowedSection = profile
+    ? `\n\nALLOWED   these are ${creatorName}'s words and the audience's words, do not sanitise them away:
+${profile.allowedTerms}`
+    : ''
+
+  const lengthSection = `LENGTH   THE SAME RULE APPLIED TO SENTENCES INSTEAD OF WORDS. A plain word inside a 40-word sentence is still unreadable:
+${
+  profile?.lengthExamples ??
+  `  BAD (36 words):  "When the demand on the system stays high for long enough that recovery never fully happens, the capacity that used to feel automatic starts requiring conscious effort, and that effort is what you are experiencing as difficulty."
+  GOOD: "The demand never lets up, so you never fully recover. Things that used to be automatic now take effort. That effort is the thing you're feeling."
+  Notice what survived: the demand, the missing recovery, the effort. The facts stayed. Only the register changed.`
+}`
+
+  const specificExample = profile
+    ? `"Your brain's alarm goes off a half-second before the reasoning part gets a chance to weigh in" is specific and allowed. "Amygdala hyperactivation precedes prefrontal appraisal" is the same fact and is banned. If you cannot explain the mechanism without naming a brain part, you do not understand it well enough to put it in a 60-second video   find the everyday version.`
+    : `Describe what is happening in the words the audience would use to tell a friend about it. If you cannot explain the mechanism without a technical label, you do not understand it well enough to put it in a 60-second video   find the everyday version.`
+
+  const authorityLine = `${creatorName ? creatorName.toUpperCase() : 'THE CREATOR'} IS STILL ${profile?.credential ?? 'THE EXPERT'}. Plain language is not hedging and not softening. Keep the authority: they have seen this hundreds of times and know exactly what is happening. They just say it in the words a real person uses. Confident and clear, never tentative, never "sort of", "kind of", or "some people think".`
+
+  return `PLAIN LANGUAGE   THE HARDEST RULE IN THIS PROMPT. IT OVERRIDES EVERY OTHER INSTRUCTION HERE, INCLUDING THE HARD RULES SECTION AND EVERY DEMAND FOR "MECHANISM" AND "SPECIFICITY", WHEREVER THEY APPEAR.
+
+You are writing for ${audience}
+
+${bannedSection}
+
+${glossSection}${allowedSection}
+
+${lengthSection}
+
+READABILITY BAR   MEASURABLE, NOT A FEELING. Applies to the hook, every beat of the body, and the CTA:
+• HARD CEILING: 20 words per sentence. A ceiling, not an average, so you cannot offset a 35-word sentence with a 5-word one. Spoken delivery runs about two and a half words a second, so 20 words is eight seconds the listener spends holding an unfinished thought. Nothing in a 60-second video is worth eight seconds of suspense.
+• AIM: most sentences between 8 and 15 words, and at least half the script under 12.
+• ONE IDEA PER SENTENCE. One subject, one thing happening to it. Two facts means two sentences.
+• ONE JOINED CLAUSE AT MOST, AND IT COMES SECOND. "Your brain runs out of fuel, so it starts cutting corners" is fine. "When your brain, which has been running on empty for months, finally starts cutting corners..." is not. Never open a sentence with a clause the listener has to hold until the real subject shows up.
+• ONE QUALIFIER PER SENTENCE. "Often" or "for many people", never both, never three. Hedge the claim once and move on.
+• EVERYDAY WORDS. If it would not come up when two friends talk about this over coffee, it does not go in. Take the shorter word every time: "use" not "utilize", "fuel" not "resources", "starts" not "initiates", "shuts off" not "goes offline".
+• CONCRETE OVER ABSTRACT. Name something the viewer can see, hear, feel, or do. "You reread the same email four times" beats "sustained attention becomes difficult".
+• THIS OVERRIDES the VOICE RULES asking for "medium to long" sentences and the humanizer rule asking for "longer sentences (20+)". Both were written before this bar and both lose to it. Varying rhythm now means mixing 5-word sentences with 15-word sentences, never with 30-word ones.
+
+STILL BE SPECIFIC. Plain is not vague. Name the exact thing that is happening   in everyday words, as a picture rather than a diagram label. ${specificExample}
+
+DO NOT OVERCORRECT. Simple words, real substance. Short sentences are the format, not the content, and the danger on this side is as real as the jargon was:
+• Every sentence still has to carry a fact, a number, a moment, or an observation the viewer has not heard before. If you delete the detail while simplifying, you have made it worse, not easier.
+• No padding with empty short sentences. "It's hard. It really is. You're not alone." is three sentences saying nothing, and it is worse than the 40-word version it replaced.
+• Never explain something the viewer obviously already knows, and never spell out the emotional meaning of what you just said.
+• No baby talk, no cheerleading, no talking down. The listener is a smart adult who is tired, not a child. Respect is short sentences carrying real information, not soft sentences carrying none.
+
+${authorityLine}`
+}
+
+function resolvePlainLanguageProfile(brand?: Pick<BrandSettings, 'creator_name'>): PlainLanguageProfile | undefined {
+  const creatorName = brand?.creator_name?.trim() ?? ''
+  return creatorName ? PLAIN_LANGUAGE_PROFILES[plainLanguageProfileKey(creatorName)] : undefined
+}
+
+// The few-shot block is the strongest signal in the entire prompt: ten concrete
+// approved scripts outweigh any amount of prose telling the model not to write
+// like them. Filtering the corpus down to compliant examples is not available
+// here, and that is a measurement rather than a guess: of 23 approved scripts on
+// the live profile, all 13 that are genuinely scripts carry 2 to 10 banned terms
+// and 3 to 10 sentences over the ceiling, and the only jargon-free approved rows
+// are a "broll test" stub and product-demo transcripts. A plainness filter would
+// swap the best available voice signal for noise, so lib/learning.ts drops the
+// non-scripts and applies a soft ranking penalty instead.
+//
+// What closes the gap is meeting the examples at their own level. Each one is
+// scanned and stamped with its own measured violations, so it arrives already
+// labelled as a vocabulary and length failure rather than as an endorsement.
+// Ten examples now carry ten counter-signals instead of one paragraph trying to
+// cover all of them at once.
+function measureExample(text: string, scanTerms: string[]): { banned: string[]; long: number; total: number; longest: number } {
+  const lower = text.toLowerCase()
+  const banned = scanTerms.filter((t) => lower.includes(t))
+  const sentences = text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 3)
+  const lengths = sentences.map((s) => s.split(/\s+/).length)
+  return {
+    banned,
+    long: lengths.filter((n) => n > SPOKEN_SENTENCE_CEILING).length,
+    total: lengths.length,
+    longest: lengths.length ? Math.max(...lengths) : 0,
+  }
+}
+
+function buildFewShotSection(
+  examples: Script[],
+  brand: Pick<BrandSettings, 'creator_name'> | undefined,
+  emptyFallback: string
+): string {
+  if (examples.length === 0) return emptyFallback
+
+  const scanTerms = resolvePlainLanguageProfile(brand)?.scanTerms ?? []
+
+  const rendered = examples
+    .map((s, i) => {
+      const m = measureExample(`${s.hook} ${s.body} ${s.cta}`, scanTerms)
+      const problems: string[] = []
+      if (m.banned.length) problems.push(`${m.banned.length} banned words (${m.banned.slice(0, 6).join(', ')})`)
+      if (m.long) problems.push(`${m.long} of its ${m.total} sentences over the 20-word ceiling, longest ${m.longest} words`)
+      const verdict = problems.length
+        ? `FAILS THE CURRENT BAR: ${problems.join('; ')}. Reproduce none of that.`
+        : `Closer to the bar than most, but check it against the rules anyway rather than trusting it.`
+      return `--- Example ${i + 1} ---
+${verdict}
+HOOK: ${s.hook}
+BODY: ${s.body}
+CTA: ${s.cta}`
+    })
+    .join('\n\n')
+
+  return `APPROVED SCRIPTS   RHYTHM CALIBRATION ONLY:
+Study these for one thing: how directly they speak to the viewer, and the energy and structure of the delivery. Nothing else.
+
+THEY SHOW VOICE, NOT COMPLEXITY. Every one of these was approved before the plain-language and readability rules existed, and the note above each one is a real count taken from that example just now. They are the exact defect you are being told to fix. Reading them will pull you toward long sentences and technical words because that is what they are made of, and that pull is the single most likely reason this script fails.
+
+So use them like this: take the rhythm, the directness, the confidence, the way a beat turns into the next one. Then say all of it in sentences under 20 words using words the audience actually uses. A script that sounds like these and reads at half their sentence length is the target.
+
+${rendered}`
+}
+
+// brand.extra_context is user-editable and seeded with an anti-jargon line that
+// carries its own escape hatch ("avoid clinical jargon UNLESS explaining a
+// scientific concept clearly"). That clause is where every jargon-heavy script
+// came from. Two things fix it and both are needed: the plain-language block is
+// emitted AFTER this one so it holds the last and strongest position, and the
+// carve-out is voided by name here. The creator's lines are still passed
+// through verbatim   they also carry medical-claim and compliance rules we have
+// no business silently dropping, and editing someone's own brand settings out
+// from under them in code is worse than overriding one clause in the open.
+function buildBrandHardRules(brand: BrandSettings): string {
+  const context = brand.extra_context?.trim()
+  if (!context) return ''
+
+  const rules = context
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => `• ${l.trim().replace(/^[-•]\s*/, '')}`)
+    .join('\n')
+
+  return `HARD RULES FROM THE CREATOR   NON-NEGOTIABLE, except where PLAIN LANGUAGE below says otherwise:
+${rules}
+
+READING THESE RULES:
+• Any exception in them that permits technical, clinical, or scientific vocabulary "when explained clearly", "in patient-friendly language", or under any similar condition is VOID. There is no condition under which a banned word is acceptable, and defining it clearly is not a way to earn it. The PLAIN LANGUAGE section below wins that conflict every time.
+• These rules are written in the creator's professional shorthand, so some of them use words the script itself may not use ("symptoms", "physiologic", "nervous system"). They tell you what to MEAN, never which words to WRITE. Follow the intent and say it the audience's way.`
+}
+
 export function buildScriptGenerationMessages(
   idea: string,
   lane: AudienceLane,
@@ -86,29 +356,13 @@ export function buildScriptGenerationMessages(
   const baseTone = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
   const toneList = moodTag ? `${baseTone} -- lean ${moodTag} for this script` : baseTone
 
-  const hardRules = brand.extra_context?.trim()
-    ? `HARD RULES — NON-NEGOTIABLE (these override everything else):
-${brand.extra_context
-  .split('\n')
-  .filter((l) => l.trim())
-  .map((l) => `• ${l.trim().replace(/^[-•]\s*/, '')}`)
-  .join('\n')}`
-    : ''
+  const hardRules = buildBrandHardRules(brand)
 
-  const fewShotSection =
-    fewShotExamples.length > 0
-      ? `APPROVED SCRIPTS — VOICE CALIBRATION:
-Study these carefully. Match their sentence rhythm, energy, word choice, and directness. These are scripts the creator has already approved — they define their voice precisely.
-
-${fewShotExamples
-  .map(
-    (s, i) => `--- Example ${i + 1} ---
-HOOK: ${s.hook}
-BODY: ${s.body}
-CTA: ${s.cta}`
+  const fewShotSection = buildFewShotSection(
+    fewShotExamples,
+    brand,
+    'No approved examples yet. Write with the warmth, specificity, and authority of an expert who has seen this problem many times and knows exactly what causes it.'
   )
-  .join('\n\n')}`
-      : 'No approved examples yet. Write with the warmth, specificity, and authority of an expert who has seen this problem many times and knows exactly what causes it.'
 
   const webSection = searchContext?.trim()
     ? `LIVE WEB CONTEXT — USE THIS:
@@ -117,7 +371,7 @@ This is fresh, real-world content pulled from the internet. Use relevant facts, 
 IMPORTANT: Look for Reddit posts and forum content in the search results (marked [Reddit]). These show the EXACT words real people use to describe this problem or desire. Borrow that language directly — not paraphrased, but the actual phrases people use when they're frustrated, stuck, or searching for answers. That language is what makes a viewer stop and think "this is exactly me."
 
 ${searchContext}`
-    : `No live web context available. Draw on established expertise in ${brand.creator_name}'s field. Name specific mechanisms, processes, or frameworks — not vague claims. Translate technical language into the plain English the audience uses to describe their own experience.`
+    : `No live web context available. Draw on established expertise in ${brand.creator_name}'s field. Explain specific mechanisms and processes — not vague claims — but do the translation yourself before you write: work out the science, then say it in the plain English the audience uses to describe their own experience. The technical version never reaches the page.`
 
   const locationLine = brand.location?.trim() ? ` based in ${brand.location}` : ''
 
@@ -187,13 +441,15 @@ LEAD MAGNET CTA — STRICTLY NON-NEGOTIABLE:
 
 SCRIPT FORMATS — PICK THE BEST ONE FOR THIS IDEA:
 
+BEAT WORD COUNTS BUY MORE SENTENCES, NOT LONGER ONES. A 50-70 word beat is four to six sentences. If you are covering it in two, you are writing 30-word sentences and the script has already failed the readability bar. Divide every beat's word count by 12 to get the number of sentences it should hold.
+
 FORMAT 1: EDUCATIONAL (belief-shift)
 Best for: mechanisms, root causes, "why X happens", counterintuitive insights, myth-busting.
 Structure (total 150–210 words):
   HOOK (max 15w): Surprising claim or counterintuitive truth that makes them need the next sentence.
   BODY — exactly 3 beats, separated by blank lines, no labels in the text:
     Beat 1 PROBLEM (35–45w): Describe what the viewer is experiencing right now in enough detail that they feel like you've been watching them. Full sentences. "You" language throughout. This is the validation beat — they need to feel completely understood before they'll trust anything you say next.
-    Beat 2 MECHANISM (50–70w): Explain the actual root cause — the specific reason, process, or pattern that most people never find out about. Not the surface-level label everyone already knows, but the thing underneath it. Use a rhetorical question or a surprising pivot to lead into this beat and hold attention through it.
+    Beat 2 MECHANISM (50–70w): Explain the actual root cause — the specific reason, process, or pattern that most people never find out about. Not the surface-level label everyone already knows, but the thing underneath it. Describe what is HAPPENING, never what it is CALLED: no brain-part names, no hormone names, no technical labels, no inline definitions. This is the beat that fails the plain-language rules most often — write it as if explaining it to the viewer's mother. Use a rhetorical question or a surprising pivot to lead into this beat and hold attention through it.
     Beat 3 SOLUTION (35–45w): Tell them what actually changes the situation — specifically, not vaguely. Give them something real to hold onto, and make it feel achievable rather than overwhelming.
   CTA (25–40w): One full, natural-sounding sentence or two that closes the video without feeling like an ad.
 
@@ -248,11 +504,13 @@ Structure (total 110–150 words):
 VOICE RULES (all formats):
   → Write for spoken delivery — read every sentence out loud in your head. If it sounds like text on a page, rewrite it as someone actually speaking to a person in front of them.
   → "You" and "your" throughout — not "people," not "many individuals," not "one might find." Speak directly to the viewer.
-  → Sentences should be medium to long and flow naturally into each other, the way someone talks when they're explaining something they care about — not punchy one-liners, not fragments, not a staccato list of short statements. Each sentence should carry a complete thought and connect to what came before.
+  → Sentences carry one complete thought each and flow into each other, the way someone talks when they're explaining something they care about. Short is the default. What makes it sound like talking is that each sentence answers the one before it, not that any single sentence is long.
   → Use rhetorical questions inside the body to keep the viewer engaged and thinking: "And the problem is, most people never find this out." "So why does this keep happening?" "Here's the part nobody talks about." These act as internal hooks that make it hard to look away.
   → No filler phrases: "So basically," "At the end of the day," "What I mean is," "It's important to note," "The thing is," "Here's the thing"
-  → Specific over vague every single time — real numbers, real mechanisms, real examples. Vague content loses viewers in the middle.
+  → Specific over vague every single time — real numbers, real examples, real mechanisms described in everyday words. Vague content loses viewers in the middle. Technical vocabulary is not specificity, it is the substitute for it.
   → Never write in a way that sounds like a bullet point list being read aloud. The script should sound like a conversation, not a presentation.
+
+${buildPlainLanguageRules(brand)}
 
 OUTPUT FORMAT:
 You MUST respond with raw JSON only. No markdown. No backticks. No explanation. Start with { and end with }.`
@@ -267,13 +525,16 @@ THE CONTENT IDEA: "${idea}"
 
 ${scriptFormat ? `FORCED FORMAT: Write this script ONLY in the "${scriptFormat}" format. Do not choose a different format regardless of the idea.\n` : ''}STEP 1: ${scriptFormat ? `Format is pre-selected as "${scriptFormat}". Proceed directly to writing.` : 'Decide which format fits this idea best (tips_tricks / educational / personal_story / myth_busting). Do NOT choose lead_magnet unless explicitly forced above.'}
 
-STEP 2: Write the full script in that format. Sound exactly like the approved examples if provided. Use any Reddit or forum content in the web context (marked [Reddit]) to borrow real audience language — the exact words real people use to describe this problem, frustration, or desire.
+STEP 2: Write the full script in that format. Match the rhythm and directness of the approved examples if provided, never their vocabulary and never their sentence length. Use any Reddit or forum content in the web context (marked [Reddit]) to borrow real audience language — the exact words real people use to describe this problem, frustration, or desire.
 
 CRITICAL — BEFORE YOU OUTPUT:
-1. Read the body out loud in your head. Every sentence should sound like a real person talking, not a list being read. If a sentence is under 12 words, it is probably a fragment — expand it into a full thought.
-2. Check that no body beat is a single sentence. Each beat should be 2-4 sentences that flow together.
-3. Check the CTA — if it contains "Comment" or "DM me [keyword]," delete it and rewrite using the approved CTA types above.
-4. Every script must name a specific mechanism, process, or root cause — not vague claims but exactly WHAT happens and WHY. Specific expertise in plain English is what makes people stop and think "this person actually understands what I'm going through."
+1. JARGON SWEEP — DO THIS FIRST AND DO IT LITERALLY. Go through the hook, body, and CTA word by word against the BANNED WORDS list. Every hit gets its whole sentence rewritten in everyday words, and then you sweep again. Defining a term inline does not count as fixing it. One banned word means the script has failed, so the sweep is not optional and it is not a formality.
+2. LENGTH SWEEP — COUNT, DO NOT ESTIMATE. Take the hook, then every sentence of the body, then the CTA, one at a time, and count the words. Anything over 20 gets SPLIT, not trimmed: a 26-word sentence tightened to 19 is still two ideas jammed together. Split it into two sentences that each say one thing, then count again. Report nothing until every sentence is under the ceiling.
+3. FIRST-LISTEN TEST. Read the body out loud in your head, once, at speaking speed, with no going back. Any sentence you would need to hear twice gets rewritten shorter and more concrete. If you found yourself holding a clause open waiting for it to resolve, that sentence failed and the fix is to put the subject first.
+4. SUBSTANCE CHECK — THE OTHER HALF OF THE BAR, AND SKIPPING IT IS HOW SIMPLIFYING GOES WRONG. Reread the shortened version and ask what the viewer actually learned. Every sentence must still carry a fact, a number, a moment, or a specific observation. Any sentence that survives only as filler you produced while cutting gets deleted, and the real detail goes back in plain words. Short and empty fails exactly as hard as long and technical.
+5. Check that no body beat is a single sentence, and that each beat holds roughly its word count divided by 12 in sentences.
+6. Check the CTA — if it contains "Comment" or "DM me [keyword]," delete it and rewrite using the approved CTA types above.
+7. Every script must explain a specific mechanism or root cause — exactly WHAT happens and WHY — described the way you would describe it to a friend across a table. Naming a brain region or a hormone is not an explanation, it is a label standing in for one. Specific expertise in plain English is what makes people stop and think "this person actually understands what I'm going through."
 
 Respond ONLY in this exact JSON format:
 {
@@ -313,22 +574,16 @@ export function buildRevisionMessages(
 ): Array<{ role: 'system' | 'user'; content: string }> {
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
   const locationLine = brand.location?.trim() ? ` based in ${brand.location}` : ''
-  const laneDescription = LANE_SYSTEM_DESCRIPTIONS[lane]
+  // Honour the brand's own lane copy the way generation does, so a revision
+  // can't quietly re-aim the script at the built-in default audience.
+  const laneDescription = brand.lane_descriptions?.[lane] ?? LANE_SYSTEM_DESCRIPTIONS[lane]
 
-  const hardRules = brand.extra_context?.trim()
-    ? `HARD RULES:\n${brand.extra_context
-        .split('\n')
-        .filter((l) => l.trim())
-        .map((l) => `• ${l.trim().replace(/^[-•]\s*/, '')}`)
-        .join('\n')}`
-    : ''
+  const hardRules = buildBrandHardRules(brand)
 
-  const fewShotSection =
-    fewShotExamples.length > 0
-      ? `APPROVED SCRIPTS — VOICE CALIBRATION:\n${fewShotExamples
-          .map((s, i) => `--- Example ${i + 1} ---\nHOOK: ${s.hook}\nBODY: ${s.body}\nCTA: ${s.cta}`)
-          .join('\n\n')}`
-      : ''
+  // Same annotated corpus as the generation path. Without it, "make this less
+  // clinical" feedback gets rewritten against a corpus approved back when the
+  // jargon was fine, and the revision reintroduces exactly what was flagged.
+  const fewShotSection = buildFewShotSection(fewShotExamples, brand, '')
 
   const revisionCreatorIntro = brand.unique_angle?.trim()
     ? `${brand.creator_name}${locationLine} — ${brand.unique_angle}`
@@ -349,10 +604,14 @@ FORMAT 2 (tips_tricks): HOOK → RE-HOOK (teases all tips) → BODY (numbered ti
 FORMAT 3 (personal_story): HOOK (mid-story drop-in) → BODY (3 beats: Setup / Turning Point / Lesson) → CTA
 
 VOICE RULES:
-  → Natural spoken rhythm. Sentences should be medium to long, flowing naturally — not short punchy fragments or machine-gun one-liners.
+  → Natural spoken rhythm. One complete thought per sentence, each answering the one before it. Short is the default; the flow comes from how the sentences connect, never from their length.
   → "You" and "your" — not "people" or "many individuals."
   → Specific over vague. No filler phrases.
   → If it sounds like a blog post or a bullet list, rewrite it as someone actually talking.
+
+${buildPlainLanguageRules(brand)}
+
+The original script below was written before these rules and probably breaks them. Fix every violation you find even when the feedback did not mention it — a revision that preserves the original's jargon or its 30-word sentences has not done its job, whatever else it fixed. Simplifying is not a licence to drop detail: the rewrite keeps every fact, number, and specific moment the original had.
 
 OUTPUT: Raw JSON only. No markdown. No backticks. Start with { end with }.`
 
@@ -375,6 +634,11 @@ ${revisionNotes}
 IDEA: "${idea}"
 
 Rewrite to fully address the feedback. Keep what works. Fix what the feedback asks for. Maintain format and voice rules.
+
+BEFORE YOU OUTPUT, in this order:
+1. Sweep the rewritten hook, body, and CTA word by word against the BANNED WORDS list. Every hit gets its sentence rewritten in everyday words, then sweep again. One banned word means the revision has failed.
+2. Count the words in every sentence. Anything over 20 gets split into two sentences that each say one thing, then count again. Splitting, not trimming.
+3. Reread it and ask what the viewer learned. Every sentence still has to carry a fact, a number, or a specific moment. If simplifying left you with short empty sentences, delete them and put the real detail back in plain words.
 
 Respond ONLY in this exact JSON format:
 {

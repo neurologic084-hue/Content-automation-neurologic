@@ -689,6 +689,11 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     )
                   })}
                 </div>
+                {/* v1-v3 are always stock by product decision (see
+                    lib/submagic-start.ts), so this control only reaches the
+                    last three styles — say so rather than let a video quietly
+                    ignore the choice. */}
+                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the last three styles. The first three always use AI B-roll.</p>
               </div>
             )}
           </div>

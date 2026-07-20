@@ -133,9 +133,10 @@ function ConnectedAccounts() {
               <span className="text-[13px] font-semibold text-[#333330] w-24 flex-shrink-0">
                 {PLATFORM_LABEL[a.platform.toLowerCase()] ?? a.platform}
               </span>
-              <span className="text-[13px] text-[#71717A] truncate">
-                {a.username ? `@${a.username}` : a.fullname || '—'}
-              </span>
+              {/* The handle itself adds nothing here — there is one account per
+                  platform and she knows which is hers. All this panel has to
+                  answer is whether publishing will work. */}
+              <span className="text-[13px] text-[#16A34A]">Connected</span>
             </div>
           ))}
         </div>

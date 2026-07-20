@@ -3,10 +3,11 @@ import { exec } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
+import crypto from 'crypto'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS, createSubmagicUserMedia } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
 import type { CustomBrollEntry } from './video-pipeline'
 import type { VideoVariant } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
@@ -515,10 +516,9 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   // Prefer the pre-cut clip when it exists: our planner already trimmed it, so
   // Submagic only styles. Checked BEFORE the in-process cache so the cut wins
   // even in a process that earlier cached the uncut compressed URL.
-  // Retried: this HEAD decides WHICH video Submagic receives, and downstream
-  // custom B-roll placements are only valid for the matching timeline
-  // (placementBasis) — a single transient flake here would silently swap the
-  // source and drop the creator's clips.
+  // Retried: this HEAD decides WHICH video Submagic receives — a single
+  // transient flake would send the uncut source and let Submagic cut the whole
+  // video again instead of only styling the cut we already made.
   if (process.env.R2_PUBLIC_URL) {
     const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -711,11 +711,41 @@ export async function prepareJobSource(
   } catch (e) {
     console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
   }
+  // Clean the audio and transcribe it ONCE for the whole job (Auphonic ->
+  // ElevenLabs; Submagic is no longer in this chain), so the Motion Lab variants
+  // each reuse it instead of repeating both — AND, now that this runs BEFORE the
+  // pre-cut below, so the pre-cut can reuse the same transcript rather than
+  // paying for a second one. Best-effort — a failure here just means each
+  // variant (and the pre-cut) does its own, as before.
+  // Skip when the compressed source didn't survive (disk pressure, a failed
+  // ffmpeg pass): cleaning a missing file would throw inside a best-effort step
+  // and waste a paid Auphonic production on nothing.
+  const cleanDone = process.env.R2_PUBLIC_URL
+    ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+    : false
+  const wordsDone = cleanDone ? !!(await sharedWords(jobId)) : false
+  if (cleanDone && wordsDone) {
+    // ALREADY DONE — and this is the expensive one: skipping it saves a paid
+    // Auphonic production and a transcription.
+    console.log('[prep] ✓ audio already cleaned and transcribed for this job — skipping')
+  } else if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10_000) {
+    await onProgress?.(97, 'Cleaning audio')
+    await buildSharedCleanAudio(jobId, localPath, outDir)
+  } else {
+    console.warn('[shared-audio] no usable compressed source — skipping the shared clean')
+  }
+
   // Pre-cut the footage for the Submagic variants (v1-v3): our planner makes a
   // tight, clean cut (silence + retakes + stutters) and Submagic then only adds
   // captions + zoom styling on top. Uploaded once as source-cut.mp4 and shared
   // by every Submagic variant. Best-effort — if it fails, getSubmagicSourceUrl
   // falls back to the uncut compressed source and Submagic cuts on its own.
+  //
+  // Runs AFTER the shared clean on purpose: the pre-cut needs word timings to
+  // plan cuts, and the clean just made a set. Reusing them drops the pre-cut's
+  // own transcription — one paid Scribe call per job. It still cuts the
+  // COMPRESSED (uncleaned) source unchanged; Submagic runs its own Clean Audio
+  // in-render (SUBMAGIC_ALWAYS_ON), so cleaned input would double-process it.
   await onProgress?.(98, 'Trimming footage')
   try {
     const cutPath = path.join(outDir, 'source-cut.mp4')
@@ -730,7 +760,10 @@ export async function prepareJobSource(
       submagicCutPath = fs.existsSync(cutPath) ? cutPath : null
       throw { __skip: true }
     }
-    const built = await buildSubmagicCutSource(localPath, cutPath)
+    // Reuse the shared transcript when the clean above produced one; the pre-cut
+    // otherwise transcribes the compressed source itself (unchanged fallback).
+    const sharedForCut = await sharedWords(jobId)
+    const built = await buildSubmagicCutSource(localPath, cutPath, { words: sharedForCut ?? undefined })
     if (built) {
       await uploadToStorage(built, 'source-cut.mp4', jobId)
       submagicCutPath = built
@@ -740,28 +773,6 @@ export async function prepareJobSource(
     if (!(e as { __skip?: boolean })?.__skip) {
       console.warn(`[motion-renderer] pre-cut step failed for job=${jobId} — Submagic will cut on its own:`, (e as Error).message)
     }
-  }
-
-  // Clean the audio and transcribe it ONCE for the whole job (Submagic ->
-  // Auphonic -> ElevenLabs, in that order), so the Motion Lab variants each
-  // reuse it instead of repeating both. Best-effort — a failure here just means
-  // each variant does its own, as before.
-  // Skip when the compressed source didn't survive (disk pressure, a failed
-  // ffmpeg pass): cleaning a missing file would throw inside a best-effort step
-  // and waste a paid Auphonic production on nothing.
-  const cleanDone = process.env.R2_PUBLIC_URL
-    ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
-    : false
-  const wordsDone = cleanDone ? !!(await sharedWords(jobId)) : false
-  if (cleanDone && wordsDone) {
-    // ALREADY DONE — and this is the expensive one: skipping it saves a paid
-    // Submagic clean / Auphonic production and a transcription.
-    console.log('[prep] ✓ audio already cleaned and transcribed for this job — skipping')
-  } else if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10_000) {
-    await onProgress?.(97, 'Cleaning audio')
-    await buildSharedCleanAudio(jobId, localPath, outDir)
-  } else {
-    console.warn('[shared-audio] no usable compressed source — skipping the shared clean')
   }
 
   // Analyze the footage once now, while the compressed file is warm on disk, so
@@ -797,7 +808,7 @@ export async function prepareJobSource(
       new Promise<'running'>(r => setTimeout(() => r('running'), 3_000)),
     ]).catch(() => 'running' as const)
 
-    const ready = clips.filter(c => c.r2Url).length
+    const ready = clips.filter(c => c.windows?.length).length
     console.log(
       `[prep] job ${jobId.slice(0, 8)} ready — ` +
       `source ${tick(src)} | pre-cut ${tick(cut)} | clean audio ${tick(clean)} | ` +
@@ -1759,25 +1770,44 @@ function clipWindows(duration: number): Array<{ offset: number; seconds: number 
 // analysed once ever, not once per job. R2 has no expiry rule, so this survives
 // indefinitely; a miss just means doing the work again.
 type ClipWindowInfo = { offset: number; seconds: number; description: string }
+// The analysis is only meaningful against the exact clip it was measured on:
+// every offset is "N seconds into THIS source". Older cache files stored a bare
+// window array with no record of how long that source was, so a set of offsets
+// carved out of a 108s original could later be reused verbatim against a
+// shorter, already-trimmed copy — the timeline mismatch that filed an elevator
+// (49.9s) cut under the sidewalk (1.5s) window in job 6533a5cf, and left the
+// later windows as empty stubs. Carrying sourceSeconds binds the offsets to a
+// source of that length; a mismatch is now detectable instead of silently
+// trusted. Legacy bare-array files parse as "no signature" below and re-derive.
+type ClipAnalysis = { sourceSeconds: number; windows: ClipWindowInfo[] }
 
-async function cachedClipWindows(url: string): Promise<ClipWindowInfo[] | null> {
+async function cachedClipWindows(url: string): Promise<ClipAnalysis | null> {
   if (!process.env.R2_PUBLIC_URL) return null
   try {
     const res = await fetch(`${process.env.R2_PUBLIC_URL}/broll-cache/shared/${clipCacheKey(url)}-windows.json`, {
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) return null
-    const w = await res.json()
-    return Array.isArray(w) && w.length && w.every(x => typeof x?.offset === 'number' && x?.description) ? w : null
+    const a = await res.json()
+    // Require the source-timeline signature. A pre-fix file (a bare array, or
+    // any shape without a positive sourceSeconds) is untrustworthy by the rule
+    // above, so treat it as a miss and re-derive rather than serve it. Every
+    // offset must also fall inside that length, or the analysis is internally
+    // inconsistent (offsets from a longer timeline) and equally untrustworthy.
+    if (!Number.isFinite(a?.sourceSeconds) || a.sourceSeconds <= 0) return null
+    const windows = a.windows
+    if (!Array.isArray(windows) || !windows.length) return null
+    if (!windows.every((x: ClipWindowInfo) => typeof x?.offset === 'number' && x.offset < a.sourceSeconds && x?.description)) return null
+    return { sourceSeconds: a.sourceSeconds, windows }
   } catch { return null }
 }
 
-async function publishClipWindows(url: string, windows: ClipWindowInfo[], outDir: string): Promise<void> {
+async function publishClipWindows(url: string, sourceSeconds: number, windows: ClipWindowInfo[], outDir: string): Promise<void> {
   if (!process.env.R2_PUBLIC_URL || !windows.length) return
   const name = `${clipCacheKey(url)}-windows.json`
   const tmp = path.join(outDir, name)
   try {
-    fs.writeFileSync(tmp, JSON.stringify(windows))
+    fs.writeFileSync(tmp, JSON.stringify({ sourceSeconds, windows } satisfies ClipAnalysis))
     await uploadToStorage(tmp, name, 'shared', 'broll-cache')
   } catch (e) {
     console.warn(`[broll-cache] could not publish clip analysis: ${(e as Error).message}`)
@@ -1796,6 +1826,10 @@ interface ClipCandidate {
   // staging MUST be able to pull it — without this every window silently
   // failed to cut and the render shipped with no B-roll at all.
   sourceUrl: string
+  // Total length of the source `offset` is measured against. Part of the cache
+  // name so a window can never be served from — or written over — an entry cut
+  // from a different-length copy of the same URL. See ClipAnalysis.
+  sourceSeconds: number
   offset: number     // seconds into the source
   duration: number   // seconds of this window
   description: string
@@ -1812,15 +1846,24 @@ interface ClipCandidate {
 function clipCacheKey(url: string): string {
   const drive = url.match(/[?&]id=([a-zA-Z0-9_-]+)/) ?? url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
   if (drive) return drive[1]
-  let h = 0
-  for (let i = 0; i < url.length; i++) h = (Math.imul(31, h) + url.charCodeAt(i)) | 0
-  return `url${(h >>> 0).toString(36)}`
+  // Non-Drive links (e.g. a hosted copy) have no stable id, so the key is a
+  // digest of the URL. The old digest was a 32-bit string hash — only ~4.3B
+  // buckets — so two DIFFERENT clips could alias to one key and be served for
+  // each other: a silent wrong-footage bug, worse than a bad label. A wide hash
+  // makes that collision infeasible. (Side effect: retires every legacy
+  // `url<base36>` cache entry, including the mislabeled ones, so they re-derive.)
+  return `url${crypto.createHash('sha256').update(url).digest('hex').slice(0, 24)}`
 }
 
 // Where a cut window lives in the shared cache. Same folder in another job ->
-// same key -> straight download, no reprocessing.
-function windowCacheName(url: string, offset: number, seconds: number): string {
-  return `${clipCacheKey(url)}-${Math.round(offset * 100)}-${Math.round(seconds * 100)}.mp4`
+// same key -> straight download, no reprocessing. The source LENGTH is baked
+// into the name: an offset only identifies footage relative to a source of a
+// known duration, so a window cut from a 108s original can never be served for
+// a run whose source is a shorter copy (different length -> different name ->
+// cache miss -> re-cut from the real source). Without this the cache addressed
+// the wrong footage — see the note on ClipAnalysis.
+function windowCacheName(url: string, sourceSeconds: number, offset: number, seconds: number): string {
+  return `${clipCacheKey(url)}-d${Math.round(sourceSeconds)}-${Math.round(offset * 100)}-${Math.round(seconds * 100)}.mp4`
 }
 
 // Downloads each of the creator's OWN B-roll clips (Drive links stored on the
@@ -1830,7 +1873,7 @@ function windowCacheName(url: string, offset: number, seconds: number): string {
 // winners. A clip that fails is skipped, never fatal.
 async function collectCustomBrollCandidates(
   jobId: string,
-  entries: { url: string; description?: string | null; windows?: { offset: number; seconds: number; description: string }[] }[],
+  entries: { url: string; description?: string | null; sourceSeconds?: number; windows?: { offset: number; seconds: number; description: string }[] }[],
   cacheDir: string,
 ): Promise<ClipCandidate[]> {
   fs.mkdirSync(cacheDir, { recursive: true })
@@ -1853,20 +1896,30 @@ async function collectCustomBrollCandidates(
       const rawPath = path.join(cacheDir, `custom-${jobId.slice(0, 8)}-${i}.raw.mp4`)
 
       // FAST PATH: source prep already worked out this clip's windows and what
-      // each one shows. Reuse them — no download, no ffmpeg sample, no Gemini.
-      // Shared cache first (any job, any time), then this job's own copy.
-      if (!entry.windows?.length) {
+      // each one shows. Reuse them — no download, no ffmpeg sample, no Gemini —
+      // but ONLY if they carry the source-timeline signature (sourceSeconds) and
+      // every offset fits inside it. Windows without it predate this fix and
+      // cannot be trusted: their offsets may have been measured against a
+      // different-length source (the elevator/sidewalk mislabel), so they are
+      // dropped and re-derived below. Shared cache first (any job, any time),
+      // then this job's own copy.
+      const trusted = !!entry.windows?.length
+        && Number.isFinite(entry.sourceSeconds) && (entry.sourceSeconds as number) > 0
+        && entry.windows!.every(w => w.offset < (entry.sourceSeconds as number))
+      if (!trusted) {
+        entry.windows = undefined
         const shared = await cachedClipWindows(entry.url)
         if (shared) {
-          entry.windows = shared
+          entry.windows = shared.windows
+          entry.sourceSeconds = shared.sourceSeconds
           learnedWindows = true
           console.log(`[motion-renderer] clip ${i}: analysis reused from the shared cache (no download, no Gemini)`)
         }
       }
-      if (entry.windows?.length) {
+      if (entry.windows?.length && entry.sourceSeconds) {
         for (const w of entry.windows) {
           candidates.push({
-            entryIndex: i, rawPath, sourceUrl: (entry as CustomBrollEntry).r2Url ?? entry.url,
+            entryIndex: i, rawPath, sourceUrl: entry.url, sourceSeconds: entry.sourceSeconds,
             offset: w.offset, duration: w.seconds, description: w.description,
           })
         }
@@ -1875,11 +1928,16 @@ async function collectCustomBrollCandidates(
       }
 
       if (!fs.existsSync(rawPath)) {
-        // Prefer the normalized R2 copy from a previous prep — faster and immune
-        // to Drive's confirm-page quirks on re-renders.
-        await downloadFile((entry as CustomBrollEntry).r2Url ?? entry.url, rawPath)
+        // Always the creator's own link: the only other copy prep ever made was
+        // a single cut WINDOW hosted for Submagic, which these offsets are not
+        // measured against — cutting from it would sample the wrong seconds.
+        await downloadFile(entry.url, rawPath)
       }
       const sourceDuration = await getVideoDuration(rawPath)
+      // Stamp the timeline these offsets are measured against, so the fast path
+      // and the window cache can prove later that a source of this exact length
+      // is the one being cut.
+      entry.sourceSeconds = sourceDuration
       const windows = clipWindows(sourceDuration)
 
       for (let w = 0; w < windows.length; w++) {
@@ -1910,7 +1968,7 @@ async function collectCustomBrollCandidates(
         }
         const finalDescription = description || entry.description?.trim() || `creator clip ${i + 1}`
         candidates.push({
-          entryIndex: i, rawPath, sourceUrl: (entry as CustomBrollEntry).r2Url ?? entry.url,
+          entryIndex: i, rawPath, sourceUrl: entry.url, sourceSeconds: sourceDuration,
           offset, duration: seconds, description: finalDescription,
         })
         ;(entry.windows ??= []).push({ offset, seconds, description: finalDescription })
@@ -1921,7 +1979,7 @@ async function collectCustomBrollCandidates(
       }
       // Publish this clip's analysis so EVERY future job on this folder skips
       // the download and the Gemini pass entirely.
-      if (entry.windows?.length) await publishClipWindows(entry.url, entry.windows, cacheDir)
+      if (entry.windows?.length) await publishClipWindows(entry.url, sourceDuration, entry.windows, cacheDir)
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
     }
@@ -1958,7 +2016,7 @@ async function stageChosenWindows(
       // SHARED CACHE: this exact window of this exact clip may already have been
       // cut by an earlier variant or an earlier JOB using the same folder. One
       // small download beats re-fetching the full clip and re-encoding it.
-      const cacheName = windowCacheName(c.sourceUrl, c.offset, c.duration)
+      const cacheName = windowCacheName(c.sourceUrl, c.sourceSeconds, c.offset, c.duration)
       const cacheUrl = process.env.R2_PUBLIC_URL ? `${process.env.R2_PUBLIC_URL}/broll-cache/shared/${cacheName}` : null
 
       // "Already staged" has to mean "staged and playable", not merely "a file
@@ -2055,7 +2113,6 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
     const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
     const workPath = path.join(outDir, `${variantId}_isolated.mp4`)
-    await stageRenderWorkCopy(compressedPath, workPath)
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
@@ -2065,21 +2122,28 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 2, STEPS, 'Preparing audio')
     // Prep already cleaned this job's audio once for every variant. Reuse it;
     // only clean here when that shared step is unavailable.
-    const sharedClean = await applySharedCleanAudio(jobId, workPath)
+    //
+    // Stage the render work copy from WHICHEVER source we settle on — never
+    // both. Downloading the shared clean straight over a freshly-staged work
+    // copy used to discard a full libx264 downscale of the compressed source (a
+    // 4K re-encode) before overwriting it, once per variant. Pull the shared
+    // clean to its own path first, then do the SINGLE downscale into workPath.
+    const sharedCleanPath = workPath + '.shared-clean.mp4'
+    staged.push(sharedCleanPath)
+    const sharedClean = await applySharedCleanAudio(jobId, sharedCleanPath)
     if (sharedClean) {
       await setVariantProgress(jobId, variantId, 2, STEPS, 'Reusing cleaned audio')
       console.log('[motion-renderer] reusing the job\'s shared cleaned audio (no second clean)')
-      // The shared copy is the COMPRESSED source, so it still needs the 4K
-      // downscale the work copy would have had.
-      const tmp = workPath + '.pre-scale.mp4'
-      fs.renameSync(workPath, tmp)
-      await stageRenderWorkCopy(tmp, workPath)
-      try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+      // The shared clean is the COMPRESSED (full-resolution) source, so this is
+      // the one place its 4K downscale into the work copy happens.
+      await stageRenderWorkCopy(sharedCleanPath, workPath)
+      try { fs.unlinkSync(sharedCleanPath) } catch { /* best-effort */ }
     } else {
       // Falling back means paying again: this variant runs the whole
-      // Submagic/Auphonic/ElevenLabs chain itself. Never let that be silent.
+      // Auphonic/ElevenLabs chain itself. Never let that be silent.
       await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
       console.warn(`[motion-renderer] no shared clean for job ${jobId.slice(0, 8)} — ${variantId} is cleaning its own audio (extra paid call)`)
+      await stageRenderWorkCopy(compressedPath, workPath)
       await cleanAudioInPlace(workPath)
     }
 
@@ -2094,26 +2158,27 @@ async function renderRemotionEdit(
     // detected silences ride along as the second cut signal (word timings can
     // stretch across real pauses and hide them from gap-based cutting).
     await setVariantProgress(jobId, variantId, 3, STEPS, 'Planning cuts and captions')
-    // These four all read workPath and don't depend on each other — run them
-    // together instead of serially (overlaps the slow Scribe call with the
-    // ffmpeg/ffprobe passes).
     let cachedWords = sharedClean ? await sharedWords(jobId) : null
+    // Probe the work copy's duration once — both the reuse guard below and the
+    // edit plan need it, and it used to be measured twice on the reuse path.
+    // getVideoDuration answers 60 (never rejects) for anything it can't probe.
+    const duration = await getVideoDuration(workPath)
     // Words were timed on the shared clean; if they run past THIS work copy the
     // two are out of step (re-prep from different footage, or a truncated
     // download) and reusing them would drift every caption and cut.
     if (cachedWords) {
-      const workDuration = await getVideoDuration(workPath).catch(() => 0)
       const lastWord = cachedWords[cachedWords.length - 1]?.end ?? 0
-      if (workDuration && lastWord > workDuration + 2) {
-        console.warn(`[motion-renderer] shared words end at ${lastWord.toFixed(1)}s but the footage is ${workDuration.toFixed(1)}s — transcribing fresh`)
+      if (duration && lastWord > duration + 2) {
+        console.warn(`[motion-renderer] shared words end at ${lastWord.toFixed(1)}s but the footage is ${duration.toFixed(1)}s — transcribing fresh`)
         cachedWords = null
       }
     }
     if (cachedWords) console.log(`[motion-renderer] reusing ${cachedWords.length} shared word timings (no second transcription)`)
-    const [words, silences, duration, dimensions] = await Promise.all([
+    // These read workPath and don't depend on each other — run them together
+    // instead of serially (overlaps the slow Scribe call with the ffmpeg pass).
+    const [words, silences, dimensions] = await Promise.all([
       cachedWords ?? transcribeLocalFile(workPath),
       detectSilences(workPath),
-      getVideoDuration(workPath),
       probeVideoDimensions(workPath),
     ])
     // A talking-head clip that comes back with almost no words means the
@@ -2939,96 +3004,37 @@ export function startSingleVariant(
 // runs them to completion inside a Sandbox VM. Everything they need comes from
 // the DB + env, so they work identically in both homes.
 
-// Downloads + compresses the job's footage and uploads it to R2, writing prep
-// progress onto the pending variants; marks the whole job failed if the
-// footage can't be fetched.
-// Once-per-job custom B-roll prep. Enriches each video_jobs.custom_broll
-// entry with: a normalized copy hosted in R2 (deleted with the job), the
-// Submagic user-media id, a one-line description, and transcript-matched
-// placements. v1-v3 turn those into timed Submagic items; v4-v6 reuse the
-// R2 copies + descriptions for their own per-variant planning.
-async function prepareCustomBrollForJob(
-  jobId: string,
-  sourceLocalPath: string,
-  basis: 'cut' | 'full',
-): Promise<void> {
+// Once-per-job custom B-roll analysis. Describes every window of every
+// video_jobs.custom_broll clip with Gemini once, and caches the result on the
+// job plus the cross-job R2 cache. Only the Motion Lab variants (v4-v6) use the
+// creator's clips — v1-v3 always render with Submagic's own stock B-roll — but
+// doing this here is what lets each of those variants start from
+// "reusing N cached window(s)" instead of re-downloading and re-describing the
+// whole folder itself.
+async function analyzeCustomBrollForJob(jobId: string): Promise<void> {
   const db = supabaseAdmin()
   const { data: job } = await db.from('video_jobs').select('custom_broll').eq('id', jobId).single()
   const entries = (job?.custom_broll ?? null) as CustomBrollEntry[] | null
   if (!entries?.length) return
 
-  console.log(`[custom-broll] preparing ${entries.length} clip(s) for job ${jobId.slice(0, 8)}`)
+  console.log(`[custom-broll] analyzing ${entries.length} clip(s) for job ${jobId.slice(0, 8)}`)
   const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
+  // Persists entry.windows onto the job and publishes each clip's analysis to
+  // broll-cache/shared/ itself, so there is nothing to write back here.
   const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir)
-  if (!candidates.length) return
 
-  // Submagic registers user-media per ENTRY (one media id per creator clip), so
-  // unlike the Remotion path this one keeps a single window per entry. Take the
-  // MIDDLE window of a long clip: the head is usually the creator still settling
-  // the phone, and the middle is the closest cheap guess at the real moment.
-  const chosen = entries
-    .map((_, i) => {
-      const forEntry = candidates.filter(c => c.entryIndex === i)
-      return forEntry.length ? forEntry[Math.floor(forEntry.length / 2)] : null
-    })
-    .filter((c): c is ClipCandidate => !!c)
-  const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
-  if (!clips.length) return
-
-  // Host each normalized clip in R2 ({jobId}/custom-broll-i.mp4 — cleaned up
-  // by deleteJobStorage) and register it with Submagic. Entries are matched
-  // through clip.entryIndex — staging skips failed clips, so positions in
-  // `clips` do not line up with `entries`.
-  for (const clip of clips) {
-    const i = clip.entryIndex ?? -1
-    const entry = entries[i]
-    if (!entry) continue
-    entry.duration = clip.duration
-    if (!entry.r2Url) {
-      try {
-        entry.r2Url = await uploadToStorage(path.join(REMOTION_DIR, 'public', clip.file), `custom-broll-${i}.mp4`, jobId)
-      } catch (e) {
-        console.warn(`[custom-broll] R2 upload failed for clip ${i}:`, (e as Error).message)
-      }
-    }
-    if (entry.r2Url && !entry.submagicMediaId) {
-      entry.submagicMediaId = await createSubmagicUserMedia(entry.r2Url)
-    }
+  // The full-length downloads only existed to sample windows out of, and
+  // nothing else in this task consumes them. Staging normally clears them; on
+  // this path we must, or the raw files sit in remotion/public where the render
+  // server can serve them and the bundler copies them.
+  for (const raw of new Set(candidates.map(c => c.rawPath))) {
+    try { if (fs.existsSync(raw)) fs.unlinkSync(raw) } catch { /* best-effort */ }
   }
-
-  // Transcript-matched placements from the SOURCE timeline (items are placed
-  // on the source video Submagic receives, before its silence cuts).
-  try {
-    // Prep's transcript covers this same uncut source timeline, which is
-    // exactly the timeline these placements are measured against — so reuse it
-    // instead of paying to transcribe the identical audio again.
-    const reusable = await sharedWords(jobId)
-    if (reusable?.length) console.log('[custom-broll] reusing the job transcript (no second transcription)')
-    const words = reusable?.length ? reusable : await transcribeLocalFile(sourceLocalPath)
-    const duration = await getVideoDuration(sourceLocalPath)
-    // Same curation as the Remotion path: a big folder narrows to the clips
-    // whose content best fits this video before placements are planned.
-    const timedWords = words.map(w => ({ ...w, segmentIndex: 0 }))
-    // One window per entry already, so this only narrows when the folder holds
-    // more clips than a single video can carry.
-    const ranked = await selectBestClips(clips, timedWords)
-    const placed = await planCustomBrollSlots(timedWords, duration, null, ranked, [], false)
-    for (const entry of entries) { entry.placements = []; entry.placementBasis = basis }
-    for (const item of placed) {
-      const clip = ranked.find(c => c.file === item.file)
-      const entry = clip ? entries[clip.entryIndex ?? -1] : undefined
-      if (entry) {
-        entry.placements!.push({ start: item.start, end: Number((item.start + item.duration).toFixed(2)) })
-      }
-    }
-    console.log(`[custom-broll] planned ${placed.length} placement(s) across ${ranked.length} clip(s)`)
-  } catch (e) {
-    console.warn('[custom-broll] placement planning failed (v1-v3 will render without items):', (e as Error).message)
-  }
-
-  await db.from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
 }
 
+// Downloads + compresses the job's footage and uploads it to R2, writing prep
+// progress onto the pending variants; marks the whole job failed if the
+// footage can't be fetched.
 export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
   const db = supabaseAdmin()
 
@@ -3051,22 +3057,13 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     const prepared = await prepareJobSource(jobId, sourceUrl, writePrepProgress)
     console.log(`[motion-renderer] source prepared job=${jobId} local=${prepared.localPath}`)
 
-    // Custom B-roll prep (once per job, best-effort): normalize + describe the
-    // creator's clips, host them in R2, register them with Submagic, and plan
-    // transcript-matched placements that every Submagic variant will reuse.
+    // Custom B-roll analysis (once per job, best-effort): describe the
+    // creator's clips now so every Motion Lab variant reads the cached windows
+    // instead of paying for the download and the Gemini pass again.
     try {
-      // Plan against the PRE-CUT file when there is one. getSubmagicSourceUrl
-      // hands Submagic source-cut.mp4 in preference to the compressed source,
-      // and the cut is materially shorter (one real job: 140.9s -> 113.4s), so
-      // placements timed on the uncut source land in the wrong place — or past
-      // the end of the video entirely, which Submagic rejects outright.
-      await prepareCustomBrollForJob(
-        jobId,
-        prepared.cutPath ?? prepared.localPath,
-        prepared.cutPath ? 'cut' : 'full',
-      )
+      await analyzeCustomBrollForJob(jobId)
     } catch (e) {
-      console.warn(`[motion-renderer] custom B-roll prep failed (renders proceed without it):`, (e as Error).message)
+      console.warn(`[motion-renderer] custom B-roll analysis failed (renders proceed without it):`, (e as Error).message)
     }
 
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()

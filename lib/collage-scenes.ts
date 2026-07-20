@@ -22,6 +22,7 @@ import { parseJsonLoose } from './json-loose'
 import { generateImage, keyGreenscreen, hasImageGenKey, CHROMA_GREEN } from './image-gen'
 import type { ContentProfile } from './video-analysis'
 import type { EditedWord } from './edit-plan'
+import { HOOK_PROTECT_SECONDS, CTA_PROTECT_SECONDS } from './broll'
 import type { BrollItem, CollagePayload } from './broll'
 
 export interface CollageScenePlan {
@@ -143,9 +144,13 @@ export async function planCollageScenes(
   for (const c of candidates
     .filter(c => typeof c.start === 'number' && typeof c.headline === 'string' && c.headline.trim() && Array.isArray(c.subjects))
     .sort((a, b) => (a.start as number) - (b.start as number))) {
-    const start = Number(Math.max(4, c.start as number).toFixed(2))
+    // Collages render full-screen, so they are face-covering cutaways and get
+    // the same hook/CTA protection as every other cutaway. This clamp used to
+    // be a hardcoded 4/-2, quietly weaker than the shared guard — the one
+    // remaining path that could cover her face in the opening seconds.
+    const start = Number(Math.max(HOOK_PROTECT_SECONDS, c.start as number).toFixed(2))
     const dur = Number(Math.min(4.2, Math.max(2.8, typeof c.duration === 'number' ? c.duration : 3.4)).toFixed(2))
-    if (start + dur > duration - 2) continue
+    if (start + dur > duration - CTA_PROTECT_SECONDS) continue
     if (start - lastEnd < minGap) continue
     if (busy.some(b => start < b.start + b.duration + 0.8 && start + dur > b.start - 0.8)) continue
 

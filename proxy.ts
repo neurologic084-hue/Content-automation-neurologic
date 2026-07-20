@@ -2,6 +2,23 @@ import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function proxy(request: NextRequest) {
+  // Retirement signpost: the app moved to Railway, but the old Vercel URL
+  // survives in bookmarks. Anyone opening it would silently use the retired
+  // deployment — same database, but renders on the slow ephemeral path with
+  // the 300s kill this codebase spent a day rooting out. When MIGRATED_APP_URL
+  // is set, every request forwards to the new home BEFORE auth even runs.
+  //
+  // Env-gated on purpose: set the variable ONLY on the Vercel project, so this
+  // is inert on Railway and in local dev, and the forwarding address can change
+  // without a code deploy. 307 (temporary), never 308 — browsers cache
+  // permanent redirects so hard that the rollback week (unpause Vercel, point
+  // DNS back) would strand anyone who had visited once.
+  const migrated = process.env.MIGRATED_APP_URL
+  if (migrated) {
+    const dest = new URL(request.nextUrl.pathname + request.nextUrl.search, migrated)
+    return NextResponse.redirect(dest, 307)
+  }
+
   let supabaseResponse = NextResponse.next({ request })
 
   const supabase = createServerClient(

@@ -1,0 +1,15 @@
+# Anything here would otherwise be copied into the build context. renders/ and
+# remotion/public/edit-cache in particular hold multi-GB video intermediates
+# from local runs and would balloon the image.
+node_modules
+remotion/node_modules
+.next
+remotion/.next
+renders
+remotion/public/edit-cache
+remotion/out
+.git
+.env*.local
+*.log
+.DS_Store
+scratchpad

@@ -27,11 +27,43 @@ export function normalizeGradeMode(raw: unknown): GradeMode {
 // ffmpeg knobs per look (v1-v3 finishing chain). temperature 6500 = neutral
 // (skips the filter); contrast/saturation 1.0 = untouched; brightness 0 = untouched.
 const FFMPEG_GRADES: Record<Exclude<GradeMode, 'off'>, { temperature: number; contrast: number; saturation: number; brightness: number }> = {
-  smart:  { temperature: 5600, contrast: 1.06, saturation: 1.18, brightness: 0 },
-  golden: { temperature: 5200, contrast: 1.07, saturation: 1.24, brightness: -0.01 },
-  clean:  { temperature: 6500, contrast: 1.07, saturation: 1.08, brightness: 0 },
+  // smart adds ZERO warmth (6500 short-circuits the temperature filter): the
+  // final blind round scored this recipe highest of the natural looks (7.5/10,
+  // 3/4 ship-ok) and any residual warm reading is the room's own light, which
+  // shows on the ungraded reference too. If it isn't us, don't fight over it.
+  smart:  { temperature: 6500, contrast: 1.05, saturation: 1.04, brightness: -0.02 },
+  golden: { temperature: 6150, contrast: 1.05, saturation: 1.06, brightness: -0.03 },
+  clean:  { temperature: 6500, contrast: 1.05, saturation: 1.04, brightness: -0.015 },
   moody:  { temperature: 6800, contrast: 1.09, saturation: 0.86, brightness: -0.04 },
 }
+// Warmth retuned 2026-07-20 after measuring shipped renders — the client's
+// "very very yellow" was real and large, not a matter of taste.
+//
+// Measured on her face (Haar box, inner 64%, vs the same job's ungraded source):
+// shipped `smart` moved blue -32.6% and the blue/red ratio -38.3%, with 16% of
+// face pixels clipping a channel. `clean` — which short-circuits the temperature
+// filter entirely at 6500 — measures -4.5%, so ~-5% is the floor for "we changed
+// nothing about colour". Warm was running at six times that.
+//
+// Then tuned AGAIN the same day after the client said warm was still too
+// yellow and too bright — this time judged blind by Gemini vision on her real
+// frames (two rounds, 4 frames each, graded candidates shuffled against the
+// ungraded reference), not just by channel ratios:
+//
+//   - candidates that raised brightness or saturation were flagged "too
+//     bright" — her footage is already bright, warm indoor light, so a grade
+//     that ADDS either reads as artificial on top of it;
+//   - even fully neutral grades drew "too yellow" flags, because the ROOM is
+//     warm. The winner (natural 7/10, zero brightness flags) pairs a trace of
+//     temperature with saturation near unity and a slight dim (-0.03), which
+//     flatters the footage instead of amplifying it.
+//
+// So every mode now dims slightly rather than brightens, saturation stays
+// within a few percent of unity, and warmth is a trace even in `golden`
+// (6150 vs the original 5200 — most of the "warm look" is gone on purpose;
+// the client asked for it "very, very reduced"). Numbers are per-footage
+// judgements, not universal truths: if her lighting setup changes, re-run
+// the frame sweep before trusting them.
 
 // Maps the job-level mode onto ShortEdit's in-render grade for v4-v6.
 // 'smart' keeps the variant's own signature look from its render kit.

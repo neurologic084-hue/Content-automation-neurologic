@@ -78,18 +78,17 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Custom B-roll is prepared AFTER the compressed source exists, so the
-    // check above can pass while the creator's clips are still being uploaded,
-    // registered with Submagic and timed. Starting inside that window used to
-    // render a perfectly good video that silently contained NONE of her
-    // B-roll — the worst kind of failure, because nothing looks broken.
-    // Every variant shares one prep, so waiting here is enough; v1/v2/v3 do
-    // not need to wait on each other.
-    const pendingBroll = (job.custom_broll ?? null) as CustomBrollEntry[] | null
+    // Custom B-roll is analysed AFTER the compressed source exists, so the
+    // check above can pass while the creator's clips are still being described.
+    // Starting inside that window used to render a perfectly good video that
+    // silently contained NONE of her B-roll — the worst kind of failure,
+    // because nothing looks broken. Only the Motion Lab variants use her clips
+    // (v1-v3 are always stock), so only they have to wait.
+    const pendingBroll = variant.tool === 'submagic'
+      ? null
+      : (job.custom_broll ?? null) as CustomBrollEntry[] | null
     if (pendingBroll?.length) {
-      const prepared = pendingBroll.some(e =>
-        variant.tool === 'submagic' ? !!e.submagicMediaId : !!(e.windows?.length || e.r2Url),
-      )
+      const prepared = pendingBroll.some(e => !!e.windows?.length)
       if (!prepared) {
         return NextResponse.json(
           { error: 'Your B-roll clips are still being prepared — give it a moment and try again.' },

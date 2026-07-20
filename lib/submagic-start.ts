@@ -1,7 +1,7 @@
 // ── Submagic variant launch (v1-v3) ───────────────────────────────────────────
 // Everything between "the user pressed start" and "Submagic owns the project":
 // source resolution (Drive download → compress → R2 upload), the footage
-// profile, custom B-roll assembly and the submission itself.
+// profile and the submission itself.
 //
 // This used to run inline inside the start-variant POST handler. On real client
 // footage it takes longer than the 300s cap vercel.json puts on app/api/**, so
@@ -26,11 +26,12 @@ import {
   SUBMAGIC_ALWAYS_ON,
 } from './video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
-import { normalizeBrollSetting, normalizeBrollSource, submagicBrollKnobs } from './broll'
+import { normalizeBrollSetting, submagicBrollKnobs } from './broll'
 import { explainFailure } from './error-explain'
 import { patchVariant } from './job-lock'
+import { STALE_MS } from './stale-sweep'
 import type { ContentProfile } from './video-analysis'
-import type { MusicMode, VideoVariant, CustomBrollEntry } from './video-pipeline'
+import type { MusicMode, VideoVariant } from './video-pipeline'
 
 function supabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -46,7 +47,16 @@ async function pollSubmagicUntilDone(
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
 ) {
   const INTERVAL_MS = 8_000
-  const MAX_ATTEMPTS = 75  // ~10 minutes
+  // Poll for as long as the render could legitimately still be alive. The old
+  // ~10-minute cap predates this loop running to completion: on Vercel it died
+  // with the lambda, so the cap never fired. On a long-lived host (Railway, any
+  // VPS) this is now the in-process finisher and DOES run its full length — and
+  // real client footage (clean-audio + magic B-roll + zooms on a 60-90s cut)
+  // routinely renders past 10 minutes. Failing those at 10 min is exactly the
+  // "submagic always fails" the client reports. Match the window to the system's
+  // own definition of a definitively-dead render (STALE_MS) so a job Submagic is
+  // still working on is never marked failed here.
+  const MAX_ATTEMPTS = Math.ceil(STALE_MS / INTERVAL_MS)
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     await new Promise(r => setTimeout(r, INTERVAL_MS))
@@ -61,6 +71,9 @@ async function pollSubmagicUntilDone(
       return
     }
 
+    // Submagic itself reported a hard failure (not a transient poll blip —
+    // pollSubmagicJob already absorbs those as 'processing'). Surface its REAL
+    // reason on the card rather than a generic one.
     await patchVariant(
       db,
       jobId,
@@ -71,8 +84,13 @@ async function pollSubmagicUntilDone(
     return
   }
 
-  // Timeout
-  await patchVariant(db, jobId, variantId, { status: 'failed', error: 'The edit took too long and timed out. Please retry this variant.', progress: null })
+  // Gave up polling before Submagic resolved. Deliberately do NOT mark this
+  // 'failed': the render may still complete, and external_id is set — so the
+  // status-route poll (or a reopened tab) can still finalize it, and the stale
+  // sweep stays the single authority that declares a genuinely-dead render dead.
+  // Writing 'failed' here instead both throws away a render that finishes late
+  // and mislabels a live render as broken (the two bugs this whole path fights).
+  console.warn(`[submagic-start] ${jobId}:${variantId} still rendering after ${Math.round(STALE_MS / 60000)}m of polling — leaving finalisation to the status poll / stale sweep`)
 }
 
 async function submitVariant(db: SupabaseClient, jobId: string, variantId: string): Promise<void> {
@@ -150,10 +168,10 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
       console.warn('[submagic-start] no Submagic audio track available — rendering without music')
     }
 
-    // The studio's per-job B-roll setting governs v1-v3 too, matching the
+    // The studio's per-job B-roll AMOUNT governs v1-v3 too, matching the
     // Remotion variants: 'smart' keeps the footage-adaptive amount below,
     // 'manual' forces the exact percent onto Submagic's stock B-roll, and
-    // 'none' turns every cutaway off — creator-supplied clips included.
+    // 'none' turns every cutaway off.
     const brollSetting = normalizeBrollSetting(variant.broll_mode, variant.broll_percent)
     if (brollSetting.mode !== 'smart') {
       console.log(`[submagic-start] B-roll mode for ${variantId}: ${brollSetting.mode}${brollSetting.percent !== null ? ` (${brollSetting.percent}%)` : ''}`)
@@ -174,91 +192,29 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
       // ALWAYS_ON first, then the resolved knobs — so resolved.magicZooms
       // (a per-variant/guardrail decision now) wins over the baseline's
       // magicZooms:true instead of being forced back on.
-      // Creator-supplied B-roll: the prepare-source task uploaded each
-      // clip to Submagic user-media and planned transcript-matched
-      // placements. Turn those into timed items and turn STOCK B-roll
-      // off — the creator's clips fully replace generated footage.
-      const customEntries = brollSetting.mode === 'none'
-        ? null
-        : (job.custom_broll ?? null) as CustomBrollEntry[] | null
-      // Placements are only valid for the timeline they were measured on.
-      // We send source-cut.mp4 when it exists, and it is materially shorter
-      // than the compressed source, so items timed on the wrong one land on
-      // the wrong words — or run past the end, which makes Submagic reject
-      // the whole submission (observed: every v1-v3 failed with no project
-      // ever created). On a mismatch, drop the items and render without
-      // them rather than fail the variant.
-      // Honour the job's B-roll SOURCE here too: 'stock' means ignore her
-      // folder for this render, so the Submagic project gets stock B-roll
-      // instead of her timed items. Without this the setting only affected
-      // the Motion Lab variants and v1-v3 silently kept using her clips.
-      const variantSource = normalizeBrollSource(variant.broll_source)
-      const wantBasis: 'cut' | 'full' = isPrecut ? 'cut' : 'full'
-      const usableEntries = variantSource === 'stock' ? [] : (customEntries ?? []).filter(
-        e => (e.placementBasis ?? 'full') === wantBasis,
-      )
-      if ((customEntries?.length ?? 0) > 0 && usableEntries.length === 0) {
-        console.warn(
-          `[submagic-start] custom B-roll placements were timed on the '${customEntries![0]?.placementBasis ?? 'full'}' source but this render sends the '${wantBasis}' one — skipping them (re-run source prep to re-time)`,
-        )
-      }
-      const customItems = usableEntries
-        .filter(e => e.submagicMediaId && e.placements?.length)
-        .flatMap(e => e.placements!.map(p => ({
-          type: 'user-media' as const,
-          startTime: p.start,
-          endTime: p.end,
-          userMediaId: e.submagicMediaId!,
-          // 'cover' = fill the frame (creator clip fully replaces the shot),
-          // matching the Remotion path's full-screen custom cutaways. NOT
-          // 'full': Submagic rejects that value with a VALIDATION_ERROR that
-          // fails the whole submission — it only accepts cover/contain/
-          // rounded/square/split-*/pip-*.
-          layout: 'cover',
-        })))
-        .sort((a, b) => a.startTime - b.startTime)
-      if (customItems.length) {
-        console.log(`[submagic-start] using ${customItems.length} custom B-roll item(s), stock B-roll off`)
-      }
-
+      //
+      // variant.broll_source ('both' | 'custom' | 'stock') is read NOWHERE on
+      // this path, on purpose: v1-v3 always use Submagic's own stock B-roll.
+      // The creator's clips had to be timed against the pre-cut source
+      // Submagic receives, and any mismatch made Submagic reject the whole
+      // submission — losing the variant outright — while hosting and
+      // registering each clip pushed this task toward the 300s cap. The
+      // source picker still steers the Motion Lab variants (v4-v6); don't
+      // wire it back in here.
       const brollKnobs = submagicBrollKnobs(brollSetting, resolved)
-      const submitOpts = (withCustomItems: boolean) => ({
+      projectId = await submitSubmagicJob(videoUrlForSubmagic, {
         title: `${variantId}-${jobId.slice(0, 8)}`,
         ...SUBMAGIC_ALWAYS_ON,
         templateName: resolved.templateName,
         userThemeId: resolved.userThemeId,
-        magicBrolls: withCustomItems ? false : brollKnobs.magicBrolls,
-        magicBrollsPercentage: withCustomItems ? undefined : brollKnobs.magicBrollsPercentage,
+        magicBrolls: brollKnobs.magicBrolls,
+        magicBrollsPercentage: brollKnobs.magicBrollsPercentage,
         magicZooms: resolved.magicZooms,
         hookTitle: resolved.hookTitle,
         removeSilencePace: resolved.removeSilencePace,
         musicTrackId,
-        ...(withCustomItems ? { items: customItems } : {}),
         ...precutOverrides,
       })
-
-      if (customItems.length) {
-        // Custom items make the submission rejectable in ways stock knobs
-        // are not: a userMediaId Submagic hasn't finished ingesting yet, or
-        // a timing edge case. Retry once after a pause (ingest usually
-        // completes within seconds), then degrade to stock B-roll rather
-        // than fail the variant — creator clips are an enhancement, never
-        // worth a dead render.
-        try {
-          projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(true))
-        } catch (e1) {
-          console.warn(`[submagic-start] ${variantId}: submit with custom B-roll items failed — retrying in 15s (user-media may still be ingesting): ${(e1 as Error).message.slice(0, 300)}`)
-          await new Promise(r => setTimeout(r, 15_000))
-          try {
-            projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(true))
-          } catch (e2) {
-            console.warn(`[submagic-start] ${variantId}: custom B-roll items rejected twice — rendering with stock B-roll instead: ${(e2 as Error).message.slice(0, 300)}`)
-            projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(false))
-          }
-        }
-      } else {
-        projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(false))
-      }
 
       // Music comes from our library AFTER Submagic returns — same matcher
       // inputs as v4/v5: Gemini's footage profile + null transcript, with a

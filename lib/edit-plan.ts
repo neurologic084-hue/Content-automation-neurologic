@@ -262,6 +262,137 @@ export function findStutterDrops(words: WordTimestamp[], dropped: ReadonlySet<nu
   return out
 }
 
+// Phrase-level retakes: she delivers a sentence, doesn't like it, and says the
+// whole thing again. Until now the ONLY thing looking for these was the Haiku
+// pass above, and that pass is best-effort by construction — a miss, a timeout,
+// a 429 past three retries or unparseable JSON all return [] silently and BOTH
+// takes ship. findStutterDrops can't cover for it: it compares one word to one
+// word, and the suite documents the hole itself ("duplicate separated by a REAL
+// word is a retake, not a stutter"). So a repeated SENTENCE had no deterministic
+// detector anywhere, on either path. This is that floor.
+//
+// LATER TAKE WINS. A retake exists because the first attempt was bad — she stops,
+// resets, and delivers it properly; the last pass is the one she meant. It is also
+// the only one that runs cleanly into the sentence that follows, so cutting the
+// earlier attempt leaves a seam that actually joins. (Same rule findStutterDrops
+// already applies at single-word scale, and the same rule the LLM prompt states.)
+const RETAKE_MIN_SPAN = 3     // shorter than this is glue, not a sentence
+const RETAKE_MAX_SPAN = 14
+const RETAKE_SKIP = 3         // surviving tokens tolerated between the two attempts
+const RETAKE_MATCH = 0.8      // fraction of take-1's tokens that must reappear, in order
+// Backstop against a misfiring rule, which in practice means many scattered
+// false positives across a long take. It is deliberately NOT applied to short
+// clips: on 20 words a quarter is one phrase, i.e. exactly one ordinary retake,
+// so the ratio only carries meaning once there is enough material to average over.
+const RETAKE_MAX_SHARE = 0.25
+const RETAKE_SHARE_MIN_WORDS = 40
+
+// Negation is the hinge of the rhetorical figure we must never cut ("it's not a
+// sleep problem, it's a cortisol problem"): the two halves are near-identical
+// precisely because only the negation and one noun change. A pair that disagrees
+// on negation is that figure, not a retake.
+const NEGATION = new Set([
+  'not', 'no', 'never', 'nothing', 'dont', 'doesnt', 'didnt', 'isnt', 'arent',
+  'wasnt', 'werent', 'cant', 'cannot', 'wont', 'wouldnt', 'shouldnt', 'couldnt',
+  'havent', 'hasnt', 'hadnt', 'aint',
+])
+const isNegation = (t: string) => NEGATION.has(t.replace(/'/g, ''))
+
+// Discourse glue that is long enough to pass a length test but carries no
+// meaning. Without this "and so then you know / and so then you know" scores as
+// two content words ("then", "know") and collapses — and a filler loop like that
+// is just as likely to be how she actually talks.
+const GLUE = new Set([
+  'that', 'this', 'these', 'those', 'then', 'than', 'they', 'them', 'their', 'there',
+  'here', 'what', 'when', 'where', 'which', 'with', 'your', 'well', 'will', 'would',
+  'could', 'should', 'have', 'has', 'had', 'been', 'being', 'was', 'were', 'just',
+  'like', 'know', 'going', 'gonna', 'want', 'kind', 'sort', 'mean', 'okay', 'yeah',
+  'right', 'some', 'most', 'much', 'more', 'also', 'even', 'only', 'very', 'really',
+  'actually', 'basically', 'literally', 'about', 'because', 'into', 'from', 'over',
+  'back', 'again', 'still', 'always', 'thing', 'things', 'stuff', 'yourself',
+])
+
+// The only words allowed to sit BETWEEN two takes. A repair bridge is a closed,
+// tiny vocabulary — an article, a pronoun, "I mean", "sorry". A payload noun is
+// open-class, and letting one be skipped is what turns the rhetorical
+// "You deserve real rest / You deserve real recovery" into a false retake: the
+// skip window swallows the very word that makes the two lines say different
+// things. Anything substantial in the gap means these are two statements.
+const REPAIR_BRIDGE = new Set(['mean', 'sorry', 'wait', 'like', 'well', 'okay', 'actually', 'lemme', 'scratch', 'again'])
+const isBridgeToken = (t: string) => t.length < 4 || REPAIR_BRIDGE.has(t.replace(/'/g, ''))
+
+// Fraction of `a`'s tokens that reappear in `b` IN ORDER. Order matters: a
+// restart replays the phrase, it doesn't merely reuse its vocabulary.
+function orderedOverlap(a: string[], b: string[]): number {
+  let matched = 0
+  let cursor = 0
+  for (const t of a) {
+    const at = b.indexOf(t, cursor)
+    if (at !== -1) { matched++; cursor = at + 1 }
+  }
+  return matched / a.length
+}
+
+// Two or more DISTINCT substantial words. Guards against collapsing conversational
+// glue ("and then you know" / "so the thing is") that recurs constantly in speech
+// and carries no meaning worth protecting either way.
+function hasContent(tokens: string[]): boolean {
+  const content = new Set(tokens.filter(t => t.length >= 4 && !GLUE.has(t.replace(/'/g, ''))))
+  return content.size >= 2
+}
+
+/** Indices of words belonging to abandoned earlier takes of a phrase that is
+ *  immediately restated. Operates on the words that SURVIVE `dropped`, so an
+ *  "uh" or an already-cut false start between the two attempts doesn't hide the
+ *  match. Exported for the regression tests in tests/cut-plan.test.ts. */
+export function findRepeatedTakes(words: WordTimestamp[], dropped: ReadonlySet<number>): number[] {
+  const survivors: number[] = []
+  for (let i = 0; i < words.length; i++) {
+    // Bare punctuation tokens carry no identity and would break the head anchor.
+    if (!dropped.has(i) && normWord(words[i].text)) survivors.push(i)
+  }
+  const tok = survivors.map(i => normWord(words[i].text))
+  const drops = new Set<number>()
+
+  let p = 0
+  while (p < survivors.length) {
+    let hit: { n: number; q: number } | null = null
+    // Longest span first: a restated sentence must be cut as a sentence, not
+    // mistaken for a three-word restart hiding inside its own opening.
+    const maxN = Math.min(RETAKE_MAX_SPAN, Math.floor((survivors.length - p) / 2))
+    for (let n = maxN; n >= RETAKE_MIN_SPAN && !hit; n--) {
+      const a = tok.slice(p, p + n)
+      if (!hasContent(a)) continue
+      for (let skip = 0; skip <= RETAKE_SKIP; skip++) {
+        const q = p + n + skip
+        if (q + n > survivors.length) break
+        // Stop widening the moment something substantial sits in the gap.
+        if (skip > 0 && !isBridgeToken(tok[q - 1])) break
+        const b = tok.slice(q, q + n)
+        // A restart replays how the phrase BEGAN — same anchor isRestartedBy uses.
+        if (a[0] !== b[0]) continue
+        if (orderedOverlap(a, b) < RETAKE_MATCH) continue
+        if (a.some(isNegation) !== b.some(isNegation)) continue
+        hit = { n, q }
+        break
+      }
+    }
+    if (!hit) { p++; continue }
+    // Everything from the abandoned attempt up to the start of the keeper goes:
+    // the tokens in between are its trailing fragment ("...I mean"), and leaving
+    // them behind is exactly what makes a cut sound stitched.
+    for (let k = p; k < hit.q; k++) drops.add(survivors[k])
+    // Resume AT the keeper so a third take of the same line collapses too.
+    p = hit.q
+  }
+
+  if (words.length >= RETAKE_SHARE_MIN_WORDS && drops.size > words.length * RETAKE_MAX_SHARE) {
+    console.warn(`[edit-plan] repeated-take detection wanted ${drops.size}/${words.length} words gone — ignoring it`)
+    return []
+  }
+  return [...drops].sort((x, y) => x - y)
+}
+
 export interface CutOptions {
   tight?: boolean
   // Energy-detected silence intervals in SOURCE time (ffmpeg silencedetect on
@@ -296,6 +427,14 @@ export async function planKeepSegments(
     // from the edit, not just the captions.
     if (FILLER_RE.test(t) || /^\(.+\)$/.test(t) || /^\S+-$/.test(t)) dropped.add(i)
   })
+
+  // Phrase level before word level: the sentence-scale view has to see the
+  // takes intact, and the single-word rule then mops up whatever is left.
+  const retakeDrops = findRepeatedTakes(words, dropped)
+  if (retakeDrops.length) {
+    console.log(`[edit-plan] repeated takes: cutting ${retakeDrops.length} word(s) — "${retakeDrops.map(i => words[i].text).join(' ')}"`)
+    for (const i of retakeDrops) dropped.add(i)
+  }
 
   for (const i of findStutterDrops(words, dropped)) dropped.add(i)
 
