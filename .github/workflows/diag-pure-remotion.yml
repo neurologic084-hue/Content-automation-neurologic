@@ -89,9 +89,14 @@ jobs:
           # actually FAILED while the workflow said success.
           set -o pipefail
           cd remotion
+          # timeout must exceed the WHOLE render duration, not just page load:
+          # a starved non-rendering page's font handles stay pending for the
+          # entire render on the 4-core runner, and their timer kills healthy
+          # renders that outlive it (seen live: died at 300s with 1868/3300
+          # frames done and 4 min to go).
           time npx remotion render src/Root.tsx ShortEdit /tmp/diag-out.mp4 \
             --props=diag-props.json --codec=h264 --crf=23 \
-            --timeout=300000 --concurrency=2 --log=verbose 2>&1 | tail -200
+            --timeout=1500000 --concurrency=2 --log=verbose 2>&1 | tail -200
 
       - name: Result
         if: always()

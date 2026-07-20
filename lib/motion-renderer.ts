@@ -377,12 +377,23 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   // Prefer the pre-cut clip when it exists: our planner already trimmed it, so
   // Submagic only styles. Checked BEFORE the in-process cache so the cut wins
   // even in a process that earlier cached the uncut compressed URL.
+  // Retried: this HEAD decides WHICH video Submagic receives, and downstream
+  // custom B-roll placements are only valid for the matching timeline
+  // (placementBasis) — a single transient flake here would silently swap the
+  // source and drop the creator's clips.
   if (process.env.R2_PUBLIC_URL) {
     const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`
-    try {
-      const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
-      if (head.ok) return cutUrl
-    } catch { /* no cut clip (or unreachable) — fall back to the compressed source */ }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+        if (head.ok) return cutUrl
+        break // definitive answer (404 etc.): no cut clip — use the compressed source
+      } catch {
+        // Network flake or timeout — retry briefly before concluding there is
+        // no cut clip.
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1_500))
+      }
+    }
   }
 
   const cached = submagicSourceCache.get(jobId)
@@ -2124,10 +2135,18 @@ async function renderRemotionEdit(
         ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2 --log=verbose` +
           (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
         : ' --concurrency=4'
-      // 600s dev machine / 900s constrained host delayRender: headless-Chrome
-      // startup + that first font/asset load need real room on a small box
-      // before the render is declared dead.
-      const renderTimeout = constrained ? 900000 : 600000
+      // The delayRender budget must exceed the WORST-CASE TOTAL RENDER TIME,
+      // not just page-load time. Root cause of the "Loading font EditCapBase"
+      // deaths (verbose diag, run 29731128897): besides the two rendering
+      // tabs, a non-rendering page sits CPU-starved on the 4-core runner and
+      // its module-scope font handles never clear — harmless until the render
+      // outlives the budget, then that page's timer kills a HEALTHY render
+      // (seen dying at 57%, frames advancing, 4 min to go). Every job whose
+      // render finished inside the budget passed; every longer one died at
+      // exactly the budget — which is why short demo jobs "worked" and the
+      // client's longer jobs "didn't". 2700s covers a ~35-min render with
+      // headroom; the workflow's timeout-minutes is the real runaway guard.
+      const renderTimeout = constrained ? 2_700_000 : 600000
       await run(
         // Generous delayRender timeout: headless-Chrome startup + asset loads
         // can crawl on a busy/constrained machine and fail renders that would
