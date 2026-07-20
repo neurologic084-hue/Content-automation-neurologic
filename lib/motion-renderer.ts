@@ -364,6 +364,14 @@ async function useSharedCleanAudio(jobId: string, workPath: string): Promise<boo
     const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
     if (!head.ok) return false
     await downloadFile(url, workPath)
+    // A truncated or empty download is worse than no shared copy at all: the
+    // render would go on to cut and caption a broken file. Fall back to
+    // cleaning locally instead.
+    if (!fs.existsSync(workPath) || fs.statSync(workPath).size < 100_000) {
+      console.warn('[shared-audio] shared clean looked truncated — cleaning locally instead')
+      try { if (fs.existsSync(workPath)) fs.unlinkSync(workPath) } catch { /* best-effort */ }
+      return false
+    }
     return true
   } catch { return false }
 }
@@ -375,7 +383,12 @@ async function sharedWords(jobId: string): Promise<{ text: string; start: number
     const res = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_WORDS_NAME}`, { signal: AbortSignal.timeout(15_000) })
     if (!res.ok) return null
     const words = await res.json()
-    return Array.isArray(words) && words.length ? words : null
+    if (!Array.isArray(words) || !words.length) return null
+    // Guard against a stale words file left over from DIFFERENT footage (a job
+    // re-prepped from a new Drive link reuses the same jobId): timings that run
+    // past the end of the video would push captions and cuts off the timeline.
+    const ok = words.every(w => typeof w?.start === 'number' && typeof w?.end === 'number' && w.end >= w.start)
+    return ok ? words : null
   } catch { return null }
 }
 
@@ -652,8 +665,15 @@ export async function prepareJobSource(
   // Auphonic -> ElevenLabs, in that order), so the Motion Lab variants each
   // reuse it instead of repeating both. Best-effort — a failure here just means
   // each variant does its own, as before.
-  await onProgress?.(97, 'Cleaning audio')
-  await buildSharedCleanAudio(jobId, localPath, outDir)
+  // Skip when the compressed source didn't survive (disk pressure, a failed
+  // ffmpeg pass): cleaning a missing file would throw inside a best-effort step
+  // and waste a paid Auphonic production on nothing.
+  if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10_000) {
+    await onProgress?.(97, 'Cleaning audio')
+    await buildSharedCleanAudio(jobId, localPath, outDir)
+  } else {
+    console.warn('[shared-audio] no usable compressed source — skipping the shared clean')
+  }
 
   // Analyze the footage once now, while the compressed file is warm on disk, so
   // the content profile is ready before any variant starts. Best-effort — never
@@ -1870,7 +1890,18 @@ async function renderRemotionEdit(
     // These four all read workPath and don't depend on each other — run them
     // together instead of serially (overlaps the slow Scribe call with the
     // ffmpeg/ffprobe passes).
-    const cachedWords = sharedClean ? await sharedWords(jobId) : null
+    let cachedWords = sharedClean ? await sharedWords(jobId) : null
+    // Words were timed on the shared clean; if they run past THIS work copy the
+    // two are out of step (re-prep from different footage, or a truncated
+    // download) and reusing them would drift every caption and cut.
+    if (cachedWords) {
+      const workDuration = await getVideoDuration(workPath).catch(() => 0)
+      const lastWord = cachedWords[cachedWords.length - 1]?.end ?? 0
+      if (workDuration && lastWord > workDuration + 2) {
+        console.warn(`[motion-renderer] shared words end at ${lastWord.toFixed(1)}s but the footage is ${workDuration.toFixed(1)}s — transcribing fresh`)
+        cachedWords = null
+      }
+    }
     if (cachedWords) console.log(`[motion-renderer] reusing ${cachedWords.length} shared word timings (no second transcription)`)
     const [words, silences, duration, dimensions] = await Promise.all([
       cachedWords ?? transcribeLocalFile(workPath),
@@ -2729,6 +2760,9 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     }
 
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+    // Clear the prep spinner from variants that were waiting on it. Anything
+    // ready/failed/processing owns its own state — a re-run of prep must not
+    // touch a finished video's card or a render already in flight elsewhere.
     const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
       v.status === 'pending' ? { ...v, progress: null } : v
     ))
@@ -2736,13 +2770,26 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
   } catch (e) {
     console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-    const failedVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => ({
-      ...v,
-      status: 'failed' as const,
-      progress: null,
-      error: `Could not prepare the footage: ${(e as Error).message}`,
-    }))
-    await db.from('video_jobs').update({ variants: failedVariants, status: 'failed' }).eq('id', jobId)
+    const all = (currentJob?.variants ?? []) as VideoVariant[]
+    // Only variants that were WAITING on this prep can be failed by it. A
+    // variant that already rendered has a finished video in storage and must
+    // keep it — prep is re-runnable (to rebuild a lost source, or to pick up a
+    // pipeline fix), and a failure on the second run must never retract work
+    // that already succeeded. Same for one that is mid-render on its own
+    // machine: it has its own inputs and its own failure path.
+    const failedVariants = all.map((v) => (
+      v.status === 'pending'
+        ? { ...v, status: 'failed' as const, progress: null,
+            error: `Could not prepare the footage: ${(e as Error).message}` }
+        : v
+    ))
+    const survivors = all.filter(v => v.status === 'ready').length
+    if (survivors) {
+      console.warn(`[motion-renderer] prep failed but ${survivors} finished variant(s) kept their videos`)
+    }
+    // The job is only 'failed' when nothing usable came out of it.
+    const jobStatus = survivors ? 'complete' : 'failed'
+    await db.from('video_jobs').update({ variants: failedVariants, status: jobStatus }).eq('id', jobId)
   }
 }
 
