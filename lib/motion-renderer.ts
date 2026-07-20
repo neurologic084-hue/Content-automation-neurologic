@@ -288,6 +288,35 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
   return outputPath
 }
 
+// The Remotion path's work copy of the source. compressSourceFile keeps the
+// filmed resolution (the Submagic deliverables should stay whatever shape the
+// creator shot), but the ShortEdit composition sizes itself to THIS file — so
+// a 4K portrait source (2160x3840 iPhone HEVC) made headless Chrome decode,
+// render, and encode a full 4K composition on the 4-core Actions runner. That
+// starved the page so badly the first delayRender (a font) blew its 900s
+// budget: every 4K client job died with "Loading font EditCapBase…" while
+// every 1080p job passed (2026-07-20, incl. a B-roll-mode-none render — the
+// footage, not the B-roll, was the load). The delivered short is 1080p-class
+// anyway, so capping the SHORT edge at 1080 (2160x3840 -> 1080x1920,
+// 3840x2160 -> 1920x1080) is visually lossless for the output and cuts the
+// render work ~4x. Aspect ratio and framing untouched; at or under the cap
+// it's a plain copy, exactly the old behavior.
+async function stageRenderWorkCopy(compressedPath: string, workPath: string): Promise<void> {
+  const { width, height } = await probeVideoDimensions(compressedPath)
+  if (Math.min(width, height) <= 1080) {
+    fs.copyFileSync(compressedPath, workPath)
+    return
+  }
+  // -2 keeps the scaled edge even for yuv420p; audio is already AAC — copy it.
+  const filter = height >= width ? 'scale=1080:-2' : 'scale=-2:1080'
+  console.log(`[motion-renderer] work copy: downscaling ${width}x${height} source (${filter}) — comp output is 1080p-class`)
+  await run(
+    `ffmpeg -y -i "${compressedPath}" -vf ${filter} -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -c:a copy -movflags +faststart "${workPath}"`,
+    600_000,
+  )
+  if (!fs.existsSync(workPath)) throw new Error('Downscaling the render work copy produced no output')
+}
+
 // Ensures the shared compressed local copy exists for this job -- downloads
 // raw if needed, compresses if needed (file size only, original resolution/
 // aspect ratio untouched). Both steps are idempotent (check for an existing
@@ -1630,7 +1659,7 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
     const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
     const workPath = path.join(outDir, `${variantId}_isolated.mp4`)
-    fs.copyFileSync(compressedPath, workPath)
+    await stageRenderWorkCopy(compressedPath, workPath)
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
