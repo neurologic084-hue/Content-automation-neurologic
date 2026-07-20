@@ -451,12 +451,16 @@ export async function planCustomBrollSlots(
   const CADENCE: Record<ContentProfile['brollableRichness'], number> = dense
     ? { none: 4, some: 3.5, rich: 3 }
     : { none: 12, some: 9, rich: 6.5 }
-  const targetCount = Math.min(
-    clips.length * 2,
-    coverage !== null
-      ? coverageTargetCount(duration, coverage, minGap)
-      : Math.max(1, Math.round(duration / CADENCE[profile?.brollableRichness ?? 'some'])),
-  )
+  // CLIP-CENTRIC, not slot-centric. The creator uploaded these clips FOR this
+  // video, so the job is "give each clip its best moment", not "here are N
+  // slots, which clips win one". Slot-centric planning made clips compete and
+  // silently dropped most of them (12 uploaded -> 2 used). So on 'smart' the
+  // target is simply EVERY clip once, bounded by what the timeline physically
+  // fits. The manual slider still overrides with an explicit coverage number.
+  const fits = Math.floor((duration - 2.5 - 1.5 + minGap) / (AVG_CUT_SECONDS + minGap))
+  const targetCount = coverage !== null
+    ? coverageTargetCount(duration, coverage, minGap)
+    : Math.max(1, Math.min(clips.length, fits))
   if (targetCount === 0) return []
 
   const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
@@ -479,7 +483,8 @@ export async function planCustomBrollSlots(
         role: 'user',
         content: [
           "Place the creator's OWN B-roll clips as full-screen cutaways on a talking-head video.",
-          `Video duration: ${duration.toFixed(1)}s. Aim for about ${targetCount} cutaway(s); ${targetCount} is the ceiling.`,
+          `Video duration: ${duration.toFixed(1)}s. There are ${clips.length} clips and room for ${targetCount} cutaway(s).`,
+          'YOUR JOB: give EACH clip its own best moment. Work clip by clip, not slot by slot.',
           'Available clips (index: length, what it shows):',
           ...clipLines,
           '',
@@ -499,11 +504,13 @@ export async function planCustomBrollSlots(
           '  room while she describes calming down. Use these.',
           '- Prefer cutting away during EXPLANATORY passages and holding on her face for the',
           '  hook, emotional beats and the call to action.',
-          '- Only skip a clip when it would actively confuse the viewer at every moment.',
-          '  Using most of the clips is the expected outcome — she supplied them on purpose.',
+          '- Go through the clips IN ORDER and give each one the best moment you can find',
+          '  for it. Every clip should get a moment unless there is genuinely nowhere it',
+          '  would not confuse the viewer — she uploaded all of them on purpose.',
+          '- Spread them across the whole video rather than clustering them.',
           'Constraints for any cutaway you DO place:',
           '- Each clip may be used at most twice; prefer using every fitting clip once first.',
-          '- duration: 1.8 to 3.8 seconds, and never longer than the clip itself.',
+          '- duration: 3.0 to 4.0 seconds, and never longer than the clip itself.',
           '- Never start before 2.5s, never end within the last 1.5s of the video.',
           `- At least ${minGap} seconds of talking-head between cutaways. No overlaps.`,
           '- Return JSON only: {"items":[{"start":number,"duration":number,"clip":number}]}',
@@ -531,7 +538,7 @@ export async function planCustomBrollSlots(
     if ((uses.get(idx) ?? 0) >= 2) continue
     const clip = clips[idx]
     const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
-    const dur = Math.min(3.8, Math.min(clip.duration, Math.max(1.8, c.duration as number)))
+    const dur = Math.min(4.0, Math.min(clip.duration, Math.max(3.0, c.duration as number)))
     if (start + dur > duration - 1.5) continue
     if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
     // A long clip only ever needs `dur` seconds of itself. First use plays
