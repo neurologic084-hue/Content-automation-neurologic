@@ -16,7 +16,7 @@ import {
   SUBMAGIC_ALWAYS_ON,
 } from '@/lib/video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
-import { normalizeBrollSetting, submagicBrollKnobs } from '@/lib/broll'
+import { normalizeBrollSetting, normalizeBrollSource, submagicBrollKnobs } from '@/lib/broll'
 import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
 import { rendersDir } from '@/lib/paths'
@@ -332,8 +332,13 @@ export async function POST(req: NextRequest) {
           // the whole submission (observed: every v1-v3 failed with no project
           // ever created). On a mismatch, drop the items and render without
           // them rather than fail the variant.
+          // Honour the job's B-roll SOURCE here too: 'stock' means ignore her
+          // folder for this render, so the Submagic project gets stock B-roll
+          // instead of her timed items. Without this the setting only affected
+          // the Motion Lab variants and v1-v3 silently kept using her clips.
+          const variantSource = normalizeBrollSource(variant.broll_source)
           const wantBasis: 'cut' | 'full' = isPrecut ? 'cut' : 'full'
-          const usableEntries = (customEntries ?? []).filter(
+          const usableEntries = variantSource === 'stock' ? [] : (customEntries ?? []).filter(
             e => (e.placementBasis ?? 'full') === wantBasis,
           )
           if ((customEntries?.length ?? 0) > 0 && usableEntries.length === 0) {
