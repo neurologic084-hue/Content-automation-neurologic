@@ -357,7 +357,7 @@ async function buildSharedCleanAudio(jobId: string, compressedPath: string, outD
 // Pulls the shared cleaned source into this variant's work path. Returns false
 // when there isn't one (older job, or prep's best-effort step failed), and the
 // caller then cleans locally exactly as before.
-async function useSharedCleanAudio(jobId: string, workPath: string): Promise<boolean> {
+async function applySharedCleanAudio(jobId: string, workPath: string): Promise<boolean> {
   if (!process.env.R2_PUBLIC_URL) return false
   const url = `${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`
   try {
@@ -1863,7 +1863,7 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
     // Prep already cleaned this job's audio once for every variant. Reuse it;
     // only clean here when that shared step is unavailable.
-    const sharedClean = await useSharedCleanAudio(jobId, workPath)
+    const sharedClean = await applySharedCleanAudio(jobId, workPath)
     if (sharedClean) {
       console.log('[motion-renderer] reusing the job\'s shared cleaned audio (no second clean)')
       // The shared copy is the COMPRESSED source, so it still needs the 4K
