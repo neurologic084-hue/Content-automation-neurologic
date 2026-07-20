@@ -97,10 +97,6 @@ interface PlainLanguageProfile {
   scanTerms: string[]
   /** BAD/GOOD rewrite pairs proving the inline definition does not rescue a banned term. */
   glossExamples: string
-  /** BAD/GOOD pairs for SENTENCE LENGTH rather than vocabulary. The BAD sides are
-   *  real lines from this brand's own approved scripts, so the model sees the
-   *  failure in the exact register it is being calibrated on. */
-  lengthExamples: string
   /** Field words the audience uses about itself   banning these flattens the voice. */
   allowedTerms: string
   /** What this creator's authority rests on, e.g. "A DOCTOR". */
@@ -129,13 +125,6 @@ const PLAIN_LANGUAGE_PROFILES: Record<string, PlainLanguageProfile> = {
       'executive function', 'white matter', 'comorbid', 'etiology', 'reward prediction',
       'contraindicat', 'clinical', 'patients', 'symptom', 'modality', 'protocol',
     ],
-    lengthExamples: `  BAD (45 words, from an approved script):  "Cortisol is supposed to rise gradually in the early morning hours to prepare your body to wake up, but when your HPA axis, the system that regulates your stress hormones, has been dysregulated by chronic stress, that cortisol rise happens too early and too sharply."
-  GOOD: "Your body is supposed to warm up slowly before you wake. After years of stress, that switch starts flipping early. So you're wide awake at 4am, heart going, for no reason you can name."
-  BAD (40 words, from an approved script):  "The prefrontal cortex, the region responsible for focus, decision-making, and clear thinking, is the most metabolically expensive part of your brain, and it's the first thing to go offline when your system decides it needs to conserve resources for survival."
-  GOOD: "The thinking part of your brain is expensive to run. It burns more fuel than anything else up there. So the moment your body decides it's in trouble, that's the first thing it shuts off."
-  BAD (38 words, from an approved script):  "High-beta brainwave activity, which is the electrical signature of an aroused, vigilant brain, stays elevated even when you're exhausted, because the nervous system learned to stay on guard and doesn't automatically know when it's safe to power down."
-  GOOD: "Your brain stays on watch even when you're wrecked. It learned that years ago. Nobody ever told it the danger passed, so it keeps standing guard while you lie there staring at the ceiling."
-  Notice what survived every rewrite: 4am, the fuel cost, the staring at the ceiling. The facts stayed. Only the register changed.`,
     glossExamples: `  BAD:  "That's your amygdala, the brain's threat-detection center, running at a chronically elevated baseline."
   GOOD: "That's your brain's alarm system, stuck in the on position."
   BAD:  "The prefrontal cortex, the region responsible for focus and clear thinking, loses the metabolic fuel it needs to stay online."
@@ -151,10 +140,6 @@ const PLAIN_LANGUAGE_PROFILES: Record<string, PlainLanguageProfile> = {
     credential: 'A DOCTOR',
   },
 }
-
-/** Same ceiling lib/learning.ts ranks against, restated here because the model
- *  needs the number and the ranker needs the number and they must not drift. */
-const SPOKEN_SENTENCE_CEILING = 20
 
 function plainLanguageProfileKey(creatorName: string): string {
   return creatorName
@@ -195,14 +180,6 @@ ${
 ${profile.allowedTerms}`
     : ''
 
-  const lengthSection = `LENGTH   THE SAME RULE APPLIED TO SENTENCES INSTEAD OF WORDS. A plain word inside a 40-word sentence is still unreadable:
-${
-  profile?.lengthExamples ??
-  `  BAD (36 words):  "When the demand on the system stays high for long enough that recovery never fully happens, the capacity that used to feel automatic starts requiring conscious effort, and that effort is what you are experiencing as difficulty."
-  GOOD: "The demand never lets up, so you never fully recover. Things that used to be automatic now take effort. That effort is the thing you're feeling."
-  Notice what survived: the demand, the missing recovery, the effort. The facts stayed. Only the register changed.`
-}`
-
   const specificExample = profile
     ? `"Your brain's alarm goes off a half-second before the reasoning part gets a chance to weigh in" is specific and allowed. "Amygdala hyperactivation precedes prefrontal appraisal" is the same fact and is banned. If you cannot explain the mechanism without naming a brain part, you do not understand it well enough to put it in a 60-second video   find the everyday version.`
     : `Describe what is happening in the words the audience would use to tell a friend about it. If you cannot explain the mechanism without a technical label, you do not understand it well enough to put it in a 60-second video   find the everyday version.`
@@ -217,17 +194,6 @@ ${bannedSection}
 
 ${glossSection}${allowedSection}
 
-${lengthSection}
-
-READABILITY BAR   MEASURABLE, NOT A FEELING. Applies to the hook, every beat of the body, and the CTA:
-• HARD CEILING: 20 words per sentence. A ceiling, not an average, so you cannot offset a 35-word sentence with a 5-word one. Spoken delivery runs about two and a half words a second, so 20 words is eight seconds the listener spends holding an unfinished thought. Nothing in a 60-second video is worth eight seconds of suspense.
-• AIM: most sentences between 8 and 15 words, and at least half the script under 12.
-• ONE IDEA PER SENTENCE. One subject, one thing happening to it. Two facts means two sentences.
-• ONE JOINED CLAUSE AT MOST, AND IT COMES SECOND. "Your brain runs out of fuel, so it starts cutting corners" is fine. "When your brain, which has been running on empty for months, finally starts cutting corners..." is not. Never open a sentence with a clause the listener has to hold until the real subject shows up.
-• ONE QUALIFIER PER SENTENCE. "Often" or "for many people", never both, never three. Hedge the claim once and move on.
-• EVERYDAY WORDS. If it would not come up when two friends talk about this over coffee, it does not go in. Take the shorter word every time: "use" not "utilize", "fuel" not "resources", "starts" not "initiates", "shuts off" not "goes offline".
-• CONCRETE OVER ABSTRACT. Name something the viewer can see, hear, feel, or do. "You reread the same email four times" beats "sustained attention becomes difficult".
-• THIS OVERRIDES the VOICE RULES asking for "medium to long" sentences and the humanizer rule asking for "longer sentences (20+)". Both were written before this bar and both lose to it. Varying rhythm now means mixing 5-word sentences with 15-word sentences, never with 30-word ones.
 
 STILL BE SPECIFIC. Plain is not vague. Name the exact thing that is happening   in everyday words, as a picture rather than a diagram label. ${specificExample}
 
@@ -257,22 +223,19 @@ function resolvePlainLanguageProfile(brand?: Pick<BrandSettings, 'creator_name'>
 //
 // What closes the gap is meeting the examples at their own level. Each one is
 // scanned and stamped with its own measured violations, so it arrives already
-// labelled as a vocabulary and length failure rather than as an endorsement.
+// labelled as a vocabulary failure rather than as an endorsement.
 // Ten examples now carry ten counter-signals instead of one paragraph trying to
 // cover all of them at once.
-function measureExample(text: string, scanTerms: string[]): { banned: string[]; long: number; total: number; longest: number } {
+function measureExample(text: string, scanTerms: string[]): { banned: string[]; total: number } {
   const lower = text.toLowerCase()
   const banned = scanTerms.filter((t) => lower.includes(t))
   const sentences = text
     .split(/(?<=[.!?])\s+|\n+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 3)
-  const lengths = sentences.map((s) => s.split(/\s+/).length)
   return {
     banned,
-    long: lengths.filter((n) => n > SPOKEN_SENTENCE_CEILING).length,
-    total: lengths.length,
-    longest: lengths.length ? Math.max(...lengths) : 0,
+    total: sentences.length,
   }
 }
 
@@ -290,7 +253,6 @@ function buildFewShotSection(
       const m = measureExample(`${s.hook} ${s.body} ${s.cta}`, scanTerms)
       const problems: string[] = []
       if (m.banned.length) problems.push(`${m.banned.length} banned words (${m.banned.slice(0, 6).join(', ')})`)
-      if (m.long) problems.push(`${m.long} of its ${m.total} sentences over the 20-word ceiling, longest ${m.longest} words`)
       const verdict = problems.length
         ? `FAILS THE CURRENT BAR: ${problems.join('; ')}. Reproduce none of that.`
         : `Closer to the bar than most, but check it against the rules anyway rather than trusting it.`
@@ -305,9 +267,9 @@ CTA: ${s.cta}`
   return `APPROVED SCRIPTS   RHYTHM CALIBRATION ONLY:
 Study these for one thing: how directly they speak to the viewer, and the energy and structure of the delivery. Nothing else.
 
-THEY SHOW VOICE, NOT COMPLEXITY. Every one of these was approved before the plain-language and readability rules existed, and the note above each one is a real count taken from that example just now. They are the exact defect you are being told to fix. Reading them will pull you toward long sentences and technical words because that is what they are made of, and that pull is the single most likely reason this script fails.
+THEY SHOW VOICE, NOT VOCABULARY. Every one of these was approved before the plain-language and readability rules existed, and the note above each one is a real count taken from that example just now. They are the exact defect you are being told to fix. Reading them will pull you toward technical words because that is what they are made of, and that pull is the single most likely reason this script fails.
 
-So use them like this: take the rhythm, the directness, the confidence, the way a beat turns into the next one. Then say all of it in sentences under 20 words using words the audience actually uses. A script that sounds like these and reads at half their sentence length is the target.
+So use them like this: take the rhythm, the directness, the confidence, the way a beat turns into the next one. Then say all of it using words the audience actually uses. A script that sounds like these without a single piece of clinical vocabulary is the target.
 
 ${rendered}`
 }
@@ -441,8 +403,6 @@ LEAD MAGNET CTA — STRICTLY NON-NEGOTIABLE:
 
 SCRIPT FORMATS — PICK THE BEST ONE FOR THIS IDEA:
 
-BEAT WORD COUNTS BUY MORE SENTENCES, NOT LONGER ONES. A 50-70 word beat is four to six sentences. If you are covering it in two, you are writing 30-word sentences and the script has already failed the readability bar. Divide every beat's word count by 12 to get the number of sentences it should hold.
-
 FORMAT 1: EDUCATIONAL (belief-shift)
 Best for: mechanisms, root causes, "why X happens", counterintuitive insights, myth-busting.
 Structure (total 150–210 words):
@@ -525,16 +485,15 @@ THE CONTENT IDEA: "${idea}"
 
 ${scriptFormat ? `FORCED FORMAT: Write this script ONLY in the "${scriptFormat}" format. Do not choose a different format regardless of the idea.\n` : ''}STEP 1: ${scriptFormat ? `Format is pre-selected as "${scriptFormat}". Proceed directly to writing.` : 'Decide which format fits this idea best (tips_tricks / educational / personal_story / myth_busting). Do NOT choose lead_magnet unless explicitly forced above.'}
 
-STEP 2: Write the full script in that format. Match the rhythm and directness of the approved examples if provided, never their vocabulary and never their sentence length. Use any Reddit or forum content in the web context (marked [Reddit]) to borrow real audience language — the exact words real people use to describe this problem, frustration, or desire.
+STEP 2: Write the full script in that format. Match the rhythm and directness of the approved examples if provided, never their vocabulary. Use any Reddit or forum content in the web context (marked [Reddit]) to borrow real audience language — the exact words real people use to describe this problem, frustration, or desire.
 
 CRITICAL — BEFORE YOU OUTPUT:
 1. JARGON SWEEP — DO THIS FIRST AND DO IT LITERALLY. Go through the hook, body, and CTA word by word against the BANNED WORDS list. Every hit gets its whole sentence rewritten in everyday words, and then you sweep again. Defining a term inline does not count as fixing it. One banned word means the script has failed, so the sweep is not optional and it is not a formality.
-2. LENGTH SWEEP — COUNT, DO NOT ESTIMATE. Take the hook, then every sentence of the body, then the CTA, one at a time, and count the words. Anything over 20 gets SPLIT, not trimmed: a 26-word sentence tightened to 19 is still two ideas jammed together. Split it into two sentences that each say one thing, then count again. Report nothing until every sentence is under the ceiling.
-3. FIRST-LISTEN TEST. Read the body out loud in your head, once, at speaking speed, with no going back. Any sentence you would need to hear twice gets rewritten shorter and more concrete. If you found yourself holding a clause open waiting for it to resolve, that sentence failed and the fix is to put the subject first.
-4. SUBSTANCE CHECK — THE OTHER HALF OF THE BAR, AND SKIPPING IT IS HOW SIMPLIFYING GOES WRONG. Reread the shortened version and ask what the viewer actually learned. Every sentence must still carry a fact, a number, a moment, or a specific observation. Any sentence that survives only as filler you produced while cutting gets deleted, and the real detail goes back in plain words. Short and empty fails exactly as hard as long and technical.
-5. Check that no body beat is a single sentence, and that each beat holds roughly its word count divided by 12 in sentences.
-6. Check the CTA — if it contains "Comment" or "DM me [keyword]," delete it and rewrite using the approved CTA types above.
-7. Every script must explain a specific mechanism or root cause — exactly WHAT happens and WHY — described the way you would describe it to a friend across a table. Naming a brain region or a hormone is not an explanation, it is a label standing in for one. Specific expertise in plain English is what makes people stop and think "this person actually understands what I'm going through."
+2. FIRST-LISTEN TEST. Read the body out loud in your head, once, at speaking speed. Any sentence you would need to hear twice gets rewritten in plainer words — the fix is vocabulary and concreteness, never length.
+3. SUBSTANCE CHECK — THE OTHER HALF OF THE BAR, AND SKIPPING IT IS HOW SIMPLIFYING GOES WRONG. Reread the shortened version and ask what the viewer actually learned. Every sentence must still carry a fact, a number, a moment, or a specific observation. Any sentence that survives only as filler you produced while cutting gets deleted, and the real detail goes back in plain words. Short and empty fails exactly as hard as long and technical.
+4. Check that no body beat is a single sentence.
+5. Check the CTA — if it contains "Comment" or "DM me [keyword]," delete it and rewrite using the approved CTA types above.
+6. Every script must explain a specific mechanism or root cause — exactly WHAT happens and WHY — described the way you would describe it to a friend across a table. Naming a brain region or a hormone is not an explanation, it is a label standing in for one. Specific expertise in plain English is what makes people stop and think "this person actually understands what I'm going through."
 
 Respond ONLY in this exact JSON format:
 {
