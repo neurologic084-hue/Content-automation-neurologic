@@ -38,6 +38,17 @@ export function explainFailure(raw: unknown): string {
     return 'The render host ran out of time loading fonts/assets (it was overloaded). Please retry this variant.'
   }
 
+  // ── Ran out of credits — checked BEFORE any per-service branch ───────────────
+  // Providers disagree wildly on how they say "your account is empty":
+  //   ElevenLabs -> HTTP 401 + quota_exceeded  (reads as a broken key)
+  //   Auphonic   -> a sentence with an <a href> Add Credits link
+  //   OpenRouter -> HTTP 402
+  //   Submagic   -> a plan/upgrade message
+  // Detecting the CONDITION first means an empty account can never masquerade
+  // as a bad key, a rate limit, or a raw stack trace on the variant card.
+  const credits = outOfCredits(low)
+  if (credits) return credits
+
   // ── OpenRouter / Gemini (video analysis, cut plan, b-roll, graphics) ──────────
   if (mentions('openrouter', 'gemini')) {
     if (has(402) || mentions('insufficient', 'credit', 'payment required', 'quota', 'balance'))
@@ -62,11 +73,29 @@ export function explainFailure(raw: unknown): string {
 
   // ── ElevenLabs (transcription + voice isolation) ─────────────────────────────
   if (mentions('elevenlabs', 'eleven labs', 'scribe')) {
-    if (has(401) || has(403) || mentions('invalid api key', 'unauthorized'))
-      return 'ElevenLabs key is invalid. Check ELEVENLABS_API_KEY.'
-    if (has(429) || mentions('quota', 'limit', 'exceeded', 'credits'))
+    // Quota FIRST: ElevenLabs answers an exhausted quota with HTTP 401, so the
+    // auth branch below used to claim "key is invalid" while the key was
+    // perfectly fine — a genuinely misleading message that cost real debugging
+    // time. The body carries quota_exceeded / "credits remaining"; trust that
+    // over the status code.
+    if (mentions('quota', 'credits remaining', 'exceeds your quota', 'quota_exceeded'))
+      return 'ElevenLabs is out of credits (transcription). Top up at elevenlabs.io, then retry.'
+    if (has(401) || has(403) || mentions('invalid api key', 'unauthorized', 'missing_permissions'))
+      return 'ElevenLabs key is invalid or lacks permissions. Check ELEVENLABS_API_KEY.'
+    if (has(429) || mentions('rate limit', 'too many requests', 'concurrent'))
+      return 'ElevenLabs is rate-limited (too many renders at once). Wait a moment, then retry.'
+    if (mentions('limit', 'exceeded'))
       return 'ElevenLabs quota reached (transcription). Check your ElevenLabs plan/usage, then retry.'
     return 'Transcription service (ElevenLabs) had an error. Please retry this variant.'
+  }
+
+  // ── Auphonic (backup audio cleaner for v4-v6) ────────────────────────────────
+  // Had no branch at all, so its failures reached the card as raw text — and
+  // Auphonic embeds HTML links in its messages, which looked like gibberish.
+  if (mentions('auphonic')) {
+    if (has(401) || has(403) || mentions('unauthorized', 'invalid token'))
+      return 'Auphonic key is invalid. Check AUPHONIC_API_TOKEN.'
+    return 'Auphonic (backup audio cleanup) failed — the render continues on the ElevenLabs fallback.'
   }
 
   // ── Render host (Vercel Sandbox / GitHub Actions) ────────────────────────────
@@ -90,6 +119,35 @@ export function explainFailure(raw: unknown): string {
   return trim(msg)
 }
 
+// Every phrasing our providers actually use for "this account is empty". Kept
+// deliberately literal — these strings came from real failure bodies, not guesses.
+const CREDIT_SIGNS = [
+  'quota_exceeded', 'exceeds your quota', 'quota exceeded',
+  'credits remaining', 'available credits', 'add credits', 'out of credits',
+  'insufficient credits', 'insufficient_quota', 'insufficient balance',
+  'not enough credits', 'credit balance', 'payment required',
+  'billing hard limit', 'spend limit', 'usage limit reached',
+]
+
+// Names the service AND says what to do about it. Returns null when the message
+// isn't about credits at all, so the caller falls through to its normal branches.
+function outOfCredits(low: string): string | null {
+  if (!CREDIT_SIGNS.some(s => low.includes(s))) return null
+  if (low.includes('auphonic'))
+    return 'Auphonic is out of credits (audio cleanup). Top up at auphonic.com — renders continue on the ElevenLabs fallback meanwhile.'
+  if (low.includes('elevenlabs') || low.includes('eleven labs') || low.includes('scribe'))
+    return 'ElevenLabs is out of credits (transcription). Top up at elevenlabs.io, then retry.'
+  if (low.includes('openrouter') || low.includes('gemini') || low.includes('whisper'))
+    return 'OpenRouter is out of credits (AI planning + captions). Add credits at openrouter.ai, then retry.'
+  if (low.includes('submagic'))
+    return 'Submagic plan or usage limit reached. Check your Submagic plan, then retry.'
+  if (low.includes('pexels'))
+    return 'Pexels hourly quota reached (stock B-roll). It resets on the hour — retry then.'
+  if (low.includes('vercel') || low.includes('sandbox'))
+    return 'Render host (Vercel) hit a billing/usage limit. Raise the spend cap, then retry.'
+  return 'A service ran out of credits. Check your provider accounts (OpenRouter, ElevenLabs, Auphonic, Submagic), then retry.'
+}
+
 function trim(msg: string): string {
   // Remotion render errors quote the component props back, which embed fonts as
   // base64 (sometimes raw, not a data: URI) — a wall of bytes that buries the
@@ -97,6 +155,10 @@ function trim(msg: string): string {
   const cleaned = msg
     .replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[font]')
     .replace(/[A-Za-z0-9+/]{100,}={0,2}/g, '[binary]')
+    // Some providers (Auphonic) put HTML links in error text; a card showing
+    // `<a href="...">Add Credits</a>` reads as gibberish. Keep the link TEXT.
+    .replace(/<a\b[^>]*>(.*?)<\/a>/gi, '$1')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
   return cleaned.length > 180 ? cleaned.slice(0, 180) + '…' : cleaned

@@ -330,16 +330,22 @@ export function generateASSCaptions(
 // ── ElevenLabs transcription (local file) ────────────────────────────────────
 // Uses multipart upload — no need to host the file publicly first.
 
+// Transcription with a fallback provider.
+//
+// ElevenLabs Scribe is primary (best word timings), but a drained ElevenLabs
+// quota used to stop EVERY render dead — transcription is mandatory for
+// captions, cuts and B-roll placement, so there is no graceful degradation.
+// (It also reports an exhausted quota as HTTP 401, which reads as a broken
+// key.) OpenRouter's whisper-1 returns real word-level timestamps for roughly
+// $0.006 per 3-minute video and bills through the OpenRouter account we
+// already use, so it costs nothing extra to keep as a safety net.
 export async function transcribeLocalFile(filePath: string): Promise<WordTimestamp[]> {
-  const key = process.env.ELEVENLABS_API_KEY
-  if (!key) throw new Error('ELEVENLABS_API_KEY not set — cannot generate native captions')
-
   console.log(`[caption-renderer] transcribing ${path.basename(filePath)}...`)
 
-  // Upload ONLY the audio track: ElevenLabs never reads the pixels, and the
+  // Upload ONLY the audio track: neither provider reads the pixels, and the
   // audio-only file is ~1MB/min vs 16-58MB for the video — much faster upload,
-  // identical word timestamps. Falls back to the original file if extraction
-  // fails for any reason.
+  // identical word timestamps, and it stays under whisper-1's 25MB cap.
+  // Falls back to the original file if extraction fails for any reason.
   let uploadPath = filePath
   let uploadType = 'video/mp4'
   let uploadName = 'video.mp4'
@@ -355,38 +361,93 @@ export async function transcribeLocalFile(filePath: string): Promise<WordTimesta
     }
   } catch { /* fall back to full video upload */ }
 
+  const fileBuffer = fs.readFileSync(uploadPath)
+  const cleanup = () => {
+    try { if (uploadPath === audioPath) fs.unlinkSync(audioPath) } catch { /* best-effort */ }
+  }
+
+  try {
+    let words: WordTimestamp[]
+    if (process.env.ELEVENLABS_API_KEY) {
+      try {
+        words = await sttElevenLabs(fileBuffer, uploadType, uploadName)
+      } catch (e) {
+        const why = (e as Error).message
+        if (!process.env.OPENROUTER_API_KEY) throw e
+        console.warn(`[caption-renderer] ElevenLabs failed, falling back to OpenRouter Whisper: ${why.slice(0, 200)}`)
+        words = await sttOpenRouterWhisper(fileBuffer, uploadType, uploadName)
+      }
+    } else if (process.env.OPENROUTER_API_KEY) {
+      console.warn('[caption-renderer] ELEVENLABS_API_KEY not set — transcribing with OpenRouter Whisper')
+      words = await sttOpenRouterWhisper(fileBuffer, uploadType, uploadName)
+    } else {
+      throw new Error('No transcription provider configured — set ELEVENLABS_API_KEY or OPENROUTER_API_KEY')
+    }
+    console.log(`[caption-renderer] transcribed ${words.length} words`)
+    return words
+  } finally {
+    cleanup()
+  }
+}
+
+// ElevenLabs Scribe — primary.
+async function sttElevenLabs(fileBuffer: Uint8Array, uploadType: string, uploadName: string): Promise<WordTimestamp[]> {
   // Native FormData + Blob, not the npm form-data package — fetch() doesn't
   // reliably serialize form-data's stream-based body for real file uploads.
-  const fileBuffer = fs.readFileSync(uploadPath)
   const form = new globalThis.FormData()
   form.append('model_id', 'scribe_v1')
   form.append('timestamps_granularity', 'word')
   form.append('language_code', 'en')
-  form.append('file', new Blob([fileBuffer], { type: uploadType }), uploadName)
+  form.append('file', new Blob([new Uint8Array(fileBuffer)], { type: uploadType }), uploadName)
 
   const res = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
     method: 'POST',
-    headers: { 'xi-api-key': key },
+    headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY! },
     body: form,
     signal: AbortSignal.timeout(180_000),
   })
-
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`ElevenLabs transcription failed (${res.status}): ${err.slice(0, 300)}`)
   }
-
   const data = await res.json()
-  const words: WordTimestamp[] = (data.words ?? [])
+  return (data.words ?? [])
     .filter((w: { text: string; start: number; end: number }) => w.text?.trim())
-    .map((w: { text: string; start: number; end: number }) => ({
-      text: w.text,
+    .map((w: { text: string; start: number; end: number }) => ({ text: w.text, start: w.start, end: w.end }))
+}
+
+// OpenRouter whisper-1 — fallback. Same word-level timestamps, different field
+// name (`word` rather than `text`), and it needs verbose_json to return them.
+async function sttOpenRouterWhisper(fileBuffer: Uint8Array, uploadType: string, uploadName: string): Promise<WordTimestamp[]> {
+  if (fileBuffer.byteLength > 25 * 1024 * 1024) {
+    throw new Error(`OpenRouter Whisper: audio is ${(fileBuffer.byteLength / 1048576).toFixed(1)}MB, over the 25MB limit`)
+  }
+  const form = new globalThis.FormData()
+  form.append('model', 'openai/whisper-1')
+  form.append('response_format', 'verbose_json')
+  form.append('timestamp_granularities[]', 'word')
+  form.append('language', 'en')
+  form.append('file', new Blob([new Uint8Array(fileBuffer)], { type: uploadType }), uploadName)
+
+  const res = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(180_000),
+  })
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`OpenRouter Whisper transcription failed (${res.status}): ${err.slice(0, 300)}`)
+  }
+  const data = await res.json()
+  const words = (data.words ?? [])
+    .filter((w: { word?: string; text?: string }) => (w.word ?? w.text ?? '').trim())
+    .map((w: { word?: string; text?: string; start: number; end: number }) => ({
+      text: (w.word ?? w.text)!,
       start: w.start,
       end: w.end,
     }))
-
-  try { if (uploadPath === audioPath) fs.unlinkSync(audioPath) } catch { /* best-effort */ }
-  console.log(`[caption-renderer] transcribed ${words.length} words`)
+  if (!words.length) throw new Error('OpenRouter Whisper returned no word timestamps')
   return words
 }
 
