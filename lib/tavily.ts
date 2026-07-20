@@ -200,9 +200,9 @@ export async function searchNicheNews(topics: string): Promise<{ title: string; 
     })
     if (!res.ok) return []
     const data = await res.json()
-    return (data.results || []).slice(0, 8).map((r: any) => ({
-      title: r.title as string,
-      snippet: ((r.content as string) || '').slice(0, 220),
+    return (data.results || []).slice(0, 8).map((r: { title?: string; content?: string }) => ({
+      title: r.title ?? '',
+      snippet: (r.content ?? '').slice(0, 220),
     }))
   } catch {
     return []
