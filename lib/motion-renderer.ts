@@ -2215,7 +2215,17 @@ async function renderRemotionEdit(
         cachedWords = null
       }
     }
-    if (cachedWords) console.log(`[motion-renderer] reusing ${cachedWords.length} shared word timings (no second transcription)`)
+    // WHAT HAS PREP ALREADY DONE? Same checklist the Submagic launcher prints,
+    // for the same reason: every ✗ here is work this variant is about to pay
+    // for again that the job already bought once. Six variants silently
+    // re-cleaning and re-transcribing the same audio is the expensive failure
+    // this pipeline is built to avoid, so it is stated out loud per render
+    // rather than left to be inferred from three scattered log lines.
+    console.log(
+      `[motion-renderer] ${variantId} checklist — clean audio ${sharedClean ? '✓ reused' : '✗ cleaning here (extra paid call)'} | ` +
+      `transcript ${cachedWords ? `✓ reused (${cachedWords.length} words)` : '✗ transcribing here (extra paid call)'} | ` +
+      `footage profile ${profile ? '✓ reused' : '✗ analysing here'}`,
+    )
     // These read workPath and don't depend on each other — run them together
     // instead of serially (overlaps the slow Scribe call with the ffmpeg pass).
     const [words, silences, dimensions] = await Promise.all([
