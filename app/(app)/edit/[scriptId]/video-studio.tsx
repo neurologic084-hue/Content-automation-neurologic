@@ -40,14 +40,18 @@ const BROLL_OPTIONS: { value: BrollMode; label: string; hint: string }[] = [
   { value: 'manual', label: 'Slider', hint: 'Pick the exact amount' },
   { value: 'none',   label: 'None',   hint: 'Talking head only' },
 ]
+
+// What B-roll is allowed to come from. Only meaningful once she has CONFIRMED
+// her own clips — before that every option would resolve to stock anyway.
+type BrollSourceUi = 'both' | 'custom' | 'stock'
 // Where cutaways come from, once she has supplied her own clips. Mirrors
 // BrollSource in lib/broll.ts (kept inline so no server module reaches the
 // client bundle). Only shown when a folder/link is actually provided.
 type BrollSource = 'both' | 'custom' | 'stock'
 const BROLL_SOURCE_OPTIONS: { value: BrollSource; label: string; hint: string }[] = [
-  { value: 'both',   label: 'Mine + stock', hint: 'Your clips first, stock fills the rest' },
-  { value: 'custom', label: 'Only mine',    hint: 'Your clips only' },
-  { value: 'stock',  label: 'Only stock',   hint: 'Ignore my clips this time' },
+  { value: 'both',   label: 'Smart',     hint: 'Your clips + AI B-roll' },
+  { value: 'custom', label: 'Only mine', hint: 'Your clips only, no AI' },
+  { value: 'stock',  label: 'Only AI',   hint: 'Ignore my clips this time' },
 ]
 
 const DEFAULT_BROLL_PERCENT = 25
@@ -76,6 +80,11 @@ const TOOL_COLOR: Record<string, { bg: string; text: string; label: string }> = 
 export function VideoStudio({ script, existingJobId }: Props) {
   const [driveUrl, setDriveUrl] = useState('')
   const [customBrollText, setCustomBrollText] = useState('')
+  // B-roll clips only count once CONFIRMED: we expand the folder up front and
+  // report what was actually found, so a mistyped or unshared link is caught
+  // here instead of silently producing a render with no B-roll.
+  const [brollCheck, setBrollCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; clips?: number; error?: string }>({ state: 'idle' })
+  const brollConfirmed = brollCheck.state === 'ok'
   const [musicMode, setMusicMode] = useState<MusicMode>('smart')
   const [gradeMode, setGradeMode] = useState<GradeMode>('smart')
   const [brollMode, setBrollMode] = useState<BrollMode>('smart')
@@ -198,7 +207,9 @@ export function VideoStudio({ script, existingJobId }: Props) {
         brollMode,
         brollPercent: brollMode === 'manual' ? brollPercent : null,
         brollSource,
-        customBroll: customBrollText.split('\n').map(l => l.trim()).filter(Boolean),
+        // Unconfirmed links are NOT sent: confirming is what proves the folder
+        // is readable, so an unchecked paste can't silently become a no-B-roll render.
+        customBroll: brollConfirmed ? customBrollText.split('\n').map(l => l.trim()).filter(Boolean) : [],
       }),
     })
     const data = await res.json()
@@ -235,6 +246,24 @@ export function VideoStudio({ script, existingJobId }: Props) {
     // A never-started variant is a plain "Start" — nothing to lose, no prompt.
     if (!force && v?.status === 'pending') return handleStartVariant(variantId, force)
     setConfirmRetry({ id: variantId, force, label: v?.name ?? variantId })
+  }
+
+  async function confirmBroll() {
+    const links = customBrollText.split('\n').map(l => l.trim()).filter(Boolean)
+    if (!links.length) return
+    setBrollCheck({ state: 'checking' })
+    try {
+      const res = await fetch('/api/video/broll-check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ links }),
+      })
+      const data = await res.json()
+      setBrollCheck(res.ok
+        ? { state: 'ok', clips: data.clips }
+        : { state: 'error', error: data.error ?? 'Could not read those links.' })
+    } catch {
+      setBrollCheck({ state: 'error', error: 'Could not reach the server. Try again.' })
+    }
   }
 
   async function handleStartVariant(variantId: string, force = false) {
@@ -426,16 +455,41 @@ export function VideoStudio({ script, existingJobId }: Props) {
             ) : (
               <>
                 <textarea
-                  placeholder={"Paste a Google Drive FOLDER link with your B-roll clips (max 12; or file links, one per line).\nWhen provided, every variant uses these instead of stock footage — each clip is placed where it fits what you're saying."}
+                  placeholder={"Paste a Google Drive FOLDER link with your B-roll clips (max 12; or file links, one per line), then press Confirm."}
                   value={customBrollText}
-                  onChange={e => setCustomBrollText(e.target.value)}
+                  onChange={e => { setCustomBrollText(e.target.value); setBrollCheck({ state: 'idle' }) }}
                   rows={3}
                   className="w-full px-4 py-3 rounded-xl border border-[#E4E4E0] text-sm outline-none resize-y"
                   style={{ background: '#FAFAFA' }}
                   onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
                   onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
                 />
-                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to all six variants — Calm &amp; Clean, Aesthetic, Creator Bold, Concept Pro, Viral Energy, Cinematic. Leave empty to use auto-picked stock B-roll.</p>
+                {/* Confirm proves the folder is readable BEFORE a job starts.
+                    An unshared or mistyped link used to surface minutes into
+                    prep, as a render that silently contained no B-roll. */}
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={confirmBroll}
+                    disabled={!customBrollText.trim() || brollCheck.state === 'checking'}
+                    className="px-4 py-2 rounded-xl text-[13px] font-semibold cursor-pointer disabled:opacity-40 transition-all"
+                    style={{ background: brollConfirmed ? '#DCFCE7' : '#F4F3F0', color: brollConfirmed ? '#16A34A' : '#18181B' }}
+                  >
+                    {brollCheck.state === 'checking' ? 'Checking…' : brollConfirmed ? '✓ Confirmed' : 'Confirm B-roll'}
+                  </button>
+                  {brollConfirmed && (
+                    <span className="text-[12px] font-medium text-[#16A34A]">
+                      {brollCheck.clips} clip{brollCheck.clips === 1 ? '' : 's'} found
+                    </span>
+                  )}
+                  {brollCheck.state === 'error' && (
+                    <span className="text-[12px] text-[#EF4444]">{brollCheck.error}</span>
+                  )}
+                </div>
+                {!brollConfirmed && customBrollText.trim() && brollCheck.state !== 'error' && (
+                  <p className="text-[11px] text-[#A1A1AA] mt-1.5">Press Confirm to use these clips — unconfirmed links are ignored.</p>
+                )}
+                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to all six variants. Leave empty to use auto-picked stock B-roll.</p>
               </>
             )}
           </div>
@@ -548,9 +602,9 @@ export function VideoStudio({ script, existingJobId }: Props) {
             <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to every variant. Smart reads your footage and picks the amount that fits each style; None renders a pure talking head.</p>
 
             {/* Source picker — only meaningful once she has supplied clips. */}
-            {customBrollText.trim() && brollMode !== 'none' && (
+            {brollConfirmed && brollMode !== 'none' && (
               <div className="mt-3">
-                <p className="text-xs font-semibold text-[#71717A] mb-1.5">Which B-roll</p>
+                <p className="text-xs font-semibold text-[#71717A] mb-1.5">Which B-roll to use</p>
                 <div className="flex flex-wrap gap-2">
                   {BROLL_SOURCE_OPTIONS.map(opt => {
                     const active = brollSource === opt.value
