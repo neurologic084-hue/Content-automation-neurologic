@@ -109,6 +109,8 @@ const PLATFORM_LABEL: Record<string, string> = {
 // growth visible before the bill does. Amber inside the last GB.
 function StorageMeter() {
   const [usage, setUsage] = useState<{ usedGb: number; quotaGb: number; leftGb: number; warning: boolean } | null>(null)
+  const [clearing, setClearing] = useState(false)
+  const [cleared, setCleared] = useState<string | null>(null)
 
   useEffect(() => {
     fetch('/api/storage/usage')
@@ -116,6 +118,28 @@ function StorageMeter() {
       .then(d => { if (typeof d.usedGb === 'number') setUsage(d) })
       .catch(() => { /* meter is informational — fail quiet */ })
   }, [])
+
+  async function clearWorkingFiles() {
+    if (clearing) return
+    if (!confirm(
+      'Delete the working files from finished videos?\n\n'
+      + 'Your finished videos are NOT deleted — only the raw footage and temporary files used to make them.\n\n'
+      + 'The one downside: re-editing an old video will have to re-download and re-prepare it, which takes longer.'
+    )) return
+    setClearing(true)
+    setCleared(null)
+    try {
+      const res = await fetch('/api/storage/cleanup', { method: 'POST' })
+      const d = await res.json()
+      setCleared(d.note ?? `Freed ${d.freedGb} GB from ${d.jobs} finished ${d.jobs === 1 ? 'video' : 'videos'}.`)
+      const fresh = await fetch('/api/storage/usage').then(r => r.json())
+      if (typeof fresh.usedGb === 'number') setUsage(fresh)
+    } catch {
+      setCleared('Could not clear storage just now. Try again in a moment.')
+    } finally {
+      setClearing(false)
+    }
+  }
 
   if (!usage) return <p className="text-[13px] text-[#9B9B97]">Checking storage…</p>
   const pct = Math.min(100, Math.round((usage.usedGb / usage.quotaGb) * 100))
@@ -133,18 +157,37 @@ function StorageMeter() {
           {usage.leftGb} GB left
         </span>
       </div>
+      <p className="text-[12px] text-[#71717A] leading-relaxed">
+        To free up space, delete old videos you no longer need from the{' '}
+        <a href="/library" className="underline font-medium text-[#18181B]">Library</a>, or clear the
+        leftover working files below. Space also grows on its own if you&apos;d rather{' '}
+        <a
+          href="https://dash.cloudflare.com/?to=/:account/r2/plans"
+          target="_blank"
+          rel="noreferrer"
+          className="underline font-medium text-[#18181B]"
+        >
+          upgrade the storage plan
+        </a>.
+      </p>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={clearWorkingFiles}
+          disabled={clearing}
+          className="px-4 py-2 rounded-xl border border-[#E4E4E0] text-[13px] font-semibold text-[#18181B] hover:bg-[#FAFAF9] disabled:opacity-60 transition-colors"
+        >
+          {clearing ? 'Clearing…' : 'Clear working files'}
+        </button>
+        <span className="text-[11px] text-[#A1A1AA]">Keeps every finished video — removes only the raw footage used to make them.</span>
+      </div>
+
+      {cleared && <p className="text-[12px] text-[#16A34A] font-medium">{cleared}</p>}
+
       {usage.warning && (
         <p className="text-[12px] text-[#D97706] leading-relaxed">
           Storage is nearly at its budget. Nothing will break — space grows automatically and
-          billing adjusts on its own. Deleting old videos from the library keeps the bill flat, or{' '}
-          <a
-            href="https://dash.cloudflare.com/?to=/:account/r2/plans"
-            target="_blank"
-            rel="noreferrer"
-            className="underline font-semibold"
-          >
-            review the storage plan here
-          </a>.
+          billing adjusts on its own.
         </p>
       )}
     </div>
@@ -669,7 +712,7 @@ export default function SettingsPage() {
         <Section
           num="09"
           title="Storage"
-          description="Space used by your videos and their working files. It grows automatically when needed — this keeps the growth visible."
+          description="Space used by your videos and the files used to make them. It grows automatically when needed — this keeps the growth visible so nothing surprises you."
         >
           <StorageMeter />
         </Section>
