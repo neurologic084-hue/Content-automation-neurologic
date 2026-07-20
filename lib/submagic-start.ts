@@ -13,7 +13,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile, SHARED_CUT_CLEAN_NAME } from './motion-renderer'
+import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile, refreshPrecutForRetry, SHARED_CUT_CLEAN_NAME } from './motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   resolveCaptionTemplate,
@@ -93,7 +93,7 @@ async function pollSubmagicUntilDone(
   console.warn(`[submagic-start] ${jobId}:${variantId} still rendering after ${Math.round(STALE_MS / 60000)}m of polling — leaving finalisation to the status poll / stale sweep`)
 }
 
-async function submitVariant(db: SupabaseClient, jobId: string, variantId: string): Promise<void> {
+async function submitVariant(db: SupabaseClient, jobId: string, variantId: string, force = false): Promise<void> {
   const { data: job } = await db.from('video_jobs').select('*').eq('id', jobId).single()
   if (!job) throw new Error(`job ${jobId} not found`)
 
@@ -111,6 +111,15 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
     .single()
 
   const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
+
+  // A RETRY means "do this properly with what the app knows now". v4-v6 get
+  // that for free — they cut in-render, so every rule change applies on the
+  // next run. v1-v3 render from a pre-cut FILE, so without this an old job
+  // keeps shipping the cut it was given when it was created, however much the
+  // editing rules have improved since. Rebuild it first; the clean, the
+  // transcript and the analysis all self-skip, so this is a local re-encode
+  // and no paid calls.
+  if (force) await refreshPrecutForRetry(jobId, job.source_drive_url as string)
 
   // Submagic always gets the compressed, normalized copy -- never the raw
   // Drive file. Cached per job, so every Submagic variant on this job
@@ -339,7 +348,7 @@ export async function startSubmagicVariantTask(jobId: string, variantId: string,
         return
       }
     }
-    await submitVariant(db, jobId, variantId)
+    await submitVariant(db, jobId, variantId, force)
   } catch (e) {
     console.error(`[submagic-start] ${jobId}:${variantId} failed:`, (e as Error).message)
     await patchVariant(db, jobId, variantId, { status: 'failed', error: explainFailure(e), progress: null })

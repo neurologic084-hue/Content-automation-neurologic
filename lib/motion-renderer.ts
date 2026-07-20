@@ -702,6 +702,14 @@ export async function prepareJobSource(
   jobId: string,
   sourceUrl: string,
   onProgress?: ProgressCallback,
+  // Rebuild the pre-cut even when one already exists. Set by an explicit
+  // RETRY: the cut is the one prep artifact that bakes in editing rules
+  // (silence, fillers, repeated takes) and the audio those rules ran on, so a
+  // job prepped weeks ago would otherwise keep re-rendering against the old
+  // behaviour no matter how much the code improved. Everything genuinely
+  // expensive — the clean, the transcript, the clip analysis — still skips,
+  // so this costs one local re-encode and no paid calls.
+  opts: { forceRecut?: boolean } = {},
 ): Promise<{ localPath: string; cutPath: string | null }> {
   const outDir = rendersDir(jobId)
   const localPath = await getLocalCompressedSource(jobId, sourceUrl, outDir, onProgress)
@@ -789,9 +797,10 @@ export async function prepareJobSource(
     // ALREADY DONE? Re-running prep (to repair a job, or to pick up a fix)
     // must not redo finished steps: this one costs a transcription and a full
     // re-encode. A cut already in R2 is the same cut.
-    const cutExists = process.env.R2_PUBLIC_URL
+    const cutExists = !opts.forceRecut && process.env.R2_PUBLIC_URL
       ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${cutName}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
       : false
+    if (opts.forceRecut) console.log('[prep] retry — rebuilding the pre-cut with the current editing rules')
     if (cutExists) {
       console.log('[prep] ✓ pre-cut source already built — skipping')
       submagicCutPath = fs.existsSync(cutPath) ? cutPath : null
@@ -3091,6 +3100,18 @@ async function analyzeCustomBrollForJob(jobId: string): Promise<void> {
 // Downloads + compresses the job's footage and uploads it to R2, writing prep
 // progress onto the pending variants; marks the whole job failed if the
 // footage can't be fetched.
+/** Brings an EXISTING job's pre-cut up to date with the current editing rules.
+ *  Used by a retry: cheap by construction (every expensive step self-skips),
+ *  and best-effort — a failure here just means the render proceeds against the
+ *  cut it already had, which is what it would have done anyway. */
+export async function refreshPrecutForRetry(jobId: string, sourceUrl: string): Promise<void> {
+  try {
+    await prepareJobSource(jobId, sourceUrl, undefined, { forceRecut: true })
+  } catch (e) {
+    console.warn(`[prep] retry re-cut failed for ${jobId.slice(0, 8)} — using the existing cut:`, (e as Error).message)
+  }
+}
+
 export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
   const db = supabaseAdmin()
 
