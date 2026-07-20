@@ -70,7 +70,12 @@ jobs:
               width: 1080, height: 1920, fps: 30,
               segments: [{ srcStart: 0, duration: secs, frame: "full" }],
               pages, broll: [], transitionStyle: "flash", captionStyle: "glow",
-              tag: "DIAG", grade: "warm", hookSpotlight: false, handheld: false,
+              // tag must be the {line1, start, durationSec} shape — as a bare
+              // string ShortEdit computes Sequence from = tag.start * fps = NaN
+              // and the render dies in seconds, so the diag never tested the
+              // engine at all (both prior runs failed here).
+              tag: { line1: "DIAG", start: Math.max(1, secs * 0.55), durationSec: 3 },
+              grade: "warm", hookSpotlight: false, handheld: false,
               splits: [], sfx: [],
             };
             require("fs").writeFileSync("diag-props.json", JSON.stringify(props));
@@ -79,10 +84,14 @@ jobs:
 
       - name: Render (the actual test)
         run: |
+          # pipefail: without it `render | tail` reports tail's exit code, so a
+          # dead render still turned the step green — both prior diag runs
+          # actually FAILED while the workflow said success.
+          set -o pipefail
           cd remotion
           time npx remotion render src/Root.tsx ShortEdit /tmp/diag-out.mp4 \
             --props=diag-props.json --codec=h264 --crf=23 \
-            --timeout=300000 --concurrency=2 --log=verbose 2>&1 | tail -120
+            --timeout=300000 --concurrency=2 --log=verbose 2>&1 | tail -200
 
       - name: Result
         if: always()
