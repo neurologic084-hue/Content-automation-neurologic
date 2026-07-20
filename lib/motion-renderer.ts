@@ -635,6 +635,23 @@ function isConstrainedRenderHost(): boolean {
   return process.env.SANDBOX === '1' || process.env.GITHUB_ACTIONS === 'true'
 }
 
+// How many Chrome tabs the render may use, MEASURED from the machine instead of
+// hardcoded per host type. Each tab holds the composition, the embedded font
+// bundle and decoded frames, so tabs are the memory hog; ffmpeg and the
+// compositor need cores of their own alongside them.
+//
+// This replaces a fixed 2-on-CI / 4-on-laptop guess that had to be re-tuned by
+// hand whenever the render host changed — and which silently applied the
+// laptop profile on GitHub for weeks because the host check only knew about
+// Vercel. Deriving it means a bigger runner just goes faster on its own.
+function renderConcurrency(): number {
+  const cores = Math.max(1, os.cpus().length)
+  const gb = os.totalmem() / 1024 ** 3
+  const byCpu = cores - 2               // leave room for ffmpeg + compositor
+  const byMem = Math.floor(gb / 2.5)    // ~2.5GB of headroom per tab
+  return Math.max(1, Math.min(byCpu, byMem, 6))
+}
+
 async function finishVariant(
   jobId: string,
   variantId: string,
@@ -1497,11 +1514,12 @@ interface ClipCandidate {
 // winners. A clip that fails is skipped, never fatal.
 async function collectCustomBrollCandidates(
   jobId: string,
-  entries: { url: string; description?: string | null }[],
+  entries: { url: string; description?: string | null; windows?: { offset: number; seconds: number; description: string }[] }[],
   cacheDir: string,
 ): Promise<ClipCandidate[]> {
   fs.mkdirSync(cacheDir, { recursive: true })
   const candidates: ClipCandidate[] = []
+  let learnedWindows = false
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
     try {
@@ -1517,6 +1535,17 @@ async function collectCustomBrollCandidates(
       // Not fixed on purpose (prod is isolated); variant-scope this name if inline
       // parallel rendering ever becomes a supported path.
       const rawPath = path.join(cacheDir, `custom-${jobId.slice(0, 8)}-${i}.raw.mp4`)
+
+      // FAST PATH: source prep already worked out this clip's windows and what
+      // each one shows. Reuse them — no download, no ffmpeg sample, no Gemini.
+      if (entry.windows?.length) {
+        for (const w of entry.windows) {
+          candidates.push({ entryIndex: i, rawPath, offset: w.offset, duration: w.seconds, description: w.description })
+        }
+        console.log(`[motion-renderer] clip ${i}: reusing ${entry.windows.length} cached window(s)`)
+        continue
+      }
+
       if (!fs.existsSync(rawPath)) {
         // Prefer the normalized R2 copy from a previous prep — faster and immune
         // to Drive's confirm-page quirks on re-renders.
@@ -1551,13 +1580,10 @@ async function collectCustomBrollCandidates(
         } finally {
           try { fs.unlinkSync(samplePath) } catch { /* best-effort */ }
         }
-        candidates.push({
-          entryIndex: i,
-          rawPath,
-          offset,
-          duration: seconds,
-          description: description || entry.description?.trim() || `creator clip ${i + 1}`,
-        })
+        const finalDescription = description || entry.description?.trim() || `creator clip ${i + 1}`
+        candidates.push({ entryIndex: i, rawPath, offset, duration: seconds, description: finalDescription })
+        ;(entry.windows ??= []).push({ offset, seconds, description: finalDescription })
+        learnedWindows = true
         console.log(
           `[motion-renderer] candidate ${i}.${w}: ${offset.toFixed(1)}-${(offset + seconds).toFixed(1)}s of ${sourceDuration.toFixed(1)}s — "${description.slice(0, 70)}"`,
         )
@@ -1565,6 +1591,14 @@ async function collectCustomBrollCandidates(
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
     }
+  }
+  // Persist what we learned so sibling variants (and any retry) skip straight to
+  // the fast path. Best-effort: losing the cache only costs the work again.
+  if (learnedWindows) {
+    try {
+      await supabaseAdmin().from('video_jobs').update({ custom_broll: entries }).eq('id', jobId)
+      console.log('[motion-renderer] cached clip windows on the job for reuse')
+    } catch { /* cache only */ }
   }
   return candidates
 }
@@ -2076,35 +2110,60 @@ async function renderRemotionEdit(
       // compositor cache cap. Fonts are embedded (data URIs, see fonts-data.ts)
       // so they never hit the server at all.
       //
-      // Locally, a HEAVY composition (v7 dense motion: a dozen OffthreadVideo
-      // B-roll covers + collage scenes + 18 fonts) oversubscribes headless
-      // Chrome on a busy machine (user apps + dev server) — every tab races to
-      // load the same fonts/assets through the dev server, font loading crawls
-      // past the old 240s wall, and the OffthreadVideo compositor drops
-      // connections ("Request closed") under the memory pressure. Fewer tabs
-      // (concurrency 4) each get enough headroom to load fonts and decode video.
-      // Constrained hosts (Sandbox VM + GitHub runner) share the tab/cache caps;
-      // only the Sandbox additionally needs the glibc-patched compositor, since
-      // GitHub runners are Ubuntu and their stock compositor is fine.
+      // Tab count is MEASURED from the machine (renderConcurrency) rather than
+      // hardcoded per host — a bigger runner now just goes faster on its own.
+      // Only the Sandbox needs the glibc-patched compositor; GitHub runners are
+      // Ubuntu and their stock one is fine.
       const constrained = isConstrainedRenderHost()
-      const sandboxFlags = constrained
-        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2` +
-          (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
-        : ' --concurrency=4'
-      // 600s dev machine / 900s constrained host delayRender: headless-Chrome
-      // startup + that first font/asset load need real room on a small box
-      // before the render is declared dead.
-      const renderTimeout = constrained ? 900000 : 600000
-      await run(
-        // Generous delayRender timeout: headless-Chrome startup + asset loads
-        // can crawl on a busy/constrained machine and fail renders that would
-        // otherwise succeed. sandboxFlags carries the glibc-patched compositor
-        // (--binaries-directory), concurrency cap, and cache cap; fonts are
-        // embedded (data URIs) so they never fetch from the render server.
-        `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --crf=19 --timeout=${renderTimeout}${sandboxFlags}`,
-        1_500_000,
+      const concurrency = renderConcurrency()
+
+      // TIMERS. There were three stacked ones and the tightest silently killed
+      // healthy renders mid-way:
+      //   1. --timeout  : Remotion's delayRender budget, was 10min then 15min.
+      //   2. run(...)   : hard kill of the render subprocess, was 25min.
+      //   3. the workflow's timeout-minutes (see render-task.yml).
+      // A longer client video legitimately needs more than the old ceilings, so
+      // they are now generous. Nothing is lost by waiting: a genuinely stuck
+      // render still ends, just later, and the stale-job sweep catches it.
+      const renderTimeout = 45 * 60_000        // delayRender budget
+      const renderHardKill = 70 * 60_000       // subprocess ceiling, above ^
+
+      // Efficiency: veryfast + crf 21 encodes markedly quicker than the default
+      // for output that is visually indistinguishable at 1080x1920 social sizes,
+      // and a JPEG frame format cuts per-frame serialisation cost. Together with
+      // the measured concurrency this is where the real speedup comes from.
+      const perfFlags =
+        ` --concurrency=${concurrency}` +
+        ` --x264-preset=veryfast --crf=21 --image-format=jpeg --jpeg-quality=90` +
+        ` --offthreadvideo-cache-size-in-bytes=${constrained ? 536870912 : 1073741824}` +
+        (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
+
+      console.log(
+        `[motion-renderer] rendering ${variantId} with ${concurrency} tab(s) ` +
+        `on ${os.cpus().length} core / ${(os.totalmem() / 1024 ** 3).toFixed(1)}GB host ` +
+        `(delayRender budget ${renderTimeout / 60000}min)`,
       )
+
+      // One retry, at half the tabs. A render that dies from resource pressure
+      // usually survives with fewer tabs, and retrying once beats failing the
+      // variant outright — but only once, so a genuinely broken render fails
+      // fast instead of burning the runner twice over.
+      const renderCmd = (tabs: number) =>
+        `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
+        `--props="${propsPath}" --codec=h264 --timeout=${renderTimeout}` +
+        perfFlags.replace(`--concurrency=${concurrency}`, `--concurrency=${tabs}`)
+
+      try {
+        await run(renderCmd(concurrency), renderHardKill)
+      } catch (e) {
+        const halved = Math.max(1, Math.floor(concurrency / 2))
+        if (halved === concurrency) throw e
+        console.warn(
+          `[motion-renderer] render failed on ${concurrency} tab(s) (${(e as Error).message.slice(0, 160)}) — ` +
+          `retrying ONCE at ${halved}`,
+        )
+        await run(renderCmd(halved), renderHardKill)
+      }
     })
     if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
 

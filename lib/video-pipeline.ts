@@ -32,6 +32,13 @@ export interface CustomBrollEntry {
   // the wrong words, or past the end of the video, which Submagic rejects.
   // Absent on rows written before this was tracked; treated as 'full'.
   placementBasis?: 'cut' | 'full'
+  // Candidate windows computed ONCE per job during source prep: where each
+  // usable moment sits inside the clip and what Gemini saw there. Cached here
+  // because every Motion Lab variant used to redo the whole thing — the full
+  // clip was re-downloaded, re-sampled and re-described for v4, v5 and v6
+  // independently, roughly 4x the work (and the Gemini calls) for byte-identical
+  // results. Variants now read these and only cut the windows they actually use.
+  windows?: { offset: number; seconds: number; description: string }[]
 }
 
 export interface SubmagicPreset {

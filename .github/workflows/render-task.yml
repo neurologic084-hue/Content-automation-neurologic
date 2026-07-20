@@ -12,10 +12,12 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    # The Remotion render alone is allowed 25 min (see run() in motion-renderer),
-    # on top of checkout + npm ci + browser install + footage prep. 30 min killed
-    # renders that were still healthy; 45 leaves real headroom.
-    timeout-minutes: 45
+    # Outermost of the three render timers (the other two live in
+    # motion-renderer: the delayRender budget and the subprocess hard kill).
+    # It must sit ABOVE them or it becomes the silent killer instead — which is
+    # exactly how healthy long renders were dying. Longer client videos legitimately
+    # need the room; unused minutes cost nothing on a public repo.
+    timeout-minutes: 120
     steps:
       # ref lets a dispatch render from a branch instead of main — used for
       # diagnostic renders (e.g. bisecting a regression on the real runner
