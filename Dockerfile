@@ -56,13 +56,25 @@ RUN cd remotion && npx remotion browser ensure
 
 # ── build ────────────────────────────────────────────────────────────────────
 FROM base AS build
+# NEXT_PUBLIC_* values are BAKED INTO THE CLIENT BUNDLE at build time, and a
+# Dockerfile build receives Railway's service variables ONLY through declared
+# build args — nothing is injected implicitly. Without these ARGs the image
+# builds green, the server half works (runtime env exists), and every
+# browser-side Supabase call silently has no URL: login and every data page
+# spin forever. That exact failure shipped on 2026-07-20; these lines are why
+# it can't again.
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
+ARG NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
+    NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY \
+    NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/remotion/node_modules ./remotion/node_modules
 COPY . .
-# next build reads NEXT_PUBLIC_* at build time. Railway injects service
-# variables into the build, so nothing extra is needed here — but a missing
-# NEXT_PUBLIC_SUPABASE_URL will surface as a runtime auth failure, not a build
-# error, so check it is set on the service before trusting a green build.
+# Loud, not fatal: a local no-args build is legitimate for smoke tests, but a
+# deploy built without the URL is guaranteed-broken in the browser.
+RUN test -n "$NEXT_PUBLIC_SUPABASE_URL" || echo "!!!!! NEXT_PUBLIC_SUPABASE_URL is EMPTY — the client bundle will not work. On Railway, set the service variables BEFORE building. !!!!!"
 RUN npm run build
 
 # ── runtime ──────────────────────────────────────────────────────────────────
