@@ -12,11 +12,12 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    # Outermost of the three render timers (the other two live in
-    # motion-renderer: the delayRender budget and the subprocess hard kill).
-    # It must sit ABOVE them or it becomes the silent killer instead — which is
-    # exactly how healthy long renders were dying. Longer client videos legitimately
-    # need the room; unused minutes cost nothing on a public repo.
+    # Outermost of the three render timers; the other two live in
+    # motion-renderer (the delayRender budget, which must outlast the WHOLE
+    # render rather than just page load, and the subprocess hard kill). This one
+    # must sit ABOVE both or it becomes the silent killer itself — which is
+    # exactly how healthy long renders were dying. 4K sources are now downscaled
+    # before render, so this is a runaway guard, not a working limit.
     timeout-minutes: 120
     steps:
       # ref lets a dispatch render from a branch instead of main — used for

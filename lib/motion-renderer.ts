@@ -288,6 +288,35 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
   return outputPath
 }
 
+// The Remotion path's work copy of the source. compressSourceFile keeps the
+// filmed resolution (the Submagic deliverables should stay whatever shape the
+// creator shot), but the ShortEdit composition sizes itself to THIS file — so
+// a 4K portrait source (2160x3840 iPhone HEVC) made headless Chrome decode,
+// render, and encode a full 4K composition on the 4-core Actions runner. That
+// starved the page so badly the first delayRender (a font) blew its 900s
+// budget: every 4K client job died with "Loading font EditCapBase…" while
+// every 1080p job passed (2026-07-20, incl. a B-roll-mode-none render — the
+// footage, not the B-roll, was the load). The delivered short is 1080p-class
+// anyway, so capping the SHORT edge at 1080 (2160x3840 -> 1080x1920,
+// 3840x2160 -> 1920x1080) is visually lossless for the output and cuts the
+// render work ~4x. Aspect ratio and framing untouched; at or under the cap
+// it's a plain copy, exactly the old behavior.
+async function stageRenderWorkCopy(compressedPath: string, workPath: string): Promise<void> {
+  const { width, height } = await probeVideoDimensions(compressedPath)
+  if (Math.min(width, height) <= 1080) {
+    fs.copyFileSync(compressedPath, workPath)
+    return
+  }
+  // -2 keeps the scaled edge even for yuv420p; audio is already AAC — copy it.
+  const filter = height >= width ? 'scale=1080:-2' : 'scale=-2:1080'
+  console.log(`[motion-renderer] work copy: downscaling ${width}x${height} source (${filter}) — comp output is 1080p-class`)
+  await run(
+    `ffmpeg -y -i "${compressedPath}" -vf ${filter} -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -c:a copy -movflags +faststart "${workPath}"`,
+    600_000,
+  )
+  if (!fs.existsSync(workPath)) throw new Error('Downscaling the render work copy produced no output')
+}
+
 // Ensures the shared compressed local copy exists for this job -- downloads
 // raw if needed, compresses if needed (file size only, original resolution/
 // aspect ratio untouched). Both steps are idempotent (check for an existing
@@ -348,12 +377,23 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   // Prefer the pre-cut clip when it exists: our planner already trimmed it, so
   // Submagic only styles. Checked BEFORE the in-process cache so the cut wins
   // even in a process that earlier cached the uncut compressed URL.
+  // Retried: this HEAD decides WHICH video Submagic receives, and downstream
+  // custom B-roll placements are only valid for the matching timeline
+  // (placementBasis) — a single transient flake here would silently swap the
+  // source and drop the creator's clips.
   if (process.env.R2_PUBLIC_URL) {
     const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`
-    try {
-      const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
-      if (head.ok) return cutUrl
-    } catch { /* no cut clip (or unreachable) — fall back to the compressed source */ }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+        if (head.ok) return cutUrl
+        break // definitive answer (404 etc.): no cut clip — use the compressed source
+      } catch {
+        // Network flake or timeout — retry briefly before concluding there is
+        // no cut clip.
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1_500))
+      }
+    }
   }
 
   const cached = submagicSourceCache.get(jobId)
@@ -1664,7 +1704,7 @@ async function renderRemotionEdit(
     await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
     const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
     const workPath = path.join(outDir, `${variantId}_isolated.mp4`)
-    fs.copyFileSync(compressedPath, workPath)
+    await stageRenderWorkCopy(compressedPath, workPath)
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
@@ -2117,25 +2157,37 @@ async function renderRemotionEdit(
       const constrained = isConstrainedRenderHost()
       const concurrency = renderConcurrency()
 
-      // TIMERS. There were three stacked ones and the tightest silently killed
-      // healthy renders mid-way:
-      //   1. --timeout  : Remotion's delayRender budget, was 10min then 15min.
-      //   2. run(...)   : hard kill of the render subprocess, was 25min.
-      //   3. the workflow's timeout-minutes (see render-task.yml).
-      // A longer client video legitimately needs more than the old ceilings, so
-      // they are now generous. Nothing is lost by waiting: a genuinely stuck
-      // render still ends, just later, and the stale-job sweep catches it.
+      // TIMERS — three are stacked, and for years the tightest silently killed
+      // healthy renders. Proven by the verbose diag (run 29731128897): the
+      // render was NEVER wedged; it died at 57% with frames still advancing and
+      // ~4 minutes to go. Besides the rendering tabs, a non-rendering page sits
+      // CPU-starved on a small runner and its module-scope font handles
+      // ("Loading font EditCapBase…") never clear — harmless right up until the
+      // render outlives the delayRender budget, at which point that page's timer
+      // kills a perfectly healthy render. Every job that finished inside the
+      // budget passed; every longer one died at exactly the budget mark, which
+      // is why short demo videos "worked" and the client's longer ones "didn't".
+      //
+      // So the budget must exceed WORST-CASE TOTAL RENDER TIME, not page load,
+      // and each timer must sit above the one below it:
+      //   delayRender 45min  <  subprocess 70min  <  workflow 120min
       const renderTimeout = 45 * 60_000        // delayRender budget
-      const renderHardKill = 70 * 60_000       // subprocess ceiling, above ^
+      const renderHardKill = 70 * 60_000       // subprocess ceiling, above it
 
-      // Efficiency: veryfast + crf 21 encodes markedly quicker than the default
-      // for output that is visually indistinguishable at 1080x1920 social sizes,
-      // and a JPEG frame format cuts per-frame serialisation cost. Together with
-      // the measured concurrency this is where the real speedup comes from.
+      // --log=verbose on constrained hosts: these renders used to die blind
+      // (zero output between start and the timeout), so a slow render and a
+      // wedged page looked identical. Per-frame progress is what made the root
+      // cause findable. Cost is log volume only.
+      //
+      // Efficiency: veryfast + crf 21 encodes markedly quicker for output that
+      // is visually indistinguishable at 1080x1920, and JPEG frames cut
+      // per-frame serialisation. With the measured tab count and the 4K
+      // downscale, this is where the speedup comes from.
       const perfFlags =
         ` --concurrency=${concurrency}` +
         ` --x264-preset=veryfast --crf=21 --image-format=jpeg --jpeg-quality=90` +
         ` --offthreadvideo-cache-size-in-bytes=${constrained ? 536870912 : 1073741824}` +
+        (constrained ? ' --log=verbose' : '') +
         (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
 
       console.log(
@@ -2143,6 +2195,7 @@ async function renderRemotionEdit(
         `on ${os.cpus().length} core / ${(os.totalmem() / 1024 ** 3).toFixed(1)}GB host ` +
         `(delayRender budget ${renderTimeout / 60000}min)`,
       )
+
 
       // One retry, at half the tabs. A render that dies from resource pressure
       // usually survives with fewer tabs, and retrying once beats failing the
