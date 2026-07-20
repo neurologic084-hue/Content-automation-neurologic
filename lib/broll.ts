@@ -565,8 +565,16 @@ export async function planCustomBrollSlots(
   // across the parts of the timeline that are still empty, respecting every
   // timing rule below. Only runs when the planner returned something (a real
   // failure still takes the fallback spread further down).
-  const MIN_FILL_RATIO = 0.6
-  if (!plannerFailed && items.length && items.length < Math.floor(targetCount * MIN_FILL_RATIO)) {
+  // Deliberately a FLOOR, not a filler. The planner's judgement stays primary:
+  // this only rescues the pathological case (2 cutaways out of a 12 target,
+  // seen on real client clips) and stops well short of the ceiling, so weakly
+  // matching clips are left out rather than forced in. Filling all the way to
+  // the target used every clip and produced placements like an elevator door
+  // over "is a mental" — exactly the AI-slop look we are avoiding.
+  const TOP_UP_BELOW = 0.4   // only rescue when the planner clearly under-delivered
+  const TOP_UP_TO = 0.6      // and only up to here, never the full target
+  const topUpCeiling = Math.max(1, Math.floor(targetCount * TOP_UP_TO))
+  if (!plannerFailed && items.length && items.length < Math.floor(targetCount * TOP_UP_BELOW)) {
     const unused = clips
       .map((c, idx) => ({ c, idx }))
       .filter(({ idx }) => (uses.get(idx) ?? 0) === 0)
@@ -578,7 +586,7 @@ export async function planCustomBrollSlots(
 
     const step = (duration - 4) / (targetCount + 1)
     for (const { c, idx } of unused) {
-      if (items.length >= targetCount) break
+      if (items.length >= topUpCeiling) break
       const dur = Math.min(3.2, c.duration)
       // Walk candidate slots on the cadence grid and take the first that fits.
       for (let k = 1; k <= targetCount; k++) {
