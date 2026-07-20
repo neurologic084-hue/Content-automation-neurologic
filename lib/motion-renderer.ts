@@ -1668,6 +1668,39 @@ function clipWindows(duration: number): Array<{ offset: number; seconds: number 
   }))
 }
 
+// Cross-JOB analysis cache. entry.windows only helps the job it belongs to, so
+// a NEW video pointing at the same folder re-downloaded and re-described every
+// clip with Gemini — the expensive half. Keyed by Drive id, so a given clip is
+// analysed once ever, not once per job. R2 has no expiry rule, so this survives
+// indefinitely; a miss just means doing the work again.
+type ClipWindowInfo = { offset: number; seconds: number; description: string }
+
+async function cachedClipWindows(url: string): Promise<ClipWindowInfo[] | null> {
+  if (!process.env.R2_PUBLIC_URL) return null
+  try {
+    const res = await fetch(`${process.env.R2_PUBLIC_URL}/broll-cache/shared/${clipCacheKey(url)}-windows.json`, {
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) return null
+    const w = await res.json()
+    return Array.isArray(w) && w.length && w.every(x => typeof x?.offset === 'number' && x?.description) ? w : null
+  } catch { return null }
+}
+
+async function publishClipWindows(url: string, windows: ClipWindowInfo[], outDir: string): Promise<void> {
+  if (!process.env.R2_PUBLIC_URL || !windows.length) return
+  const name = `${clipCacheKey(url)}-windows.json`
+  const tmp = path.join(outDir, name)
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(windows))
+    await uploadToStorage(tmp, name, 'shared', 'broll-cache')
+  } catch (e) {
+    console.warn(`[broll-cache] could not publish clip analysis: ${(e as Error).message}`)
+  } finally {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch { /* best-effort */ }
+  }
+}
+
 // One candidate window: described from a cheap low-res sample, cut to full
 // resolution only if it survives selection.
 interface ClipCandidate {
@@ -1736,6 +1769,15 @@ async function collectCustomBrollCandidates(
 
       // FAST PATH: source prep already worked out this clip's windows and what
       // each one shows. Reuse them — no download, no ffmpeg sample, no Gemini.
+      // Shared cache first (any job, any time), then this job's own copy.
+      if (!entry.windows?.length) {
+        const shared = await cachedClipWindows(entry.url)
+        if (shared) {
+          entry.windows = shared
+          learnedWindows = true
+          console.log(`[motion-renderer] clip ${i}: analysis reused from the shared cache (no download, no Gemini)`)
+        }
+      }
       if (entry.windows?.length) {
         for (const w of entry.windows) {
           candidates.push({
@@ -1792,6 +1834,9 @@ async function collectCustomBrollCandidates(
           `[motion-renderer] candidate ${i}.${w}: ${offset.toFixed(1)}-${(offset + seconds).toFixed(1)}s of ${sourceDuration.toFixed(1)}s — "${description.slice(0, 70)}"`,
         )
       }
+      // Publish this clip's analysis so EVERY future job on this folder skips
+      // the download and the Gemini pass entirely.
+      if (entry.windows?.length) await publishClipWindows(entry.url, entry.windows, cacheDir)
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll clip ${i} failed, skipping: ${(e as Error).message}`)
     }
