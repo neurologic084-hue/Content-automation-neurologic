@@ -108,5 +108,68 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
     }
   }
 
+  // LAST RESORT: go straight to the model's own provider.
+  //
+  // OpenRouter is this app's single largest dependency — 15 modules route
+  // every LLM call through it, so one exhausted account or one outage takes
+  // out script generation, cut planning, B-roll placement, caption styling and
+  // footage analysis at the same time. It routes across providers internally,
+  // which covers a provider being down, but nothing covers OUR account being
+  // out of credits.
+  //
+  // Optional by design: no ANTHROPIC_API_KEY means this is a no-op and the
+  // original error surfaces exactly as before. Set one and it becomes a spare
+  // tyre that only ever gets used when the main path is already broken.
+  const direct = await directProviderFallback(opts, lastError ?? null)
+  if (direct !== null) return direct
+
   throw lastError ?? new Error('OpenRouter: exhausted retries')
+}
+
+async function directProviderFallback(opts: CompletionOptions, cause: Error | null): Promise<string | null> {
+  const key = process.env.ANTHROPIC_API_KEY
+  // Only Anthropic models can be re-pointed at Anthropic. A google/* model has
+  // no home here, and silently swapping to a different family mid-render would
+  // change output style rather than rescue it.
+  if (!key || !opts.model.startsWith('anthropic/')) return null
+
+  const model = opts.model.replace(/^anthropic\//, '')
+  // Anthropic takes the system turn as a top-level field, not a message.
+  const system = opts.messages.filter(m => m.role === 'system').map(m => (typeof m.content === 'string' ? m.content : '')).join('\n\n')
+  const messages = opts.messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
+  if (!messages.length) return null
+
+  try {
+    console.warn(`[openrouter] unavailable (${cause?.message?.slice(0, 90)}) — falling back to Anthropic directly for ${model}`)
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: opts.max_tokens ?? 2000,
+        temperature: opts.temperature ?? 0.7,
+        ...(system ? { system } : {}),
+        messages,
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.warn(`[openrouter] Anthropic fallback also failed (${res.status})`)
+      return null
+    }
+    const body = await res.json() as { content?: Array<{ type: string; text?: string }> }
+    const text = (body.content ?? []).filter(c => c.type === 'text').map(c => c.text ?? '').join('').trim()
+    if (!text) return null
+    console.log('[openrouter] Anthropic direct fallback answered')
+    return text
+  } catch (e) {
+    console.warn('[openrouter] Anthropic fallback errored:', (e as Error).message)
+    return null
+  }
 }
