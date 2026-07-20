@@ -141,17 +141,17 @@ const CREDIT_SIGNS = [
 function outOfCredits(low: string): string | null {
   if (!CREDIT_SIGNS.some(s => low.includes(s))) return null
   if (low.includes('auphonic'))
-    return 'Auphonic is out of credits (audio cleanup). Top up at auphonic.com — renders continue on the ElevenLabs fallback meanwhile.'
+    return 'Auphonic has run out of credits, so it could not clean up the audio. This did not stop your video — the backup cleaner handled it instead, though it removes less background noise. Topping up restores the better one.'
   if (low.includes('elevenlabs') || low.includes('eleven labs') || low.includes('scribe')) {
     // Same account, two very different jobs — say which one stopped, because
     // the consequences differ: sound effects self-synthesise and the render is
     // fine, transcription falls back to Whisper.
     if (low.includes('sound-generation') || low.includes('sound effect'))
-      return 'ElevenLabs is out of credits (sound effects). Sound effects are being generated locally instead, so renders continue — top up at elevenlabs.io to restore the richer library.'
-    return 'ElevenLabs is out of credits (transcription). Renders continue on the OpenRouter Whisper fallback — top up at elevenlabs.io to restore it.'
+      return 'ElevenLabs has run out of credits, so it could not generate sound effects. This did not stop your video — the sound effects were built locally instead, which sounds simpler but works fine. Topping up restores the richer library.'
+    return 'ElevenLabs has run out of credits, so it could not transcribe your footage. This did not stop your video — the backup transcriber handled it instead. Topping up restores the more accurate one.'
   }
   if (low.includes('openrouter') || low.includes('gemini') || low.includes('whisper'))
-    return 'OpenRouter is out of credits (AI planning + captions). Add credits at openrouter.ai, then retry.'
+    return 'The AI service has run out of credits. This one has no backup left, so the video could not be finished — it plans the cuts, picks the B-roll and writes the captions. Add credits and retry, and it will pick up from where it stopped.'
   if (low.includes('submagic'))
     return 'Submagic plan or usage limit reached. Check your Submagic plan, then retry.'
   if (low.includes('pexels'))
@@ -175,4 +175,38 @@ function trim(msg: string): string {
     .replace(/\s+/g, ' ')
     .trim()
   return cleaned.length > 180 ? cleaned.slice(0, 180) + '…' : cleaned
+}
+
+/** The one place a person can actually go to fix this failure.
+ *
+ *  explainFailure names the cause in words; this turns that into a link the UI
+ *  can render as a button. Kept separate so the message stays readable on its
+ *  own (logs, Slack) and the UI decides how to present the action.
+ *
+ *  Returns null when there is nowhere useful to send someone — a transient
+ *  render crash needs Retry, not a dashboard. */
+export function failureAction(raw: unknown): { label: string; url: string } | null {
+  const low = String(
+    raw instanceof Error ? raw.message : typeof raw === 'string' ? raw : JSON.stringify(raw ?? ''),
+  ).toLowerCase()
+
+  const isCredit = CREDIT_SIGNS.some(s => low.includes(s)) || /\b40[23]\b/.test(low)
+
+  if (low.includes('auphonic'))
+    return { label: 'Top up Auphonic', url: 'https://auphonic.com/engine/accounts/credits/' }
+  if (low.includes('elevenlabs') || low.includes('eleven labs') || low.includes('scribe'))
+    return { label: 'Top up ElevenLabs', url: 'https://elevenlabs.io/app/subscription' }
+  if (low.includes('openrouter'))
+    return { label: 'Add OpenRouter credits', url: 'https://openrouter.ai/credits' }
+  if (low.includes('submagic'))
+    return { label: 'Check Submagic plan', url: 'https://app.submagic.co/settings/billing' }
+  if (low.includes('pexels'))
+    return { label: 'Check Pexels API', url: 'https://www.pexels.com/api/' }
+  if (low.includes('blotato'))
+    return { label: 'Open Blotato', url: 'https://my.blotato.com/accounts' }
+  if (low.includes('drive.google') || low.includes('google drive'))
+    return { label: 'Open Google Drive', url: 'https://drive.google.com/drive/my-drive' }
+  if (isCredit)
+    return { label: 'Check billing', url: 'https://openrouter.ai/credits' }
+  return null
 }

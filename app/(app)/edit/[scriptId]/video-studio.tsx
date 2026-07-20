@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { ConfirmModal } from '@/components/confirm-modal'
+import { failureAction } from '@/lib/error-explain'
 import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 
 // Custom B-roll works end-to-end (all 6 variants) but the input is hidden to
@@ -821,17 +822,36 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     <div
                       className="w-full rounded-xl mb-3 flex items-center justify-center"
                       style={{
-                        height: isPending || isStarting || v?.status === 'failed' ? 100 : 130,
+                        height: v?.status === 'failed' ? 150 : isPending || isStarting ? 100 : 130,
                         background: v?.status === 'failed' ? '#FEF2F2' : isPending ? '#F4F3F0' : '#F9F9F8',
                       }}
                     >
                       {v?.status === 'failed' ? (
-                        <div className="flex flex-col items-center gap-1 px-3 text-center">
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#EF4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        // The message was 10px and clamped to two lines, which
+                        // truncated every explanation into something unreadable.
+                        // A failure is the one moment the card has something
+                        // important to say, so it gets the room to say it — and
+                        // a link straight to wherever it can be fixed.
+                        <div className="flex flex-col items-center gap-1.5 px-3.5 py-2 text-center w-full">
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#EF4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
                             <circle cx="12" cy="12" r="10" />
                             <path d="M12 8v4M12 16h.01" />
                           </svg>
-                          <span className="text-[10px] text-[#EF4444] leading-tight line-clamp-2">{v?.error ?? 'Failed'}</span>
+                          <span className="text-[11.5px] text-[#B91C1C] leading-snug">{v?.error ?? 'Failed'}</span>
+                          {(() => {
+                            const fix = failureAction(v?.error)
+                            return fix ? (
+                              <a
+                                href={fix.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={e => e.stopPropagation()}
+                                className="text-[11px] font-semibold text-[#B91C1C] underline underline-offset-2 hover:text-[#7F1D1D]"
+                              >
+                                {fix.label} ↗
+                              </a>
+                            ) : null
+                          })()}
                         </div>
                       ) : isPending ? (
                         <span className="text-[11px] text-[#C4C4C0]">Not started</span>
