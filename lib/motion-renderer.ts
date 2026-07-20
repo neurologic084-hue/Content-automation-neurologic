@@ -693,6 +693,17 @@ export async function prepareJobSource(
   await onProgress?.(98, 'Trimming footage')
   try {
     const cutPath = path.join(outDir, 'source-cut.mp4')
+    // ALREADY DONE? Re-running prep (to repair a job, or to pick up a fix)
+    // must not redo finished steps: this one costs a transcription and a full
+    // re-encode. A cut already in R2 is the same cut.
+    const cutExists = process.env.R2_PUBLIC_URL
+      ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+      : false
+    if (cutExists) {
+      console.log('[prep] ✓ pre-cut source already built — skipping')
+      submagicCutPath = fs.existsSync(cutPath) ? cutPath : null
+      throw { __skip: true }
+    }
     const built = await buildSubmagicCutSource(localPath, cutPath)
     if (built) {
       await uploadToStorage(built, 'source-cut.mp4', jobId)
@@ -700,7 +711,9 @@ export async function prepareJobSource(
       console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId})`)
     }
   } catch (e) {
-    console.warn(`[motion-renderer] pre-cut step failed for job=${jobId} — Submagic will cut on its own:`, (e as Error).message)
+    if (!(e as { __skip?: boolean })?.__skip) {
+      console.warn(`[motion-renderer] pre-cut step failed for job=${jobId} — Submagic will cut on its own:`, (e as Error).message)
+    }
   }
 
   // Clean the audio and transcribe it ONCE for the whole job (Submagic ->
@@ -710,7 +723,15 @@ export async function prepareJobSource(
   // Skip when the compressed source didn't survive (disk pressure, a failed
   // ffmpeg pass): cleaning a missing file would throw inside a best-effort step
   // and waste a paid Auphonic production on nothing.
-  if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10_000) {
+  const cleanDone = process.env.R2_PUBLIC_URL
+    ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+    : false
+  const wordsDone = cleanDone ? !!(await sharedWords(jobId)) : false
+  if (cleanDone && wordsDone) {
+    // ALREADY DONE — and this is the expensive one: skipping it saves a paid
+    // Submagic clean / Auphonic production and a transcription.
+    console.log('[prep] ✓ audio already cleaned and transcribed for this job — skipping')
+  } else if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10_000) {
     await onProgress?.(97, 'Cleaning audio')
     await buildSharedCleanAudio(jobId, localPath, outDir)
   } else {
@@ -722,6 +743,27 @@ export async function prepareJobSource(
   // block source prep on it.
   await onProgress?.(99, 'Analyzing footage')
   ensureContentProfile(jobId, sourceUrl).catch(() => { /* best-effort; falls back at read time */ })
+
+  // CHECKLIST: prep is re-runnable and skips whatever is already done, so print
+  // what this job actually has. Re-running to repair a job then costs only the
+  // missing pieces instead of another full round of paid work.
+  try {
+    const base = process.env.R2_PUBLIC_URL ? `${process.env.R2_PUBLIC_URL}/${jobId}` : null
+    const has = async (f: string) => base
+      ? fetch(`${base}/${f}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+      : false
+    const { data: row } = await supabaseAdmin().from('video_jobs').select('custom_broll, content_profile').eq('id', jobId).single()
+    const clips = (row?.custom_broll ?? []) as CustomBrollEntry[]
+    const [src, cut, clean] = await Promise.all([has('source-compressed.mp4'), has('source-cut.mp4'), has(SHARED_CLEAN_NAME)])
+    const tick = (b: boolean) => (b ? '✓' : '✗')
+    console.log(
+      `[prep] job ${jobId.slice(0, 8)} ready — ` +
+      `source ${tick(src)} | pre-cut ${tick(cut)} | clean audio ${tick(clean)} | ` +
+      `transcript ${tick(!!(await sharedWords(jobId)))} | analysis ${tick(!!row?.content_profile)} | ` +
+      `B-roll ${clips.length ? `${clips.filter(c => c.r2Url).length}/${clips.length} prepared` : 'none supplied'}`,
+    )
+  } catch { /* the checklist is diagnostics only */ }
+
   await onProgress?.(100, 'Footage ready')
   return { localPath, cutPath: submagicCutPath }
 }
