@@ -917,7 +917,12 @@ function renderConcurrency(): number {
   const gb = os.totalmem() / 1024 ** 3
   const byCpu = cores - 2               // leave room for ffmpeg + compositor
   const byMem = Math.floor(gb / 2.5)    // ~2.5GB of headroom per tab
-  return Math.max(1, Math.min(byCpu, byMem, 6))
+  // The ceiling scales with the machine so a big Railway instance is actually
+  // used: 6 tabs was tuned on 4-core CI runners, and pinning a 16-core box to
+  // it leaves most of the paid machine idle. Memory stays the binding guard —
+  // a tab budget the RAM can't back is how renders died in July.
+  const cap = cores >= 12 && gb >= 24 ? 10 : cores >= 8 && gb >= 16 ? 8 : 6
+  return Math.max(1, Math.min(byCpu, byMem, cap))
 }
 
 async function finishVariant(

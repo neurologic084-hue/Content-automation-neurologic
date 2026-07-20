@@ -136,7 +136,15 @@ function StorageMeter() {
       {usage.warning && (
         <p className="text-[12px] text-[#D97706] leading-relaxed">
           Storage is nearly at its budget. Nothing will break — space grows automatically and
-          billing adjusts on its own — but deleting old videos from the library keeps the bill flat.
+          billing adjusts on its own. Deleting old videos from the library keeps the bill flat, or{' '}
+          <a
+            href="https://dash.cloudflare.com/?to=/:account/r2/plans"
+            target="_blank"
+            rel="noreferrer"
+            className="underline font-semibold"
+          >
+            review the storage plan here
+          </a>.
         </p>
       )}
     </div>
