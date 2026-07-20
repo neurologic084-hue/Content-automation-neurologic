@@ -17,7 +17,12 @@ jobs:
     # renders that were still healthy; 45 leaves real headroom.
     timeout-minutes: 45
     steps:
+      # ref lets a dispatch render from a branch instead of main — used for
+      # diagnostic renders (e.g. bisecting a regression on the real runner
+      # without touching main). Empty/absent = default branch, as before.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.ref || '' }}
 
       - uses: actions/setup-node@v4
         with:
