@@ -1,0 +1,87 @@
+# DIAGNOSTIC ONLY — pure Remotion render, zero external APIs.
+#
+# Why this exists: v4-v6 renders were dying on the GitHub runner with
+# `A delayRender() "Loading font EditCapBase" was called but not cleared`,
+# and every app-side theory (footage volume, custom B-roll, concurrency,
+# timeouts, the code diff) was disproven by experiment. This isolates the
+# rendering engine itself: it generates its own test footage with ffmpeg,
+# writes its own props, and renders the real ShortEdit composition with the
+# real 18-font bundle. No Submagic, no ElevenLabs, no Auphonic, no OpenRouter,
+# no Supabase, no R2 — nothing but Remotion + Chrome.
+#
+# If this hangs on fonts, the engine/runner is at fault and the app is clean.
+# If it renders, the engine is fine and the fault is in the job data.
+name: Diagnostic — pure Remotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Length of the generated test clip
+        default: '20'
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Install Remotion + browser
+        run: |
+          cd remotion
+          npm ci --no-audit --no-fund
+          npx remotion browser ensure
+
+      - name: Generate test footage + props (no APIs)
+        env:
+          SECS: ${{ github.event.inputs.seconds || '20' }}
+        run: |
+          set -e
+          cd remotion
+          mkdir -p public/edit-cache
+          # 1080x1920 talking-head stand-in, silent, same shape as real source.
+          npx --yes ffmpeg-static --version >/dev/null 2>&1 || true
+          FFMPEG=$(node -e "process.stdout.write(require('ffmpeg-static'))" --prefix .. 2>/dev/null || echo ffmpeg)
+          "$FFMPEG" -y -f lavfi -i "testsrc2=size=1080x1920:rate=30:duration=$SECS" \
+            -c:v libx264 -preset veryfast -pix_fmt yuv420p \
+            public/edit-cache/diag-source.mp4
+          node -e '
+            const secs = Number(process.env.SECS || 20);
+            const words = "this is a pure remotion diagnostic render with captions on screen".split(" ");
+            const per = secs / words.length;
+            // Caption pages exercise the same text/animation path a real render uses.
+            const pages = words.map((w, i) => ({
+              text: w, start: +(i * per).toFixed(2), end: +((i + 1) * per).toFixed(2),
+              words: [{ text: w, start: +(i * per).toFixed(2), end: +((i + 1) * per).toFixed(2) }],
+              position: "low",
+            }));
+            const props = {
+              videoFile: "edit-cache/diag-source.mp4",
+              width: 1080, height: 1920, fps: 30,
+              segments: [{ srcStart: 0, duration: secs, frame: "full" }],
+              pages, broll: [], transitionStyle: "flash", captionStyle: "glow",
+              tag: "DIAG", grade: "warm", hookSpotlight: false, handheld: false,
+              splits: [], sfx: [],
+            };
+            require("fs").writeFileSync("diag-props.json", JSON.stringify(props));
+            console.log("props written, " + pages.length + " caption pages, " + secs + "s");
+          '
+
+      - name: Render (the actual test)
+        run: |
+          cd remotion
+          time npx remotion render src/Root.tsx ShortEdit /tmp/diag-out.mp4 \
+            --props=diag-props.json --codec=h264 --crf=23 \
+            --timeout=300000 --concurrency=2 --log=verbose 2>&1 | tail -120
+
+      - name: Result
+        if: always()
+        run: ls -la /tmp/diag-out.mp4 2>/dev/null && echo "RENDER OK — engine is healthy" || echo "RENDER FAILED — engine/runner at fault"
