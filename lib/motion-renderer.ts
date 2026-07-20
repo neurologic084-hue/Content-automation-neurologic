@@ -2031,6 +2031,9 @@ async function renderRemotionEdit(
         // (resolveExtraImages) shares it. Custom-clip renders never source
         // stock, so the set simply stays empty for them.
         const usedMedia = new Set<string>()
+        // Set when her clips could not be used and stock stood in for them.
+        let brollNotice: string | null = null
+        let customProduced = false
         if (usingCustomBroll) {
           // The creator supplied their own clips — stock sourcing is skipped
           // entirely. Every candidate window is described first, ranked against
@@ -2041,6 +2044,17 @@ async function renderRemotionEdit(
           const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
           for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
+          customProduced = broll.length > 0
+          if (!customProduced) {
+            // Her clips produced nothing usable — unreadable folder, failed
+            // downloads, or nothing placeable in this script. Fall back to
+            // stock rather than shipping a video with no B-roll at all, and
+            // SAY SO on the card instead of failing silently.
+            brollNotice = clips.length
+              ? 'Your own clips did not fit this script, so stock B-roll was used instead.'
+              : 'Your own clips could not be read, so stock B-roll was used instead.'
+            console.warn(`[motion-renderer] custom B-roll produced nothing — falling back to stock (${clips.length} clip(s) staged)`)
+          }
 
           // 'both': her clips lead, stock fills whatever the target still
           // wants. Her cutaways are passed as avoid-windows so stock never
@@ -2074,10 +2088,17 @@ async function renderRemotionEdit(
               }
             }
           }
-        } else {
+        }
+        // Stock path: either this render never had custom clips, or they were
+        // supplied and yielded nothing (the fallback above).
+        if (!usingCustomBroll || !customProduced) {
           const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
           broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
         }
+        // Always write the outcome: a retry that DOES use her clips must clear
+        // a notice left by an earlier attempt, or the card lies about the video
+        // currently on screen.
+        await patchVariant(supabaseAdmin(), jobId, variantId, { broll_notice: brollNotice })
         if (viral) {
           // Pages over covers go big/centered; pages under the designed poster
           // are dropped (the card carries its own headline).

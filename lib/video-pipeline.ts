@@ -102,6 +102,11 @@ export interface VideoVariant extends VideoVariantDef {
   // 'both' (hers first, stock tops up), 'custom' (hers only), 'stock'
   // (ignore her folder this time). Absent on older rows = 'both'.
   broll_source?: BrollSource
+  // Set when the render could NOT use the creator's clips and quietly used
+  // stock instead (folder unreadable, downloads failed, nothing placeable).
+  // Surfaced on the variant card: a video that silently lacks the B-roll she
+  // supplied looks perfectly healthy, which is the worst way to fail.
+  broll_notice?: string | null
   // ISO timestamp stamped when the variant enters 'processing', cleared when it
   // reaches ready/failed. Lets the status route detect a variant whose worker
   // VM was killed before it could write its own failure (a silent forever-spin).
