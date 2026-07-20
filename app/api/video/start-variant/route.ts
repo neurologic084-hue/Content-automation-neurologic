@@ -1,75 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { createClient as createAdminClient } from '@supabase/supabase-js'
-import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile } from '@/lib/motion-renderer'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
-import {
-  deriveSmartSubmagicSettings,
-  pickPremiumTemplates,
-  resolveCaptionTemplate,
-  resolvePooledTemplate,
-  submitSubmagicJob,
-  pollSubmagicJob,
-  fetchSubmagicAudioTrack,
-  transcribeVideo,
-  VARIANT_DEFINITIONS,
-  SUBMAGIC_ALWAYS_ON,
-} from '@/lib/video-pipeline'
-import { VARIANT_SPECS, resolveSubmagicSettings } from '@/lib/variant-specs'
-import { normalizeBrollSetting, normalizeBrollSource, submagicBrollKnobs } from '@/lib/broll'
+import { VARIANT_DEFINITIONS } from '@/lib/video-pipeline'
 import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
 import { rendersDir } from '@/lib/paths'
 import fs from 'fs'
 import path from 'path'
-import type { ContentProfile } from '@/lib/video-analysis'
-import type { MusicMode, VideoVariant, CustomBrollEntry } from '@/lib/video-pipeline'
+import type { VideoVariant, CustomBrollEntry } from '@/lib/video-pipeline'
 
-function supabaseAdmin() {
-  return createAdminClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  )
-}
-
-const activeSubmagicStarts = new Set<string>()
-
-async function pollSubmagicUntilDone(
-  jobId: string,
-  variantId: string,
-  projectId: string,
-  music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
-) {
-  const db = supabaseAdmin()
-  const INTERVAL_MS = 8_000
-  const MAX_ATTEMPTS = 75  // ~10 minutes
-
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    await new Promise(r => setTimeout(r, INTERVAL_MS))
-
-    const result = await pollSubmagicJob(projectId).catch(() => null)
-    if (!result || result.status === 'processing') continue
-
-    if (result.status === 'ready' && result.downloadUrl) {
-      // Single canonical finisher (shared with the status route): retrieval,
-      // SFX/frame post-steps, R2 upload, and the ready write all live there.
-      await finalizeSubmagicVariant(jobId, variantId, result.downloadUrl, music)
-      return
-    }
-
-    await patchVariant(
-      db,
-      jobId,
-      variantId,
-      { status: 'failed', error: explainFailure(result.error ?? 'The editing engine hit an error. Please retry this variant.'), progress: null },
-      { completeWhenAllDone: true },
-    )
-    return
-  }
-
-  // Timeout
-  await patchVariant(db, jobId, variantId, { status: 'failed', error: 'The edit took too long and timed out. Please retry this variant.', progress: null })
-}
+// In-process suppression of a duplicate start for the same variant. It used to
+// be held for the whole inline Submagic submission and released in a `finally`;
+// now that this handler only dispatches, releasing on exit would hold it for a
+// millisecond and suppress nothing. So the key is kept for a short window after
+// dispatch — long enough to swallow a double-click or a duplicate "Generate
+// all" fan-out, which is all it ever caught — and dropped immediately if the
+// dispatch itself threw, so the retry that follows is never blocked. It stays
+// best-effort by nature (on Vercel two requests can land on different
+// instances); the DB-level reuse check below is the part that survives
+// restarts. Deliberately NOT a bail-on-'processing' check like the edit path
+// uses: a variant left 'processing' with no external_id is exactly the failure
+// mode being fixed here, and the user must be able to retry out of it.
+const DUPLICATE_START_WINDOW_MS = 60_000
+const activeSubmagicStarts = new Map<string, number>()
 
 export async function POST(req: NextRequest) {
   const { jobId, variantId, force } = await req.json()
@@ -199,7 +152,6 @@ export async function POST(req: NextRequest) {
   }
 
   if (variant.tool === 'submagic') {
-    const preset = variant.submagicPreset ?? {}
     const lockKey = `${jobId}:${variantId}`
 
     // A finished variant normally reuses its Submagic project (no double
@@ -213,271 +165,46 @@ export async function POST(req: NextRequest) {
     }
     if (forceRegenerate) console.log(`[start-variant] force regeneration for ${lockKey}`)
 
-    if (activeSubmagicStarts.has(lockKey)) {
+    const now = Date.now()
+    const startedAt = activeSubmagicStarts.get(lockKey)
+    if (startedAt !== undefined && now - startedAt < DUPLICATE_START_WINDOW_MS) {
       console.log(`[start-variant] Suppressed duplicate Submagic start for ${lockKey}`)
       return NextResponse.json({ ok: true, reused: true })
     }
-
-    activeSubmagicStarts.add(lockKey)
-    try {
-      await patchVariant(
-        supabase,
-        jobId,
-        variantId,
-        // external_id cleared so the status poller never polls a stale
-        // Submagic project between this reset and the new projectId write.
-        { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 4, label: 'Sending your footage' } },
-        { jobStatus: 'processing' },
-      )
-
-      const { data: scriptRow } = await supabase
-        .from('scripts')
-        .select('hook, cta, mood_tag, filming_plan')
-        .eq('id', job.script_id)
-        .single()
-
-      const scriptFormat = (scriptRow?.filming_plan as { script_format?: string } | null)?.script_format
-
-      // Submagic always gets the compressed, normalized copy -- never the raw
-      // Drive file. Cached per job, so every Submagic variant on this job
-      // shares one compression + upload pass.
-      const videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
-      // When the source was pre-cut by our own planner (source-cut.mp4), Submagic
-      // must NOT cut again: dial silence removal to its gentlest and turn off
-      // bad-take removal so it only adds captions + zoom styling. If the pre-cut
-      // step didn't run, Submagic cuts on its own exactly as before.
-      const isPrecut = videoUrlForSubmagic.endsWith('/source-cut.mp4')
-      const precutOverrides = isPrecut
-        ? { removeSilencePace: 'natural' as const, removeBadTakes: false }
-        : {}
-      if (isPrecut) console.log(`[start-variant] ${variantId}: using pre-cut source — Submagic styles only`)
-      let projectId: string
-      // Local-library music to mix on top AFTER Submagic finishes (v1-v3). Stays
-      // null for the autonomous aiEditTemplate + legacy paths, which keep
-      // Submagic's own in-render audio.
-      let postMusic:
-        | { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null }
-        | null = null
-
-      if (preset.aiEditTemplate) {
-        // Fully autonomous mode — Submagic controls everything itself, no
-        // profile/settings/transcript analysis applies here.
-        projectId = await submitSubmagicJob(videoUrlForSubmagic, {
-          title: `${variantId}-${jobId.slice(0, 8)}`,
-          aiEditTemplate: preset.aiEditTemplate,
-        })
-      } else {
-        // V2 content-aware path (our-v1/v2/v3). The variant's fixed spec (caption
-        // lane, zooms, pace) is combined with one Gemini read of the footage
-        // (shared across variants, cached on the job) via resolveSubmagicSettings.
-        // Falls back to the older text-only smart-settings path for any variant
-        // without a V2 spec.
-        const spec = VARIANT_SPECS[variantId]
-
-        // v1-v3 (the spec path) now get their music from OUR local library,
-        // mixed on top of the FINISHED Submagic video — the exact same system
-        // v4/v5 use (mood match, best-part offset, voice ducking, -13 LUFS).
-        // Submagic itself renders silent for them: no music track is sent, and
-        // mixBackgroundMusic runs in the post step (retrieveAndStoreSubmagicResult).
-        // The legacy fallback (no spec) has no ContentProfile to match a track
-        // against, so it keeps Submagic's own in-render library as before.
-        // Music is locked per variant (spec.useMusic); 'off' mode disables it.
-        const musicOff = (variant.music_mode as MusicMode | undefined) === 'off'
-        const wantsMusic = spec ? spec.useMusic : (variant.submagicProfile?.useMusic ?? true)
-        const useLibraryMusic = !!spec && !musicOff && wantsMusic
-
-        // Only the legacy (no-spec) path still pulls a Submagic-hosted track.
-        const musicTrackId = !musicOff && wantsMusic && !useLibraryMusic
-          ? await fetchSubmagicAudioTrack(scriptRow?.mood_tag ?? null) ?? undefined
-          : undefined
-        if (!musicOff && wantsMusic && !useLibraryMusic && !musicTrackId) {
-          console.warn('[start-variant] no Submagic audio track available — rendering without music')
-        }
-
-        // The studio's per-job B-roll setting governs v1-v3 too, matching the
-        // Remotion variants: 'smart' keeps the footage-adaptive amount below,
-        // 'manual' forces the exact percent onto Submagic's stock B-roll, and
-        // 'none' turns every cutaway off — creator-supplied clips included.
-        const brollSetting = normalizeBrollSetting(variant.broll_mode, variant.broll_percent)
-        if (brollSetting.mode !== 'smart') {
-          console.log(`[start-variant] B-roll mode for ${variantId}: ${brollSetting.mode}${brollSetting.percent !== null ? ` (${brollSetting.percent}%)` : ''}`)
-        }
-
-        if (spec) {
-          const profile = await ensureContentProfile(jobId, job.source_drive_url as string)
-          // A custom theme (exact caption style) needs no template resolution at
-          // all. Otherwise a pinned template pool (e.g. the UGC Aesthetic Umi
-          // family) wins over the fuzzy caption-lane classifier, with lane
-          // resolution as the fallback.
-          const templateName = spec.userThemeId
-            ? undefined
-            : (spec.templatePool ? await resolvePooledTemplate(spec.templatePool) : undefined)
-              ?? await resolveCaptionTemplate(spec.captionLane, profile.captionMood)
-          const resolved = resolveSubmagicSettings(spec, profile, { templateName })
-
-          // ALWAYS_ON first, then the resolved knobs — so resolved.magicZooms
-          // (a per-variant/guardrail decision now) wins over the baseline's
-          // magicZooms:true instead of being forced back on.
-          // Creator-supplied B-roll: the prepare-source task uploaded each
-          // clip to Submagic user-media and planned transcript-matched
-          // placements. Turn those into timed items and turn STOCK B-roll
-          // off — the creator's clips fully replace generated footage.
-          const customEntries = brollSetting.mode === 'none'
-            ? null
-            : (job.custom_broll ?? null) as CustomBrollEntry[] | null
-          // Placements are only valid for the timeline they were measured on.
-          // We send source-cut.mp4 when it exists, and it is materially shorter
-          // than the compressed source, so items timed on the wrong one land on
-          // the wrong words — or run past the end, which makes Submagic reject
-          // the whole submission (observed: every v1-v3 failed with no project
-          // ever created). On a mismatch, drop the items and render without
-          // them rather than fail the variant.
-          // Honour the job's B-roll SOURCE here too: 'stock' means ignore her
-          // folder for this render, so the Submagic project gets stock B-roll
-          // instead of her timed items. Without this the setting only affected
-          // the Motion Lab variants and v1-v3 silently kept using her clips.
-          const variantSource = normalizeBrollSource(variant.broll_source)
-          const wantBasis: 'cut' | 'full' = isPrecut ? 'cut' : 'full'
-          const usableEntries = variantSource === 'stock' ? [] : (customEntries ?? []).filter(
-            e => (e.placementBasis ?? 'full') === wantBasis,
-          )
-          if ((customEntries?.length ?? 0) > 0 && usableEntries.length === 0) {
-            console.warn(
-              `[start-variant] custom B-roll placements were timed on the '${customEntries![0]?.placementBasis ?? 'full'}' source but this render sends the '${wantBasis}' one — skipping them (re-run source prep to re-time)`,
-            )
-          }
-          const customItems = usableEntries
-            .filter(e => e.submagicMediaId && e.placements?.length)
-            .flatMap(e => e.placements!.map(p => ({
-              type: 'user-media' as const,
-              startTime: p.start,
-              endTime: p.end,
-              userMediaId: e.submagicMediaId!,
-              // 'cover' = fill the frame (creator clip fully replaces the shot),
-              // matching the Remotion path's full-screen custom cutaways. NOT
-              // 'full': Submagic rejects that value with a VALIDATION_ERROR that
-              // fails the whole submission — it only accepts cover/contain/
-              // rounded/square/split-*/pip-*.
-              layout: 'cover',
-            })))
-            .sort((a, b) => a.startTime - b.startTime)
-          if (customItems.length) {
-            console.log(`[start-variant] using ${customItems.length} custom B-roll item(s), stock B-roll off`)
-          }
-
-          const brollKnobs = submagicBrollKnobs(brollSetting, resolved)
-          const submitOpts = (withCustomItems: boolean) => ({
-            title: `${variantId}-${jobId.slice(0, 8)}`,
-            ...SUBMAGIC_ALWAYS_ON,
-            templateName: resolved.templateName,
-            userThemeId: resolved.userThemeId,
-            magicBrolls: withCustomItems ? false : brollKnobs.magicBrolls,
-            magicBrollsPercentage: withCustomItems ? undefined : brollKnobs.magicBrollsPercentage,
-            magicZooms: resolved.magicZooms,
-            hookTitle: resolved.hookTitle,
-            removeSilencePace: resolved.removeSilencePace,
-            musicTrackId,
-            ...(withCustomItems ? { items: customItems } : {}),
-            ...precutOverrides,
-          })
-
-          if (customItems.length) {
-            // Custom items make the submission rejectable in ways stock knobs
-            // are not: a userMediaId Submagic hasn't finished ingesting yet, or
-            // a timing edge case. Retry once after a pause (ingest usually
-            // completes within seconds), then degrade to stock B-roll rather
-            // than fail the variant — creator clips are an enhancement, never
-            // worth a dead render.
-            try {
-              projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(true))
-            } catch (e1) {
-              console.warn(`[start-variant] ${variantId}: submit with custom B-roll items failed — retrying in 15s (user-media may still be ingesting): ${(e1 as Error).message.slice(0, 300)}`)
-              await new Promise(r => setTimeout(r, 15_000))
-              try {
-                projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(true))
-              } catch (e2) {
-                console.warn(`[start-variant] ${variantId}: custom B-roll items rejected twice — rendering with stock B-roll instead: ${(e2 as Error).message.slice(0, 300)}`)
-                projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(false))
-              }
-            }
-          } else {
-            projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(false))
-          }
-
-          // Music comes from our library AFTER Submagic returns — same matcher
-          // inputs as v4/v5: Gemini's footage profile + null transcript, with a
-          // per-variant shortlist pick. Runs in retrieveAndStoreSubmagicResult.
-          if (useLibraryMusic) {
-            postMusic = {
-              hook: scriptRow?.hook ?? '',
-              moodTag: scriptRow?.mood_tag ?? null,
-              scriptFormat,
-              profile,
-              transcript: null,
-            }
-          }
-        } else {
-          // Legacy fallback: written script + directive, no video understanding.
-          let actualTranscript = job.transcript as string | null
-          if (!actualTranscript) {
-            try {
-              const transcribed = await transcribeVideo(videoUrlForSubmagic)
-              actualTranscript = transcribed.transcript || null
-              if (actualTranscript) {
-                await supabase.from('video_jobs').update({ transcript: actualTranscript }).eq('id', jobId)
-              }
-            } catch (e) {
-              console.warn('[start-variant] transcription failed, falling back to script text only:', (e as Error).message)
-            }
-          }
-
-          const smart = await deriveSmartSubmagicSettings(
-            {
-              hook: scriptRow?.hook ?? '',
-              cta: scriptRow?.cta ?? '',
-              mood_tag: scriptRow?.mood_tag ?? null,
-              script_format: scriptFormat,
-            },
-            { profileDirective: variant.submagicProfile?.directive, actualTranscript: actualTranscript ?? undefined },
-          )
-
-          projectId = await submitSubmagicJob(videoUrlForSubmagic, {
-            title: `${variantId}-${jobId.slice(0, 8)}`,
-            ...SUBMAGIC_ALWAYS_ON,
-            templateName: smart.templateName,
-            magicBrolls: submagicBrollKnobs(brollSetting, smart).magicBrolls,
-            magicBrollsPercentage: submagicBrollKnobs(brollSetting, smart).magicBrollsPercentage,
-            hookTitle: smart.hookTitle,
-            removeSilencePace: smart.removeSilencePace,
-            musicTrackId,
-            ...precutOverrides,
-          })
-        }
-      }
-
-      // Save external_id immediately
-      await patchVariant(supabase, jobId, variantId, {
-        status: 'processing',
-        external_id: projectId,
-        // v1-v3 are already cut by our own planner before this point, so the
-        // engine here only adds captions + styling — say exactly that.
-        progress: { step: 2, total: 4, label: 'Adding captions & styling' },
-      })
-
-      // Fire-and-forget poll loop. For v1-v3 the post step also mixes our library
-      // music onto the finished file (postMusic); the aiEditTemplate/legacy paths
-      // pass null and keep Submagic's own audio.
-      pollSubmagicUntilDone(jobId, variantId, projectId, postMusic).catch(e =>
-        console.error('[start-variant] Submagic poll error:', e)
-      )
-
-      return NextResponse.json({ ok: true })
-    } catch (e) {
-      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: explainFailure(e), progress: null })
-      return NextResponse.json({ error: (e as Error).message }, { status: 500 })
-    } finally {
-      activeSubmagicStarts.delete(lockKey)
+    for (const [key, at] of activeSubmagicStarts) {
+      if (now - at >= DUPLICATE_START_WINDOW_MS) activeSubmagicStarts.delete(key)
     }
+    activeSubmagicStarts.set(lockKey, now)
+
+    // Instant UI feedback, and the 'processing' stamp the stale sweep ages
+    // from. external_id cleared so the status poller never polls a stale
+    // Submagic project between this reset and the new projectId write.
+    await patchVariant(
+      supabase,
+      jobId,
+      variantId,
+      { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, progress: { step: 1, total: 4, label: 'Sending your footage' } },
+      { jobStatus: 'processing' },
+    )
+
+    // Preparing the footage and submitting it takes longer than the 300s cap on
+    // this function for real client footage, so it runs as a pipeline task the
+    // way v4-v6 renders do. Everything above is cheap and has to stay here: it
+    // decides whether a start happens at all.
+    try {
+      await dispatchPipelineTask({ task: 'start-submagic', jobId, variantId, force: force === true })
+    } catch (e) {
+      activeSubmagicStarts.delete(lockKey)
+      const detail = (e as Error).message || 'unknown error'
+      console.error(`[start-variant] could not launch Submagic start for ${lockKey}:`, detail)
+      await patchVariant(supabase, jobId, variantId, { status: 'failed', error: explainFailure(detail), progress: null })
+      // Generic to the caller, matching the edit path above: the studio renders
+      // this string verbatim, and a raw sandbox/dispatch error means nothing to
+      // the creator. The explained version is already on the variant card.
+      return NextResponse.json({ error: 'Could not start the render.' }, { status: 500 })
+    }
+
+    return NextResponse.json({ ok: true })
   }
 
   return NextResponse.json({ error: 'Unsupported tool.' }, { status: 400 })

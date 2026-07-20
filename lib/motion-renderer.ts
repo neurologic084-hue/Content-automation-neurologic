@@ -27,7 +27,7 @@ import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, selectBestClips, normalizeBrollSetting, normalizeBrollSource, coverageTargetCount, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode, type BrollSource } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, selectBestClips, normalizeBrollSetting, normalizeBrollSource, coverageTargetCount, cutawayMinGap, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode, type BrollSource } from './broll'
 import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
@@ -2211,11 +2211,19 @@ async function renderRemotionEdit(
     // resolution below; merging happens once both are done. Fully best-effort:
     // no key / failed generations just mean stock-only B-roll.
     let collagePromise: Promise<BrollItem[]> = Promise.resolve([])
-    let collageWindows: Array<{ start: number; duration: number }> = []
+    let collageWindows: Array<{ start: number; duration: number; pad?: number }> = []
     if (kit.collageScenes && !brollOff) {
       try {
         const scenes = await planCollageScenes(plan.editedWords, plan.editedDuration, profile, kit.variation, graphicWindows, kit.denseMotion)
-        collageWindows = scenes.map(s => ({ start: s.start, duration: s.duration }))
+        // Collages render full-screen, so to the viewer they ARE cutaways: they
+        // need the cutaway spacing, not the smaller graphics pad. Without this a
+        // collage and a B-roll cutaway can sit a beat apart and flash her face
+        // between two covers — the exact stutter the cutaway gap exists to stop.
+        collageWindows = scenes.map(s => ({
+          start: s.start,
+          duration: s.duration,
+          pad: cutawayMinGap(kit.denseMotion),
+        }))
         collagePromise = generateCollageItems(scenes, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix)
           .catch(e => {
             console.warn('[motion-renderer] collage generation failed, continuing without scenes:', (e as Error).message)
@@ -2250,6 +2258,18 @@ async function renderRemotionEdit(
           const chosen = await selectBestClips(candidates, plan.editedWords)
           const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
           for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
+          // A clip that survived curation but died in staging (unplayable cut,
+          // dead download) is a silent loss: she supplied it and it never
+          // appears, and the only trace is a console.warn nobody reads. Fold
+          // the COUNT into broll_notice — the per-variant text the studio card
+          // already renders — so it reaches her without a schema change.
+          // Counted per SOURCE clip, not per window: one clip can contribute
+          // several candidate windows, and losing one of them is not a clip she
+          // has lost. Only entries where nothing survived are worth reporting.
+          const stagedEntries = new Set(clips.map(c => c.entryIndex))
+          const droppedInStaging = new Set(
+            chosen.map(c => c.entryIndex).filter(i => !stagedEntries.has(i)),
+          ).size
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
           customProduced = broll.length > 0
           if (!customProduced) {
@@ -2265,11 +2285,21 @@ async function renderRemotionEdit(
 
           // 'both': her clips lead, stock fills whatever the target still
           // wants. Her cutaways are passed as avoid-windows so stock never
-          // lands on top of them, and the stock planner is told only about the
-          // gap that is left.
+          // lands on top of them. The stock planner still plans against the FULL
+          // coverage target rather than the gap — it needs the whole timeline to
+          // place sensibly — and only the first `gap` of its slots are taken.
+          //
+          // The gap is now honest. It used to be manufactured: planCustomBroll-
+          // Slots capped her clips at 60% of the target, so on an 8-cutaway
+          // target her 8 staged clips were held to 4 and this branch
+          // bought exactly 4 Pexels clips to cover the moments she had been
+          // structurally barred from. That ceiling is gone, so `gap` counts only
+          // moments her planner genuinely found nothing of hers for — the one
+          // case where stock is the right answer in 'both'.
           if (brollSource === 'both') {
+            const minGap = cutawayMinGap(kit.denseMotion)
             const targetTotal = brollCoverage !== null
-              ? coverageTargetCount(plan.editedDuration, brollCoverage, kit.denseMotion ? 1.2 : 2.0)
+              ? coverageTargetCount(plan.editedDuration, brollCoverage, minGap)
               : Math.max(1, Math.round(plan.editedDuration / (kit.denseMotion ? 3.5 : 9)))
             const gap = targetTotal - broll.length
             if (gap > 0) {
@@ -2277,7 +2307,10 @@ async function renderRemotionEdit(
                 const stockSlots = await planBrollSlots(
                   plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia,
                   kit.designedCards,
-                  [...graphicWindows, ...collageWindows, ...broll.map(b => ({ start: b.start, duration: b.duration }))],
+                  // Her cutaways carry the cutaway gap, not the 0.6s collision
+                  // pad graphics use: stock starting 0.6s after one of hers
+                  // rendered as cover → a flash of her face → cover.
+                  [...graphicWindows, ...collageWindows, ...broll.map(b => ({ start: b.start, duration: b.duration, pad: minGap }))],
                   kit.denseMotion, brollCoverage,
                 )
                 const stock = await resolveBrollMedia(
@@ -2294,6 +2327,14 @@ async function renderRemotionEdit(
                 console.warn(`[motion-renderer] stock top-up skipped: ${(e as Error).message}`)
               }
             }
+          }
+
+          if (droppedInStaging > 0) {
+            const line = droppedInStaging === 1
+              ? '1 of your clips could not be processed and was left out.'
+              : `${droppedInStaging} of your clips could not be processed and were left out.`
+            brollNotice = brollNotice ? `${brollNotice} ${line}` : line
+            console.warn(`[motion-renderer] ${droppedInStaging} custom clip(s) dropped in staging`)
           }
         }
         // Stock path: either this render never had custom clips, or they were

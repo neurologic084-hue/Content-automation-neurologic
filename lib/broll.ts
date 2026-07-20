@@ -160,6 +160,26 @@ export function coverageTargetCount(duration: number, percent: number, minGap: n
   return Math.max(0, Math.min(wanted, fits))
 }
 
+// Talking-head breathing room between two cutaways (dense/max-motion tightens
+// it). ONE rule for every cutaway pair — hers↔hers, stock↔stock, hers↔stock —
+// so the edit can never flash her face for half a beat between two covers.
+export function cutawayMinGap(dense = false): number {
+  return dense ? 1.2 : 2.0
+}
+
+// A window a planned cutaway must steer around. Template graphics only have to
+// not collide, so they keep the historical 0.6s clearance. A window that IS
+// itself a cutaway — the creator's own clips, while stock fills around them —
+// passes pad: cutawayMinGap(dense), because the gap that matters there is
+// talking-head time, not pixel overlap.
+export interface AvoidWindow {
+  start: number
+  duration: number
+  pad?: number
+}
+const GRAPHIC_PAD = 0.6
+const padOf = (a: AvoidWindow) => a.pad ?? GRAPHIC_PAD
+
 // ── Planning ──────────────────────────────────────────────────────────────────
 
 // Per-variation planning personalities: multi-version runs should surface
@@ -181,7 +201,7 @@ export async function planBrollSlots(
   designs = true,
   // Windows already claimed by template graphics (Koe title/list/venn/rings):
   // graphics outrank stock footage, so B-roll steers around them.
-  avoid: Array<{ start: number; duration: number }> = [],
+  avoid: AvoidWindow[] = [],
   // Max-motion mode (v7 test): cutaway cadence tightens to every ~3-4s and
   // the talking-head gaps between cutaways shrink — the edit never sits still.
   dense = false,
@@ -191,7 +211,7 @@ export async function planBrollSlots(
   coverage: number | null = null,
 ): Promise<PlannedSlot[]> {
   if (media === 'none' || duration < 8 || editedWords.length < 10) return []
-  const minGap = dense ? 1.2 : 2.0
+  const minGap = cutawayMinGap(dense)
   // Adaptive cadence for EVERY flavor, driven by the Gemini profile's read of
   // the footage: rich content gets a cutaway every ~6.5s (≈ the reference
   // edits' density), a plain talking head still gets one every ~12s. The
@@ -301,7 +321,7 @@ export async function planBrollSlots(
     const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
     const dur = Math.min(maxDur, Math.max(1.8, c.duration as number))
     if (start + dur > duration - 1.5) continue
-    if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
+    if (avoid.some(a => start < a.start + a.duration + padOf(a) && start + dur > a.start - padOf(a))) continue
     // Viral cutaways are always full-screen — once the cover budget is spent,
     // extra slots are dropped rather than demoted to floating cards (the
     // reference has no card grammar at all).
@@ -345,7 +365,7 @@ export async function planBrollSlots(
     const pool = rotated(FALLBACK_QUERIES[profile?.format ?? 'story'] ?? FALLBACK_QUERIES.story, variation)
     const busy = [
       ...slots.map(s => ({ start: s.start, end: s.start + s.duration })),
-      ...avoid.map(a => ({ start: a.start - 0.6, end: a.start + a.duration + 0.6 })),
+      ...avoid.map(a => ({ start: a.start - padOf(a), end: a.start + a.duration + padOf(a) })),
     ].sort((a, b) => a.start - b.start)
     // Tight spacing on purpose: the reference runs a cutaway or graphic every
     // few seconds — 1.2s clearance from graphics and ~3.5s of talking head
@@ -452,19 +472,14 @@ export async function planCustomBrollSlots(
   duration: number,
   profile: ContentProfile | null,
   clips: CustomClip[],
-  avoid: Array<{ start: number; duration: number }> = [],
+  avoid: AvoidWindow[] = [],
   dense = false,
   // Manual coverage percent from the studio slider (0-50). null = smart.
   coverage: number | null = null,
 ): Promise<BrollItem[]> {
   if (!clips.length || duration < 8 || editedWords.length < 10) return []
-  const minGap = dense ? 1.2 : 2.0
+  const minGap = cutawayMinGap(dense)
 
-  // Same adaptive cadence as stock covers; each clip may appear up to twice
-  // so short clip lists still cover a long video without going stale.
-  const CADENCE: Record<ContentProfile['brollableRichness'], number> = dense
-    ? { none: 4, some: 3.5, rich: 3 }
-    : { none: 12, some: 9, rich: 6.5 }
   // CLIP-CENTRIC, not slot-centric. The creator uploaded these clips FOR this
   // video, so the job is "give each clip its best moment", not "here are N
   // slots, which clips win one". Slot-centric planning made clips compete and
@@ -539,9 +554,9 @@ export async function planCustomBrollSlots(
     plannerFailed = true
   }
 
-  // Enforce the rules in code (the model proposes, the code disposes), then
-  // fall back to an even spread if the model under-delivers badly — the
-  // creator gave us clips, so clips should appear.
+  // Enforce the rules in code (the model proposes, the code disposes). How MANY
+  // it placed is the model's call and is never second-guessed below — only a
+  // planner that failed outright falls through to the even spread.
   const items: BrollItem[] = []
   const uses = new Map<number, number>()
   let lastEnd = 0
@@ -554,7 +569,7 @@ export async function planCustomBrollSlots(
     const start = Math.max(2.5, Math.max(lastEnd + minGap, c.start as number))
     const dur = Math.min(4.0, Math.min(clip.duration, Math.max(3.0, c.duration as number)))
     if (start + dur > duration - 1.5) continue
-    if (avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)) continue
+    if (avoid.some(a => start < a.start + a.duration + padOf(a) && start + dur > a.start - padOf(a))) continue
     // A long clip only ever needs `dur` seconds of itself. First use plays
     // from the top; a second use cuts to the clip's tail so the same footage
     // never repeats on screen.
@@ -580,54 +595,23 @@ export async function planCustomBrollSlots(
     console.log('[broll] planner matched no custom clips to the transcript — leaving custom cutaways out')
   }
 
-  // TOP-UP: the creator uploaded these clips for THIS video, so a planner that
-  // places 2 cutaways out of a 12-cutaway target has under-delivered on her
-  // intent, not protected the edit. Fill the gap with her UNUSED clips, spread
-  // across the parts of the timeline that are still empty, respecting every
-  // timing rule below. Only runs when the planner returned something (a real
-  // failure still takes the fallback spread further down).
-  // Deliberately a FLOOR, not a filler. The planner's judgement stays primary:
-  // this only rescues the pathological case (2 cutaways out of a 12 target,
-  // seen on real client clips) and stops well short of the ceiling, so weakly
-  // matching clips are left out rather than forced in. Filling all the way to
-  // the target used every clip and produced placements like an elevator door
-  // over "is a mental" — exactly the AI-slop look we are avoiding.
-  const TOP_UP_BELOW = 0.4   // only rescue when the planner clearly under-delivered
-  const TOP_UP_TO = 0.6      // and only up to here, never the full target
-  const topUpCeiling = Math.max(1, Math.floor(targetCount * TOP_UP_TO))
-  if (!plannerFailed && items.length && items.length < Math.floor(targetCount * TOP_UP_BELOW)) {
-    const unused = clips
-      .map((c, idx) => ({ c, idx }))
-      .filter(({ idx }) => (uses.get(idx) ?? 0) === 0)
-    const gapOk = (start: number, dur: number) =>
-      start >= 2.5 &&
-      start + dur <= duration - 1.5 &&
-      !items.some(it => start < it.start + it.duration + minGap && start + dur > it.start - minGap) &&
-      !avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)
-
-    const step = (duration - 4) / (targetCount + 1)
-    for (const { c, idx } of unused) {
-      if (items.length >= topUpCeiling) break
-      const dur = Math.min(3.2, c.duration)
-      // Walk candidate slots on the cadence grid and take the first that fits.
-      for (let k = 1; k <= targetCount; k++) {
-        const start = Number((2.5 + step * k).toFixed(2))
-        if (!gapOk(start, dur)) continue
-        items.push({
-          start,
-          duration: Number(dur.toFixed(2)),
-          file: c.file,
-          kind: 'video',
-          layout: 'cover',
-          query: c.description.slice(0, 60),
-        })
-        uses.set(idx, 1)
-        break
-      }
-    }
-    items.sort((a, b) => a.start - b.start)
-    console.log(`[broll] topped up to ${items.length} cutaway(s) using the creator's unused clips`)
-  }
+  // NO CONTENT-BLIND TOP-UP HERE. Twice now a block has sat at this point that
+  // walked her UNUSED clips in upload order and dropped them onto an arithmetic
+  // grid (start = 2.5 + step * k) whenever the planner "under-delivered". It
+  // read neither the transcript nor the clip description, so it could only ever
+  // place footage by luck: it shipped an elevator over "what you should be
+  // seeing on the screen right now" and her TOP DOCTOR diplomas over unrelated
+  // speech. Each version carried a comment promising it would not do that.
+  //
+  // A low count from the semantic planner is the CORRECT answer — it means
+  // little of this footage fits this script — not a shortfall to paper over.
+  // The owner's rule is to use her clips "when they make sense, otherwise its
+  // fine". Never force them. If cutaway density is the real problem, fix it
+  // where content is actually known: the planner prompt above, or 'both' mode,
+  // which sources stock for the moments her clips genuinely do not cover.
+  //
+  // Genuine planner FAILURE (API error / malformed response) is a different
+  // thing and still has a safety net — the fallback spread directly below.
 
   // Fallback spread: ONLY when the planner failed to return a usable answer
   // (API error / malformed response). The creator gave us clips and we couldn't

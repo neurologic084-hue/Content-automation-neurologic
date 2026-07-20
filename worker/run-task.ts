@@ -13,6 +13,7 @@ import {
   renderEditVariantTask,
   finalizeSubmagicVariant,
 } from '../lib/motion-renderer'
+import { startSubmagicVariantTask } from '../lib/submagic-start'
 import type { PipelineTask } from '../lib/sandbox-tasks'
 
 async function main() {
@@ -29,6 +30,9 @@ async function main() {
       break
     case 'render-variant':
       await renderEditVariantTask(payload.jobId, payload.variantId)
+      break
+    case 'start-submagic':
+      await startSubmagicVariantTask(payload.jobId, payload.variantId, payload.force)
       break
     case 'finalize-submagic':
       await finalizeSubmagicVariant(payload.jobId, payload.variantId, payload.downloadUrl)

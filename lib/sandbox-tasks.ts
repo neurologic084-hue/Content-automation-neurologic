@@ -18,10 +18,12 @@ import {
   renderEditVariantTask,
   finalizeSubmagicVariant,
 } from './motion-renderer'
+import { startSubmagicVariantTask } from './submagic-start'
 
 export type PipelineTask =
   | { task: 'prepare-source'; jobId: string; sourceUrl: string }
   | { task: 'render-variant'; jobId: string; variantId: string }
+  | { task: 'start-submagic'; jobId: string; variantId: string; force?: boolean }
   | { task: 'finalize-submagic'; jobId: string; variantId: string; downloadUrl: string }
 
 // Env the worker needs inside the sandbox. Only names listed here are passed.
@@ -49,6 +51,8 @@ async function runInline(payload: PipelineTask): Promise<void> {
       return prepareJobSourceTask(payload.jobId, payload.sourceUrl)
     case 'render-variant':
       return renderEditVariantTask(payload.jobId, payload.variantId)
+    case 'start-submagic':
+      return startSubmagicVariantTask(payload.jobId, payload.variantId, payload.force)
     case 'finalize-submagic':
       return finalizeSubmagicVariant(payload.jobId, payload.variantId, payload.downloadUrl)
   }

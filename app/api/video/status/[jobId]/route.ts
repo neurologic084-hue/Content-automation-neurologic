@@ -26,6 +26,34 @@ function isSubmagicHostedUrl(url: string | null | undefined): boolean {
 // per server process — an expired source URL would otherwise retry forever.
 const healAttempted = new Set<string>()
 
+// Cross-job stale sweep, rate-limited per server process so a polling studio
+// tab (which hits this route every few seconds) triggers it at most this often.
+const GLOBAL_SWEEP_EVERY_MS = 5 * 60 * 1000
+let lastGlobalSweep = 0
+
+// Fails dead variants on jobs OTHER than the one being viewed. The daily cron
+// does this too; this makes normal app usage close the gap between ticks so a
+// dead variant is not still claiming to be 'processing' hours later.
+async function sweepOtherProcessingJobs(
+  db: Awaited<ReturnType<typeof createClient>>,
+  skipJobId: string,
+): Promise<void> {
+  try {
+    const { data: jobs } = await db
+      .from('video_jobs')
+      .select('id, created_at, variants')
+      .eq('status', 'processing')
+      .neq('id', skipJobId)
+    let swept = 0
+    for (const j of jobs ?? []) {
+      swept += await sweepStaleVariants(db, j.id, (j.variants ?? []) as VideoVariant[], j.created_at)
+    }
+    if (swept) console.warn(`[status] background sweep failed ${swept} dead variant(s) on other jobs`)
+  } catch (e) {
+    console.warn('[status] background sweep skipped:', (e as Error).message)
+  }
+}
+
 // Jobs snapshot the variant definitions (name/description/flags) at creation
 // time, so old jobs keep showing stale labels after a template is renamed or
 // redesigned. Overlay the CURRENT definitions for display — render state
@@ -72,6 +100,15 @@ export async function GET(
     if (swept > 0) {
       const { data: refreshed } = await supabase.from('video_jobs').select('*').eq('id', jobId).single()
       if (refreshed) Object.assign(job, refreshed)
+    }
+    // ...and opportunistically sweep OTHER jobs too. The cron that was meant to
+    // cover closed tabs runs once a day, so a variant whose worker died could
+    // sit 'processing' for up to 24h looking alive — observed in production.
+    // Anyone opening any job now clears the rest. Throttled per process and
+    // never awaited: this is housekeeping, not part of the response.
+    if (Date.now() - lastGlobalSweep > GLOBAL_SWEEP_EVERY_MS) {
+      lastGlobalSweep = Date.now()
+      void sweepOtherProcessingJobs(supabase, jobId)
     }
   }
 
