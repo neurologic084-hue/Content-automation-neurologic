@@ -104,6 +104,45 @@ const PLATFORM_LABEL: Record<string, string> = {
   facebook: 'Facebook', linkedin: 'LinkedIn', twitter: 'X / Twitter', threads: 'Threads',
 }
 
+// Storage meter. R2 grows and bills automatically, so nothing ever fills up
+// and breaks — the quota shown is a soft budget (STORAGE_QUOTA_GB) that makes
+// growth visible before the bill does. Amber inside the last GB.
+function StorageMeter() {
+  const [usage, setUsage] = useState<{ usedGb: number; quotaGb: number; leftGb: number; warning: boolean } | null>(null)
+
+  useEffect(() => {
+    fetch('/api/storage/usage')
+      .then(r => r.json())
+      .then(d => { if (typeof d.usedGb === 'number') setUsage(d) })
+      .catch(() => { /* meter is informational — fail quiet */ })
+  }, [])
+
+  if (!usage) return <p className="text-[13px] text-[#9B9B97]">Checking storage…</p>
+  const pct = Math.min(100, Math.round((usage.usedGb / usage.quotaGb) * 100))
+  return (
+    <div className="space-y-2.5">
+      <div className="h-2.5 rounded-full bg-[#F0EFED] overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${pct}%`, background: usage.warning ? '#D97706' : '#16A34A' }}
+        />
+      </div>
+      <div className="flex items-center justify-between text-[12px]">
+        <span className="text-[#71717A]">{usage.usedGb} GB used of {usage.quotaGb} GB</span>
+        <span className={usage.warning ? 'text-[#D97706] font-semibold' : 'text-[#9B9B97]'}>
+          {usage.leftGb} GB left
+        </span>
+      </div>
+      {usage.warning && (
+        <p className="text-[12px] text-[#D97706] leading-relaxed">
+          Storage is nearly at its budget. Nothing will break — space grows automatically and
+          billing adjusts on its own — but deleting old videos from the library keeps the bill flat.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // Live list of the social accounts connected in Blotato. Read-only on purpose:
 // connecting/swapping an account is an OAuth flow that has to run in Blotato's
 // own dashboard — this section makes that path obvious instead of hidden.
@@ -617,6 +656,14 @@ export default function SettingsPage() {
           description="Where your videos get published. Accounts are linked through Blotato — connect or swap them there and they show up here automatically."
         >
           <ConnectedAccounts />
+        </Section>
+
+        <Section
+          num="09"
+          title="Storage"
+          description="Space used by your videos and their working files. It grows automatically when needed — this keeps the growth visible."
+        >
+          <StorageMeter />
         </Section>
 
       </div>
