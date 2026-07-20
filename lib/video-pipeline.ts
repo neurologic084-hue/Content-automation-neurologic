@@ -204,8 +204,13 @@ export const VARIANT_DEFINITIONS: VideoVariantDef[] = [
 ]
 
 export function extractDriveFileId(url: string): string | null {
-  const match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
-  return match?.[1] ?? null
+  // Both shapes people actually paste: the share link (/file/d/<id>/view) and
+  // the direct-download form (uc?export=download&id=<id>) that this app itself
+  // generates. Only matching the first made a link we produce look invalid.
+  const share = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
+  if (share) return share[1]
+  if (!/drive\.google\.com|googleusercontent\.com/.test(url)) return null
+  return url.match(/[?&]id=([a-zA-Z0-9_-]+)/)?.[1] ?? null
 }
 
 export function extractDriveFolderId(url: string): string | null {

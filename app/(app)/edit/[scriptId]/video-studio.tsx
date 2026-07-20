@@ -194,6 +194,13 @@ export function VideoStudio({ script, existingJobId }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    // A pasted-but-unconfirmed folder is the silent-failure case: the job would
+    // start, ignore the links, and produce a video with no B-roll for no
+    // visible reason. Make her confirm (or clear the box) first.
+    if (customBrollText.trim() && !brollConfirmed) {
+      setError('Press "Confirm B-roll" to check your clips first — or clear the box to use stock B-roll.')
+      return
+    }
     setStatus('submitting')
 
     const res = await fetch('/api/video/process', {
@@ -259,7 +266,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
       })
       const data = await res.json()
       setBrollCheck(res.ok
-        ? { state: 'ok', clips: data.clips }
+        ? { state: 'ok', clips: data.clips, error: data.warning }
         : { state: 'error', error: data.error ?? 'Could not read those links.' })
     } catch {
       setBrollCheck({ state: 'error', error: 'Could not reach the server. Try again.' })
@@ -481,6 +488,9 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     <span className="text-[12px] font-medium text-[#16A34A]">
                       {brollCheck.clips} clip{brollCheck.clips === 1 ? '' : 's'} found
                     </span>
+                  )}
+                  {brollConfirmed && brollCheck.error && (
+                    <span className="text-[12px]" style={{ color: '#B45309' }}>{brollCheck.error}</span>
                   )}
                   {brollCheck.state === 'error' && (
                     <span className="text-[12px] text-[#EF4444]">{brollCheck.error}</span>
