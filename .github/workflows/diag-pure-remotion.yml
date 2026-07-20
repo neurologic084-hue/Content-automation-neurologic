@@ -48,8 +48,10 @@ jobs:
           cd remotion
           mkdir -p public/edit-cache
           # 1080x1920 talking-head stand-in, silent, same shape as real source.
-          npx --yes ffmpeg-static --version >/dev/null 2>&1 || true
-          FFMPEG=$(node -e "process.stdout.write(require('ffmpeg-static'))" --prefix .. 2>/dev/null || echo ffmpeg)
+          # ffmpeg is NOT on PATH for this step (the app adds the bundled binary
+          # at runtime), so resolve ffmpeg-static from the root node_modules.
+          FFMPEG=$(cd .. && node -e "process.stdout.write(require('ffmpeg-static'))")
+          echo "using ffmpeg at $FFMPEG"
           "$FFMPEG" -y -f lavfi -i "testsrc2=size=1080x1920:rate=30:duration=$SECS" \
             -c:v libx264 -preset veryfast -pix_fmt yuv420p \
             public/edit-cache/diag-source.mp4
