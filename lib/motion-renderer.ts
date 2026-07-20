@@ -2116,8 +2116,12 @@ async function renderRemotionEdit(
       // only the Sandbox additionally needs the glibc-patched compositor, since
       // GitHub runners are Ubuntu and their stock compositor is fine.
       const constrained = isConstrainedRenderHost()
+      // --log=verbose on constrained hosts: these renders die blind (zero
+      // output between render start and a delayRender timeout ~15 min later),
+      // so a slow render and a wedged page look identical. Verbose shows
+      // per-frame progress in the Actions log. Cost is log volume only.
       const sandboxFlags = constrained
-        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2` +
+        ? ` --offthreadvideo-cache-size-in-bytes=536870912 --concurrency=2 --log=verbose` +
           (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
         : ' --concurrency=4'
       // 600s dev machine / 900s constrained host delayRender: headless-Chrome
