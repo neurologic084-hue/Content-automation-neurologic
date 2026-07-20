@@ -46,6 +46,28 @@ export async function sweepStaleVariants(
   })
 
   for (const v of stale) {
+    // LAST LOOK before declaring a Submagic render dead: it runs on THEIR
+    // servers and survives anything that happens to ours. If the process that
+    // was polling it died (container restart, OOM), the render may have
+    // FINISHED with nobody watching — failing it here would throw away a
+    // completed, paid-for video. One poll decides; a still-processing answer
+    // past the sweep threshold falls through to the failure below, since no
+    // real Submagic render takes that long.
+    if (v.external_id) {
+      try {
+        const { pollSubmagicJob } = await import('./video-pipeline')
+        const res = await pollSubmagicJob(v.external_id)
+        if (res.status === 'ready' && res.downloadUrl) {
+          console.warn(`[stale-sweep] ${jobId}:${v.id} actually FINISHED on Submagic — rescuing instead of failing`)
+          // Dynamic import to stay off this module's init path: sandbox-tasks
+          // transitively imports this file (submagic-start needs STALE_MS), and
+          // a static cycle here would race module initialisation.
+          const { dispatchPipelineTask } = await import('./sandbox-tasks')
+          await dispatchPipelineTask({ task: 'finalize-submagic', jobId, variantId: v.id, downloadUrl: res.downloadUrl })
+          continue
+        }
+      } catch { /* poll failed — treat as dead, exactly as before */ }
+    }
     const neverStarted = !v.progress
     console.warn(
       `[stale-sweep] variant ${jobId}:${v.id} ${neverStarted ? `never reported progress in ${NEVER_STARTED_MS / 60000}m` : `stuck processing past ${STALE_MS / 60000}m`} — marking failed`,

@@ -30,6 +30,7 @@ import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
 import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, selectBestClips, normalizeBrollSetting, normalizeBrollSource, coverageTargetCount, cutawayMinGap, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode, type BrollSource } from './broll'
 import { geminiGenerate } from './gemini'
+import { STALE_MS } from './stale-sweep'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
 import { planKoeGraphics, planKoeSfxCues, type KoeGraphic } from './koe-graphics'
@@ -2792,7 +2793,11 @@ async function renderRemotionEdit(
 // use from the API route).
 async function pollSubmagicUntilReady(projectId: string): Promise<string> {
   const INTERVAL_MS = 8_000
-  const MAX_ATTEMPTS = 75 // ~10 minutes
+  // Same window as the stale sweep, for the same reason as submagic-start's
+  // poll loop: a long render is not a dead render, and giving up at 10 minutes
+  // was failing jobs Submagic went on to finish. The variant this await belongs
+  // to shows 'processing' the whole time, so patience costs nothing visible.
+  const MAX_ATTEMPTS = Math.ceil(STALE_MS / INTERVAL_MS)
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     await new Promise(r => setTimeout(r, INTERVAL_MS))
     const result = await pollSubmagicJob(projectId).catch(() => null)
@@ -2800,7 +2805,7 @@ async function pollSubmagicUntilReady(projectId: string): Promise<string> {
     if (result.status === 'ready' && result.downloadUrl) return result.downloadUrl
     throw new Error(result.error ?? 'Submagic job failed')
   }
-  throw new Error('Submagic job timed out after 10 minutes')
+  throw new Error(`Submagic job still rendering after ${Math.round(STALE_MS / 60000)} minutes — giving up`)
 }
 
 export interface RenderVariantOptions {
