@@ -85,6 +85,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
   // here instead of silently producing a render with no B-roll.
   const [brollCheck, setBrollCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; clips?: number; error?: string }>({ state: 'idle' })
   const brollConfirmed = brollCheck.state === 'ok'
+  // Same treatment for the MAIN footage: an unshared or wrong-kind link used to
+  // fail minutes into prep, after the job had already been created.
+  const [footageCheck, setFootageCheck] = useState<{ state: 'idle' | 'checking' | 'ok' | 'error'; error?: string }>({ state: 'idle' })
+  const footageConfirmed = footageCheck.state === 'ok'
   const [musicMode, setMusicMode] = useState<MusicMode>('smart')
   const [gradeMode, setGradeMode] = useState<GradeMode>('smart')
   const [brollMode, setBrollMode] = useState<BrollMode>('smart')
@@ -197,6 +201,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
     // A pasted-but-unconfirmed folder is the silent-failure case: the job would
     // start, ignore the links, and produce a video with no B-roll for no
     // visible reason. Make her confirm (or clear the box) first.
+    if (!footageConfirmed) {
+      setError('Press "Confirm video" first so we can check your footage link is accessible.')
+      return
+    }
     if (customBrollText.trim() && !brollConfirmed) {
       setError('Press "Confirm B-roll" to check your clips first — or clear the box to use stock B-roll.')
       return
@@ -253,6 +261,21 @@ export function VideoStudio({ script, existingJobId }: Props) {
     // A never-started variant is a plain "Start" — nothing to lose, no prompt.
     if (!force && v?.status === 'pending') return handleStartVariant(variantId, force)
     setConfirmRetry({ id: variantId, force, label: v?.name ?? variantId })
+  }
+
+  async function confirmFootage() {
+    if (!driveUrl.trim()) return
+    setFootageCheck({ state: 'checking' })
+    try {
+      const res = await fetch('/api/video/broll-check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'footage', links: [driveUrl.trim()] }),
+      })
+      const data = await res.json()
+      setFootageCheck(res.ok ? { state: 'ok' } : { state: 'error', error: data.error ?? 'Could not read that link.' })
+    } catch {
+      setFootageCheck({ state: 'error', error: 'Could not reach the server. Try again.' })
+    }
   }
 
   async function confirmBroll() {
@@ -437,13 +460,26 @@ export function VideoStudio({ script, existingJobId }: Props) {
             type="url"
             placeholder="https://drive.google.com/file/d/..."
             value={driveUrl}
-            onChange={e => setDriveUrl(e.target.value)}
+            onChange={e => { setDriveUrl(e.target.value); setFootageCheck({ state: 'idle' }) }}
             required
             className="w-full h-11 px-4 rounded-xl border border-[#E4E4E0] text-sm outline-none mb-3"
             style={{ background: '#FAFAFA' }}
             onFocus={e => { e.currentTarget.style.borderColor = '#FF4F17' }}
             onBlur={e => { e.currentTarget.style.borderColor = '#E4E4E0' }}
           />
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <button
+              type="button"
+              onClick={confirmFootage}
+              disabled={!driveUrl.trim() || footageCheck.state === 'checking'}
+              className="px-4 py-2 rounded-xl text-[13px] font-semibold cursor-pointer disabled:opacity-40 transition-all"
+              style={{ background: footageConfirmed ? '#DCFCE7' : '#F4F3F0', color: footageConfirmed ? '#16A34A' : '#18181B' }}
+            >
+              {footageCheck.state === 'checking' ? 'Checking…' : footageConfirmed ? '✓ Confirmed' : 'Confirm video'}
+            </button>
+            {footageConfirmed && <span className="text-[12px] font-medium text-[#16A34A]">Video is accessible</span>}
+            {footageCheck.state === 'error' && <span className="text-[12px] text-[#EF4444]">{footageCheck.error}</span>}
+          </div>
 
           {/* Custom B-roll — the pipeline works end-to-end; shown as a Coming
               soon teaser while it's polished. Flip CUSTOM_BROLL_COMING_SOON to
