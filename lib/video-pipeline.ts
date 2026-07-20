@@ -245,6 +245,22 @@ export async function transcribeVideo(videoUrl: string): Promise<{
 
   if (!res.ok) {
     const err = await res.text()
+    // Same fallback as transcribeLocalFile: a drained ElevenLabs quota (which
+    // it reports as HTTP 401) must not be able to stop a render on its own.
+    // Downloads the media and re-sends it to OpenRouter whisper-1, which
+    // returns real word timings on the OpenRouter key we already use.
+    if (process.env.OPENROUTER_API_KEY) {
+      console.warn(`[video-pipeline] ElevenLabs transcription failed (${res.status}) — falling back to OpenRouter Whisper`)
+      try {
+        const media = await fetch(videoUrl, { signal: AbortSignal.timeout(180_000) })
+        if (!media.ok) throw new Error(`could not fetch media for fallback: HTTP ${media.status}`)
+        const bytes = new Uint8Array(await media.arrayBuffer())
+        const words = await transcribeBytesWithOpenRouter(bytes)
+        return { transcript: words.map(w => w.text).join(' '), words }
+      } catch (e) {
+        throw new Error(`ElevenLabs transcription failed: ${err.slice(0, 200)} (OpenRouter fallback also failed: ${(e as Error).message})`)
+      }
+    }
     throw new Error(`ElevenLabs transcription failed: ${err}`)
   }
 
@@ -257,6 +273,38 @@ export async function transcribeVideo(videoUrl: string): Promise<{
       end: w.end,
     })),
   }
+}
+
+// OpenRouter whisper-1 on raw bytes — the cloud-URL path's fallback. Needs
+// verbose_json + word granularity for per-word timings; 25MB cap.
+async function transcribeBytesWithOpenRouter(
+  bytes: Uint8Array,
+): Promise<{ text: string; start: number; end: number }[]> {
+  if (bytes.byteLength > 25 * 1024 * 1024) {
+    throw new Error(`audio is ${(bytes.byteLength / 1048576).toFixed(1)}MB, over whisper-1's 25MB limit`)
+  }
+  const form = new globalThis.FormData()
+  form.append('model', 'openai/whisper-1')
+  form.append('response_format', 'verbose_json')
+  form.append('timestamp_granularities[]', 'word')
+  form.append('language', 'en')
+  form.append('file', new Blob([new Uint8Array(bytes)], { type: 'video/mp4' }), 'media.mp4')
+
+  const res = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(180_000),
+  })
+  if (!res.ok) throw new Error(`OpenRouter Whisper failed (${res.status}): ${(await res.text()).slice(0, 200)}`)
+  const data = await res.json()
+  const words = (data.words ?? [])
+    .filter((w: { word?: string; text?: string }) => (w.word ?? w.text ?? '').trim())
+    .map((w: { word?: string; text?: string; start: number; end: number }) => ({
+      text: (w.word ?? w.text)!, start: w.start, end: w.end,
+    }))
+  if (!words.length) throw new Error('OpenRouter Whisper returned no word timestamps')
+  return words
 }
 
 // ── Submagic   Submit full-featured job ───────────────────────────────────────

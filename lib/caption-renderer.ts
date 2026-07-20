@@ -411,9 +411,14 @@ async function sttElevenLabs(fileBuffer: Uint8Array, uploadType: string, uploadN
     throw new Error(`ElevenLabs transcription failed (${res.status}): ${err.slice(0, 300)}`)
   }
   const data = await res.json()
-  return (data.words ?? [])
+  const words = (data.words ?? [])
     .filter((w: { text: string; start: number; end: number }) => w.text?.trim())
     .map((w: { text: string; start: number; end: number }) => ({ text: w.text, start: w.start, end: w.end }))
+  // A 200 with no words is still a failure for us — captions, cuts and B-roll
+  // placement all need timings. Throwing here hands it to the fallback instead
+  // of silently rendering a video with no captions.
+  if (!words.length) throw new Error('ElevenLabs returned no word timestamps')
+  return words
 }
 
 // OpenRouter whisper-1 — fallback. Same word-level timestamps, different field
