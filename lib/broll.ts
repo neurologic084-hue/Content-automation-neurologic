@@ -479,21 +479,28 @@ export async function planCustomBrollSlots(
         role: 'user',
         content: [
           "Place the creator's OWN B-roll clips as full-screen cutaways on a talking-head video.",
-          `Video duration: ${duration.toFixed(1)}s. Place AT MOST ${targetCount} cutaway(s) — this is a hard ceiling, not a goal. Placing FEWER, or ZERO, is the correct answer whenever the clips do not clearly fit.`,
+          `Video duration: ${duration.toFixed(1)}s. Aim for about ${targetCount} cutaway(s); ${targetCount} is the ceiling.`,
           'Available clips (index: length, what it shows):',
           ...clipLines,
           '',
           'Transcript with word start times:',
           timed,
           '',
+          'IMPORTANT — these are the creator\'s OWN clips, filmed and hand-picked BY HER for',
+          'THIS video. They are not random stock. Footage of her own space (rooms, hallways,',
+          'a desk, diplomas, equipment, hands working) is ATMOSPHERIC: it sets place and',
+          'breaks up a talking head, and it belongs in the video even when it does not',
+          'literally depict the sentence being spoken. Judge relevance generously.',
+          '',
           'How to decide (do this per clip):',
-          '- Ask: does what the clip SHOWS directly illustrate something the speaker actually',
-          '  says? e.g. a laptop clip fits "I opened my laptop"; a clip of flames, a night sky,',
-          '  or a spinning clock illustrates almost nothing in a normal talking-head video.',
-          '- Place a clip ONLY at a moment its content genuinely illustrates. If a clip does not',
-          '  clearly match ANY moment in the transcript, DO NOT use it at all — leave it out.',
-          '- Never place a clip just to reach the ceiling. An irrelevant cutaway is worse than',
-          '  none and makes the video look auto-generated. Returning an empty list is normal.',
+          '- A literal illustration is best: a laptop clip over "I opened my laptop".',
+          '- A TOPICAL or ATMOSPHERIC fit is also good and normal: her clinic hallway while',
+          '  she describes her practice, her equipment while she explains the method, a calm',
+          '  room while she describes calming down. Use these.',
+          '- Prefer cutting away during EXPLANATORY passages and holding on her face for the',
+          '  hook, emotional beats and the call to action.',
+          '- Only skip a clip when it would actively confuse the viewer at every moment.',
+          '  Using most of the clips is the expected outcome — she supplied them on purpose.',
           'Constraints for any cutaway you DO place:',
           '- Each clip may be used at most twice; prefer using every fitting clip once first.',
           '- duration: 1.8 to 3.8 seconds, and never longer than the clip itself.',
@@ -550,6 +557,47 @@ export async function planCustomBrollSlots(
   // rather than forcing footage that doesn't fit what's being said.
   if (!items.length && !plannerFailed) {
     console.log('[broll] planner matched no custom clips to the transcript — leaving custom cutaways out')
+  }
+
+  // TOP-UP: the creator uploaded these clips for THIS video, so a planner that
+  // places 2 cutaways out of a 12-cutaway target has under-delivered on her
+  // intent, not protected the edit. Fill the gap with her UNUSED clips, spread
+  // across the parts of the timeline that are still empty, respecting every
+  // timing rule below. Only runs when the planner returned something (a real
+  // failure still takes the fallback spread further down).
+  const MIN_FILL_RATIO = 0.6
+  if (!plannerFailed && items.length && items.length < Math.floor(targetCount * MIN_FILL_RATIO)) {
+    const unused = clips
+      .map((c, idx) => ({ c, idx }))
+      .filter(({ idx }) => (uses.get(idx) ?? 0) === 0)
+    const gapOk = (start: number, dur: number) =>
+      start >= 2.5 &&
+      start + dur <= duration - 1.5 &&
+      !items.some(it => start < it.start + it.duration + minGap && start + dur > it.start - minGap) &&
+      !avoid.some(a => start < a.start + a.duration + 0.6 && start + dur > a.start - 0.6)
+
+    const step = (duration - 4) / (targetCount + 1)
+    for (const { c, idx } of unused) {
+      if (items.length >= targetCount) break
+      const dur = Math.min(3.2, c.duration)
+      // Walk candidate slots on the cadence grid and take the first that fits.
+      for (let k = 1; k <= targetCount; k++) {
+        const start = Number((2.5 + step * k).toFixed(2))
+        if (!gapOk(start, dur)) continue
+        items.push({
+          start,
+          duration: Number(dur.toFixed(2)),
+          file: c.file,
+          kind: 'video',
+          layout: 'cover',
+          query: c.description.slice(0, 60),
+        })
+        uses.set(idx, 1)
+        break
+      }
+    }
+    items.sort((a, b) => a.start - b.start)
+    console.log(`[broll] topped up to ${items.length} cutaway(s) using the creator's unused clips`)
   }
 
   // Fallback spread: ONLY when the planner failed to return a usable answer
