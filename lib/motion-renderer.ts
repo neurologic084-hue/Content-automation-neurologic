@@ -317,6 +317,68 @@ async function stageRenderWorkCopy(compressedPath: string, workPath: string): Pr
   if (!fs.existsSync(workPath)) throw new Error('Downscaling the render work copy produced no output')
 }
 
+// Audio cleaning (Submagic -> Auphonic -> ElevenLabs) and transcription used to
+// run inside EVERY Motion Lab variant: same source, same cleaner, same result,
+// three times per job. That burned three Auphonic productions and three
+// transcriptions for byte-identical output, and added ~4 minutes to a 3-variant
+// job. Both now happen ONCE in source prep and every variant reuses them.
+//
+// Safe to share: the cleaned audio is identical for all variants (only the CUTS
+// differ, and those are computed per-variant from the same word timings).
+const SHARED_CLEAN_NAME = 'source-clean.mp4'
+const SHARED_WORDS_NAME = 'source-words.json'
+
+// Builds the shared cleaned source + its word timings and puts both in R2.
+// Best-effort throughout: any failure just means variants fall back to doing
+// the work themselves, exactly as before.
+async function buildSharedCleanAudio(jobId: string, compressedPath: string, outDir: string): Promise<void> {
+  const cleanPath = path.join(outDir, SHARED_CLEAN_NAME)
+  try {
+    fs.copyFileSync(compressedPath, cleanPath)
+    const cleaner = await cleanAudioInPlace(cleanPath)
+    console.log(`[shared-audio] cleaned once for the whole job via ${cleaner}`)
+    await uploadToStorage(cleanPath, SHARED_CLEAN_NAME, jobId)
+
+    // Transcribe the CLEANED audio: better words, and the timings then match
+    // exactly what every variant renders from.
+    const words = await transcribeLocalFile(cleanPath)
+    if (words.length) {
+      const wordsPath = path.join(outDir, SHARED_WORDS_NAME)
+      fs.writeFileSync(wordsPath, JSON.stringify(words))
+      await uploadToStorage(wordsPath, SHARED_WORDS_NAME, jobId)
+      console.log(`[shared-audio] ${words.length} word timings shared with every variant`)
+      try { fs.unlinkSync(wordsPath) } catch { /* best-effort */ }
+    }
+  } catch (e) {
+    console.warn(`[shared-audio] shared clean/transcribe failed — variants will each do their own: ${(e as Error).message}`)
+  }
+}
+
+// Pulls the shared cleaned source into this variant's work path. Returns false
+// when there isn't one (older job, or prep's best-effort step failed), and the
+// caller then cleans locally exactly as before.
+async function useSharedCleanAudio(jobId: string, workPath: string): Promise<boolean> {
+  if (!process.env.R2_PUBLIC_URL) return false
+  const url = `${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`
+  try {
+    const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
+    if (!head.ok) return false
+    await downloadFile(url, workPath)
+    return true
+  } catch { return false }
+}
+
+// The word timings that go with the shared cleaned audio.
+async function sharedWords(jobId: string): Promise<{ text: string; start: number; end: number }[] | null> {
+  if (!process.env.R2_PUBLIC_URL) return null
+  try {
+    const res = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_WORDS_NAME}`, { signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) return null
+    const words = await res.json()
+    return Array.isArray(words) && words.length ? words : null
+  } catch { return null }
+}
+
 // Ensures the shared compressed local copy exists for this job -- downloads
 // raw if needed, compresses if needed (file size only, original resolution/
 // aspect ratio untouched). Both steps are idempotent (check for an existing
@@ -585,6 +647,13 @@ export async function prepareJobSource(
   } catch (e) {
     console.warn(`[motion-renderer] pre-cut step failed for job=${jobId} — Submagic will cut on its own:`, (e as Error).message)
   }
+
+  // Clean the audio and transcribe it ONCE for the whole job (Submagic ->
+  // Auphonic -> ElevenLabs, in that order), so the Motion Lab variants each
+  // reuse it instead of repeating both. Best-effort — a failure here just means
+  // each variant does its own, as before.
+  await onProgress?.(97, 'Cleaning audio')
+  await buildSharedCleanAudio(jobId, localPath, outDir)
 
   // Analyze the footage once now, while the compressed file is warm on disk, so
   // the content profile is ready before any variant starts. Best-effort — never
@@ -1772,7 +1841,20 @@ async function renderRemotionEdit(
     const profile = await ensureContentProfile(jobId, sourceUrl)
 
     await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
-    await cleanAudioInPlace(workPath)
+    // Prep already cleaned this job's audio once for every variant. Reuse it;
+    // only clean here when that shared step is unavailable.
+    const sharedClean = await useSharedCleanAudio(jobId, workPath)
+    if (sharedClean) {
+      console.log('[motion-renderer] reusing the job\'s shared cleaned audio (no second clean)')
+      // The shared copy is the COMPRESSED source, so it still needs the 4K
+      // downscale the work copy would have had.
+      const tmp = workPath + '.pre-scale.mp4'
+      fs.renameSync(workPath, tmp)
+      await stageRenderWorkCopy(tmp, workPath)
+      try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+    } else {
+      await cleanAudioInPlace(workPath)
+    }
 
     // The render kit: the variant's FIXED identity (caption style, B-roll
     // flavor) plus smart-randomized style (transition weighted by footage
@@ -1788,8 +1870,10 @@ async function renderRemotionEdit(
     // These four all read workPath and don't depend on each other — run them
     // together instead of serially (overlaps the slow Scribe call with the
     // ffmpeg/ffprobe passes).
+    const cachedWords = sharedClean ? await sharedWords(jobId) : null
+    if (cachedWords) console.log(`[motion-renderer] reusing ${cachedWords.length} shared word timings (no second transcription)`)
     const [words, silences, duration, dimensions] = await Promise.all([
-      transcribeLocalFile(workPath),
+      cachedWords ?? transcribeLocalFile(workPath),
       detectSilences(workPath),
       getVideoDuration(workPath),
       probeVideoDimensions(workPath),
