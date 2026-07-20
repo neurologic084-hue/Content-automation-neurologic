@@ -40,6 +40,16 @@ const BROLL_OPTIONS: { value: BrollMode; label: string; hint: string }[] = [
   { value: 'manual', label: 'Slider', hint: 'Pick the exact amount' },
   { value: 'none',   label: 'None',   hint: 'Talking head only' },
 ]
+// Where cutaways come from, once she has supplied her own clips. Mirrors
+// BrollSource in lib/broll.ts (kept inline so no server module reaches the
+// client bundle). Only shown when a folder/link is actually provided.
+type BrollSource = 'both' | 'custom' | 'stock'
+const BROLL_SOURCE_OPTIONS: { value: BrollSource; label: string; hint: string }[] = [
+  { value: 'both',   label: 'Mine + stock', hint: 'Your clips first, stock fills the rest' },
+  { value: 'custom', label: 'Only mine',    hint: 'Your clips only' },
+  { value: 'stock',  label: 'Only stock',   hint: 'Ignore my clips this time' },
+]
+
 const DEFAULT_BROLL_PERCENT = 25
 const MIN_BROLL_PERCENT = 5   // 0% isn't a slider stop — that's the None option
 const MAX_BROLL_PERCENT = 50
@@ -70,6 +80,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
   const [gradeMode, setGradeMode] = useState<GradeMode>('smart')
   const [brollMode, setBrollMode] = useState<BrollMode>('smart')
   const [brollPercent, setBrollPercent] = useState(DEFAULT_BROLL_PERCENT)
+  const [brollSource, setBrollSource] = useState<BrollSource>('both')
   const [jobId, setJobId] = useState<string | null>(existingJobId)
   // 'loading': have an existing job but haven't fetched its real status yet
   const [status, setStatus] = useState<'idle' | 'loading' | 'submitting' | 'processing' | 'complete' | 'error'>(
@@ -186,6 +197,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
         gradeMode,
         brollMode,
         brollPercent: brollMode === 'manual' ? brollPercent : null,
+        brollSource,
         customBroll: customBrollText.split('\n').map(l => l.trim()).filter(Boolean),
       }),
     })
@@ -534,6 +546,33 @@ export function VideoStudio({ script, existingJobId }: Props) {
               </div>
             )}
             <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to every variant. Smart reads your footage and picks the amount that fits each style; None renders a pure talking head.</p>
+
+            {/* Source picker — only meaningful once she has supplied clips. */}
+            {customBrollText.trim() && brollMode !== 'none' && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold text-[#71717A] mb-1.5">Which B-roll</p>
+                <div className="flex flex-wrap gap-2">
+                  {BROLL_SOURCE_OPTIONS.map(opt => {
+                    const active = brollSource === opt.value
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setBrollSource(opt.value)}
+                        className="text-left rounded-xl border px-3 py-2.5 transition-all cursor-pointer flex-1 min-w-[9rem]"
+                        style={{
+                          borderColor: active ? '#FF4F17' : '#E4E4E0',
+                          background: active ? '#FFF3EF' : 'white',
+                        }}
+                      >
+                        <span className="block text-[13px] font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
+                        <span className="block text-[11px] text-[#A1A1AA] mt-0.5">{opt.hint}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {error && <p className="text-xs text-[#EF4444] mb-3">{error}</p>}

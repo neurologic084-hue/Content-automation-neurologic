@@ -90,6 +90,20 @@ export type BrollFlavor = 'image' | 'video' | 'mixed' | 'viral' | 'none'
 // Stored per-variant in the job's variants jsonb (like grade_mode), so it
 // needs no schema migration.
 export type BrollMode = 'smart' | 'manual' | 'none'
+
+// WHERE cutaways come from, chosen per job alongside the amount. Only matters
+// once the creator has supplied her own clips — before that everything is
+// stock by definition.
+//   both   — her clips first, stock fills whatever the target still wants
+//   custom — her clips only; no stock, even if that means fewer cutaways
+//   stock  — ignore her folder for this render and use stock only
+// Previously supplying a folder silently forced 'custom', with no way back.
+export type BrollSource = 'both' | 'custom' | 'stock'
+export const BROLL_SOURCES: BrollSource[] = ['both', 'custom', 'stock']
+
+export function normalizeBrollSource(raw: unknown): BrollSource {
+  return BROLL_SOURCES.includes(raw as BrollSource) ? (raw as BrollSource) : 'both'
+}
 export const BROLL_MODES: BrollMode[] = ['smart', 'manual', 'none']
 export const MAX_BROLL_PERCENT = 50
 

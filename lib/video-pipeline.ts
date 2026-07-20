@@ -3,7 +3,7 @@ import { chatCompletion, MODELS } from './openrouter'
 import type { CaptionLane } from './variant-specs'
 import type { ContentProfile } from './video-analysis'
 import type { GradeMode } from './color-grade'
-import type { BrollMode } from './broll'
+import type { BrollMode, BrollSource } from './broll'
 
 // Per-render background-music choice, picked in the video studio and stored on
 // each variant. 'smart' = pick a mood-matched track from the curated library
@@ -98,6 +98,10 @@ export interface VideoVariant extends VideoVariantDef {
   // caps at 49), 'none' turns B-roll off. Same jsonb trick as above.
   broll_mode?: BrollMode
   broll_percent?: number | null
+  // Where cutaways come from once the creator supplied her own clips:
+  // 'both' (hers first, stock tops up), 'custom' (hers only), 'stock'
+  // (ignore her folder this time). Absent on older rows = 'both'.
+  broll_source?: BrollSource
   // ISO timestamp stamped when the variant enters 'processing', cleared when it
   // reaches ready/failed. Lets the status route detect a variant whose worker
   // VM was killed before it could write its own failure (a silent forever-spin).

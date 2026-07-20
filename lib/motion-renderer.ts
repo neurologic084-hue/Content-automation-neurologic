@@ -27,7 +27,7 @@ import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
 import { getSfx, probeSfxTiming, type TransitionStyle, type SfxCategory } from './sound-effects'
-import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, selectBestClips, normalizeBrollSetting, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode } from './broll'
+import { planBrollSlots, resolveBrollMedia, resolveExtraImages, avoidCaptionCollisions, applyViralCoverTreatment, planCustomBrollSlots, selectBestClips, normalizeBrollSetting, normalizeBrollSource, coverageTargetCount, submagicBrollKnobs, type BrollItem, type CustomClip, type BrollMode, type BrollSource } from './broll'
 import { geminiGenerate } from './gemini'
 import { planCollageScenes, generateCollageItems } from './collage-scenes'
 import { buildSubjectMatte, type SubjectMatte } from './subject-matte'
@@ -2019,7 +2019,9 @@ async function renderRemotionEdit(
       }
     }
 
-    const usingCustomBroll = !!opts.customBroll?.length
+    // 'stock' means ignore her folder for this render; 'custom'/'both' use it.
+    const brollSource = normalizeBrollSource(opts.brollSource)
+    const usingCustomBroll = !!opts.customBroll?.length && brollSource !== 'stock'
     let broll: Awaited<ReturnType<typeof resolveBrollMedia>> = []
     if (kit.brollMedia !== 'none' && !brollOff) {
       try {
@@ -2039,6 +2041,39 @@ async function renderRemotionEdit(
           const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
           for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
           broll = await planCustomBrollSlots(plan.editedWords, plan.editedDuration, profile, clips, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
+
+          // 'both': her clips lead, stock fills whatever the target still
+          // wants. Her cutaways are passed as avoid-windows so stock never
+          // lands on top of them, and the stock planner is told only about the
+          // gap that is left.
+          if (brollSource === 'both') {
+            const targetTotal = brollCoverage !== null
+              ? coverageTargetCount(plan.editedDuration, brollCoverage, kit.denseMotion ? 1.2 : 2.0)
+              : Math.max(1, Math.round(plan.editedDuration / (kit.denseMotion ? 3.5 : 9)))
+            const gap = targetTotal - broll.length
+            if (gap > 0) {
+              try {
+                const stockSlots = await planBrollSlots(
+                  plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia,
+                  kit.designedCards,
+                  [...graphicWindows, ...collageWindows, ...broll.map(b => ({ start: b.start, duration: b.duration }))],
+                  kit.denseMotion, brollCoverage,
+                )
+                const stock = await resolveBrollMedia(
+                  stockSlots.slice(0, gap), path.join(REMOTION_DIR, 'public', brollPrefix),
+                  brollPrefix, kit.variation, kit.brollMedia, usedMedia,
+                )
+                if (stock.length) {
+                  broll = [...broll, ...stock].sort((a, b) => a.start - b.start)
+                  console.log(`[motion-renderer] B-roll source 'both': ${broll.length - stock.length} of hers + ${stock.length} stock`)
+                }
+              } catch (e) {
+                // Her clips are already placed — a stock top-up failing is not
+                // worth failing the render over.
+                console.warn(`[motion-renderer] stock top-up skipped: ${(e as Error).message}`)
+              }
+            }
+          }
         } else {
           const slots = await planBrollSlots(plan.editedWords, plan.editedDuration, profile, kit.variation, kit.brollMedia, kit.designedCards, [...graphicWindows, ...collageWindows], kit.denseMotion, brollCoverage)
           broll = await resolveBrollMedia(slots, path.join(REMOTION_DIR, 'public', brollPrefix), brollPrefix, kit.variation, kit.brollMedia, usedMedia)
@@ -2455,6 +2490,7 @@ export interface RenderVariantOptions {
   // entirely (stock, custom clips, and collage scenes alike).
   brollMode?: BrollMode
   brollPercent?: number | null     // manual coverage percent (0-50)
+  brollSource?: BrollSource        // both | custom | stock (see lib/broll.ts)
   // Creator-supplied B-roll (Drive links stored on the job). When present,
   // stock B-roll is skipped entirely and these clips are matched to
   // transcript moments instead.
@@ -2849,6 +2885,7 @@ export async function renderEditVariantTask(jobId: string, variantId: string): P
     gradeMode: (variant.grade_mode as GradeMode | undefined),
     brollMode: variant.broll_mode as BrollMode | undefined,
     brollPercent: variant.broll_percent as number | null | undefined,
+    brollSource: variant.broll_source as BrollSource | undefined,
     customBroll: (job.custom_broll as { url: string; description?: string | null }[] | null) ?? undefined,
   })
 }
