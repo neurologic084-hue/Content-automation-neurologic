@@ -38,6 +38,63 @@ function run(cmd: string, timeoutMs = 180_000): Promise<string> {
   })
 }
 
+// Short-term RMS energy envelope of an audio file (100 Hz / 10 ms bins), zero-
+// meaned. Used to align two versions of the same speech by CONTENT, surviving
+// the waveform changes denoise/leveling introduce (energy shape is preserved).
+async function energyEnvelope(srcPath: string): Promise<Float64Array> {
+  const SR = 8000, WIN = 80 // 8 kHz decode, 80 samples/bin = 100 Hz envelope
+  const pcm = `${srcPath}.env.pcm`
+  try {
+    await run(`ffmpeg -y -v error -i "${srcPath}" -ac 1 -ar ${SR} -f f32le "${pcm}"`)
+    const buf = fs.readFileSync(pcm)
+    const samples = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4))
+    const bins = Math.floor(samples.length / WIN)
+    const env = new Float64Array(bins)
+    let mean = 0
+    for (let b = 0; b < bins; b++) {
+      let s = 0
+      for (let i = b * WIN; i < (b + 1) * WIN; i++) s += samples[i] * samples[i]
+      env[b] = Math.sqrt(s / WIN)
+      mean += env[b]
+    }
+    mean /= bins || 1
+    for (let i = 0; i < bins; i++) env[i] -= mean
+    return env
+  } finally {
+    try { if (fs.existsSync(pcm)) fs.unlinkSync(pcm) } catch { /* best-effort */ }
+  }
+}
+
+// How many seconds Auphonic's returned audio must be shifted LEFT so its speech
+// lines back up with the audio we sent it — i.e. the exact length of the free-
+// tier promo it prepended. MEASURED by cross-correlating the two energy
+// envelopes, not guessed from a duration subtraction: the old cleanDur-videoDur
+// estimate folded in the container-vs-stream and encoder-padding mismatches and
+// could be ~2s off, which shoved the whole voice track ahead of the picture
+// (v5 desync, 2026-07-20). Returns null if nothing correlates well enough to
+// trust (e.g. paid plan with no promo, or a failed decode) so the caller can
+// fall back to the old estimate.
+async function detectPromoOffset(sentPath: string, returnedPath: string): Promise<number | null> {
+  const ENV_HZ = 100, MAX_LAG_SEC = 20
+  const [sent, returned] = await Promise.all([energyEnvelope(sentPath), energyEnvelope(returnedPath)])
+  const maxLag = Math.round(MAX_LAG_SEC * ENV_HZ)
+  const compare = Math.min(sent.length, returned.length) - maxLag
+  if (compare <= ENV_HZ) return null // too short to correlate meaningfully
+  let bestNcc = -Infinity, bestLag = 0
+  for (let lag = 0; lag <= maxLag; lag++) {
+    let dot = 0, ea = 0, eb = 0
+    for (let i = 0; i < compare; i++) {
+      const a = sent[i], b = returned[i + lag]
+      dot += a * b; ea += a * a; eb += b * b
+    }
+    const ncc = dot / (Math.sqrt(ea * eb) + 1e-9)
+    if (ncc > bestNcc) { bestNcc = ncc; bestLag = lag }
+  }
+  // Weak peak = the two tracks don't actually line up; don't trust the number.
+  if (bestNcc < 0.5) return null
+  return bestLag / ENV_HZ
+}
+
 // ── Auphonic backup cleaner ───────────────────────────────────────────────────
 const AUPHONIC_BASE = 'https://auphonic.com/api'
 
@@ -117,15 +174,26 @@ async function auphonicCleanInPlace(videoPath: string, auth: string): Promise<vo
     fs.writeFileSync(cleanAudio, Buffer.from(await dl.arrayBuffer()))
 
     // Free-tier Auphonic PREPENDS a spoken promo ("Free audio post-production by
-    // auphonic.com"). Anything that changes audio length desyncs it from the
-    // video, so trim the head by the exact length difference and clamp with
-    // -shortest. A paid plan produces no promo, so promo≈0 and nothing is cut.
+    // auphonic.com"), which shifts every later word and desyncs the voice from
+    // the picture unless trimmed by its EXACT length. Measure that length by
+    // correlating the returned audio against the audio we sent (rawAudio) — the
+    // lag that lines their speech back up IS the promo. The old duration-diff
+    // estimate is kept only as a fallback when the correlation is too weak to
+    // trust. A paid plan produces no promo, so the offset comes back ≈0.
     const dur = async (f: string) =>
       parseFloat(await run(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${f}"`))
-    const [videoDur, cleanDur] = [await dur(videoPath), await dur(cleanAudio)]
-    const promo = cleanDur - videoDur
+    const measured = await detectPromoOffset(rawAudio, cleanAudio).catch(() => null)
+    let promo: number
+    if (measured != null) {
+      promo = measured
+      console.log(`[audio-clean] Auphonic promo measured at ${promo.toFixed(2)}s (content-aligned)`)
+    } else {
+      const [audioDur, cleanDur] = [await dur(rawAudio), await dur(cleanAudio)]
+      promo = cleanDur - audioDur
+      console.warn(`[audio-clean] promo correlation weak — falling back to duration estimate ${promo.toFixed(2)}s`)
+    }
     const ssArg = promo > 0.25 ? `-ss ${promo.toFixed(3)} ` : ''
-    if (ssArg) console.log(`[audio-clean] trimming ${promo.toFixed(1)}s Auphonic free-tier promo from the head (a paid plan removes it)`)
+    if (ssArg) console.log(`[audio-clean] trimming ${promo.toFixed(2)}s Auphonic free-tier promo from the head (a paid plan removes it)`)
 
     await run(
       `ffmpeg -y -i "${videoPath}" ${ssArg}-i "${cleanAudio}" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart "${remuxed}"`

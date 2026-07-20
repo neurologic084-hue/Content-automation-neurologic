@@ -348,27 +348,56 @@ export async function POST(req: NextRequest) {
               startTime: p.start,
               endTime: p.end,
               userMediaId: e.submagicMediaId!,
-              layout: 'full',
+              // 'cover' = fill the frame (creator clip fully replaces the shot),
+              // matching the Remotion path's full-screen custom cutaways. NOT
+              // 'full': Submagic rejects that value with a VALIDATION_ERROR that
+              // fails the whole submission — it only accepts cover/contain/
+              // rounded/square/split-*/pip-*.
+              layout: 'cover',
             })))
             .sort((a, b) => a.startTime - b.startTime)
           if (customItems.length) {
             console.log(`[start-variant] using ${customItems.length} custom B-roll item(s), stock B-roll off`)
           }
 
-          projectId = await submitSubmagicJob(videoUrlForSubmagic, {
+          const brollKnobs = submagicBrollKnobs(brollSetting, resolved)
+          const submitOpts = (withCustomItems: boolean) => ({
             title: `${variantId}-${jobId.slice(0, 8)}`,
             ...SUBMAGIC_ALWAYS_ON,
             templateName: resolved.templateName,
             userThemeId: resolved.userThemeId,
-            magicBrolls: customItems.length ? false : submagicBrollKnobs(brollSetting, resolved).magicBrolls,
-            magicBrollsPercentage: customItems.length ? undefined : submagicBrollKnobs(brollSetting, resolved).magicBrollsPercentage,
+            magicBrolls: withCustomItems ? false : brollKnobs.magicBrolls,
+            magicBrollsPercentage: withCustomItems ? undefined : brollKnobs.magicBrollsPercentage,
             magicZooms: resolved.magicZooms,
             hookTitle: resolved.hookTitle,
             removeSilencePace: resolved.removeSilencePace,
             musicTrackId,
-            ...(customItems.length ? { items: customItems } : {}),
+            ...(withCustomItems ? { items: customItems } : {}),
             ...precutOverrides,
           })
+
+          if (customItems.length) {
+            // Custom items make the submission rejectable in ways stock knobs
+            // are not: a userMediaId Submagic hasn't finished ingesting yet, or
+            // a timing edge case. Retry once after a pause (ingest usually
+            // completes within seconds), then degrade to stock B-roll rather
+            // than fail the variant — creator clips are an enhancement, never
+            // worth a dead render.
+            try {
+              projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(true))
+            } catch (e1) {
+              console.warn(`[start-variant] ${variantId}: submit with custom B-roll items failed — retrying in 15s (user-media may still be ingesting): ${(e1 as Error).message.slice(0, 300)}`)
+              await new Promise(r => setTimeout(r, 15_000))
+              try {
+                projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(true))
+              } catch (e2) {
+                console.warn(`[start-variant] ${variantId}: custom B-roll items rejected twice — rendering with stock B-roll instead: ${(e2 as Error).message.slice(0, 300)}`)
+                projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(false))
+              }
+            }
+          } else {
+            projectId = await submitSubmagicJob(videoUrlForSubmagic, submitOpts(false))
+          }
 
           // Music comes from our library AFTER Submagic returns — same matcher
           // inputs as v4/v5: Gemini's footage profile + null transcript, with a
