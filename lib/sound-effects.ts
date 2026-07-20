@@ -124,6 +124,48 @@ async function normalizeSfx(filePath: string): Promise<void> {
   } catch { /* keep the raw file */ }
 }
 
+// SYNTHESISED FALLBACK. Every category here is a noise transient — a swish, a
+// tap, a thump — which is exactly the class of sound ffmpeg can build from
+// scratch. So when ElevenLabs is unavailable (no key, quota gone, outage) the
+// edit still gets its sound design instead of falling silent, which is what
+// happened on 2026-07-20: 18 planned cues, 0 delivered, because the quota ran
+// out mid-render. Not as characterful as a generated take, and deliberately
+// so — it is the floor, not the goal.
+function synthArgs(name: string): string {
+  // Shaped noise for anything airy; a decaying tone for the low hits.
+  if (name.startsWith('whoosh')) {
+    const deep = name.includes('deep')
+    const airy = name.includes('airy')
+    const dur = deep ? 0.5 : airy ? 0.42 : 0.32
+    const lo = deep ? 90 : airy ? 900 : 500
+    const hi = deep ? 2200 : airy ? 7000 : 6500
+    return `-f lavfi -i "anoisesrc=d=${dur}:c=pink:a=0.7:r=48000" ` +
+      `-af "highpass=f=${lo},lowpass=f=${hi},afade=t=in:st=0:d=${(dur * 0.45).toFixed(2)}:curve=exp,` +
+      `afade=t=out:st=${(dur * 0.45).toFixed(2)}:d=${(dur * 0.55).toFixed(2)}:curve=exp"`
+  }
+  if (name === 'boom-soft') {
+    return `-f lavfi -i "sine=frequency=68:duration=0.45:r=48000" ` +
+      `-af "afade=t=out:st=0.02:d=0.42:curve=exp,lowpass=f=200,volume=1.1"`
+  }
+  // ui-pop / flash-pop / click-digital: very short bright transients.
+  const bright = name === 'flash-pop'
+  const dur = name === 'click-digital' ? 0.05 : 0.09
+  return `-f lavfi -i "anoisesrc=d=${dur}:c=white:a=0.6:r=48000" ` +
+    `-af "highpass=f=${bright ? 2500 : 1400},lowpass=f=${bright ? 11000 : 7000},` +
+    `afade=t=out:st=0.004:d=${(dur - 0.004).toFixed(3)}:curve=exp"`
+}
+
+async function synthesiseSfx(def: SfxDef, cachePath: string): Promise<string> {
+  fs.mkdirSync(CACHE_DIR, { recursive: true })
+  await execP(`ffmpeg -y -v error ${synthArgs(def.name)} -c:a libmp3lame -q:a 4 "${cachePath}"`)
+  if (!fs.existsSync(cachePath) || fs.statSync(cachePath).size < 500) {
+    throw new Error('ffmpeg produced no usable audio')
+  }
+  await normalizeSfx(cachePath)
+  console.log(`[sound-effects] synthesised "${def.name}" locally (no API needed)`)
+  return cachePath
+}
+
 async function generateSfx(def: SfxDef, take = 0): Promise<string> {
   // take 0 keeps the original cache name so existing files stay warm; takes
   // 1+ are fresh generations of the same prompt — ElevenLabs is nondeterministic,
@@ -131,8 +173,42 @@ async function generateSfx(def: SfxDef, take = 0): Promise<string> {
   const cachePath = path.join(CACHE_DIR, `${def.name}.v${SFX_CACHE_VERSION}${take > 0 ? `.t${take}` : ''}.mp3`)
   if (fs.existsSync(cachePath)) return cachePath
 
+  // R2 FIRST. These 8 sounds are generic and identical for every video ever
+  // rendered, but the cache above lives in os.tmpdir() — wiped on every deploy
+  // and every container restart. So a hosted app regenerated the whole library
+  // constantly and burned a paid quota on files it already owned. R2 makes a
+  // sound generated once last forever, for every future render on any machine.
+  const remoteName = `${def.name}.v${SFX_CACHE_VERSION}${take > 0 ? `.t${take}` : ''}.mp3`
+  if (process.env.R2_PUBLIC_URL) {
+    try {
+      const res = await fetch(`${process.env.R2_PUBLIC_URL}/sfx/${remoteName}`, { signal: AbortSignal.timeout(20_000) })
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer())
+        if (buf.length > 500) {
+          fs.mkdirSync(CACHE_DIR, { recursive: true })
+          fs.writeFileSync(cachePath, buf)
+          console.log(`[sound-effects] "${def.name}" reused from the shared library (no generation)`)
+          return cachePath
+        }
+      }
+    } catch { /* not cached yet — generate below */ }
+  }
+
+  const publish = async () => {
+    try {
+      const { uploadToStorage } = await import('./storage')
+      await uploadToStorage(cachePath, remoteName, 'sfx')
+    } catch (e) {
+      console.warn(`[sound-effects] could not publish "${def.name}" to the shared library:`, (e as Error).message)
+    }
+  }
+
   const key = process.env.ELEVENLABS_API_KEY
-  if (!key) throw new Error('ELEVENLABS_API_KEY not set — cannot generate sound effects')
+  if (!key) {
+    const out = await synthesiseSfx(def, cachePath)
+    await publish()
+    return out
+  }
 
   console.log(`[sound-effects] generating "${def.name}" (take ${take})...`)
   const res = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
@@ -143,14 +219,21 @@ async function generateSfx(def: SfxDef, take = 0): Promise<string> {
   })
 
   if (!res.ok) {
+    // Out of quota, bad key, service down — all the same decision here: the
+    // video still deserves sound. Synthesise instead of returning null, which
+    // is what left an entire render silent.
     const err = await res.text()
-    throw new Error(`ElevenLabs SFX generation failed (${res.status}): ${err.slice(0, 200)}`)
+    console.warn(`[sound-effects] ElevenLabs unavailable (${res.status}) — synthesising "${def.name}" locally: ${err.slice(0, 120)}`)
+    const out = await synthesiseSfx(def, cachePath)
+    await publish()
+    return out
   }
 
   const buf = Buffer.from(await res.arrayBuffer())
   fs.mkdirSync(CACHE_DIR, { recursive: true })
   fs.writeFileSync(cachePath, buf)
   await normalizeSfx(cachePath)
+  await publish()
   console.log(`[sound-effects] cached "${def.name}" -> ${cachePath}`)
   return cachePath
 }

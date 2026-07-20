@@ -66,13 +66,32 @@ function supabaseAdmin() {
   return createClient(url, key)
 }
 
+// ffmpeg prints a ~2KB banner of --enable-lib* build flags before it does
+// anything, so the tail of stderr is that banner whenever the process is KILLED
+// rather than failing with a message — a timeout, an OOM kill. Taking the tail
+// blindly stored the banner as the failure reason and put it on the variant
+// card, where it told the client precisely nothing (seen on job b550d052).
+// Prefer real diagnostics; fall back to naming the actual condition.
+function ffmpegError(stderr: string, fallback: string): string {
+  const lines = stderr.split('\n').map(l => l.trim()).filter(Boolean)
+  const meaningful = lines.filter(l =>
+    !l.startsWith('--') && !l.startsWith('configuration:') && !/^lib(av|sw|post)\w*\s+\d/.test(l) &&
+    !/^ffmpeg version|^built with|^\s*Copyright/.test(l) &&
+    /error|invalid|failed|no such file|unable|cannot|denied|not found|conversion|killed|out of memory/i.test(l),
+  )
+  if (meaningful.length) return meaningful.slice(-6).join(' | ').slice(0, 600)
+  if (/timed out|ETIMEDOUT|SIGTERM|SIGKILL/i.test(fallback)) {
+    return `ffmpeg was killed before it reported an error (${fallback.slice(0, 120)}) — usually a timeout on a very large file, or the machine running out of memory.`
+  }
+  return fallback.slice(0, 600)
+}
+
 function run(cmd: string, timeoutMs = 300_000): Promise<void> {
   return new Promise((resolve, reject) => {
     let stderrBuf = ''
     const proc = exec(cmd, { timeout: timeoutMs, maxBuffer: 512 * 1024 * 1024 }, (err) => {
       if (err) {
-        const detail = stderrBuf.slice(-2500).trim()
-        reject(new Error(detail || err.message))
+        reject(new Error(ffmpegError(stderrBuf, err.message)))
       } else {
         resolve()
       }

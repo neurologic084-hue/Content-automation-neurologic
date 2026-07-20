@@ -49,6 +49,13 @@ export function explainFailure(raw: unknown): string {
   const credits = outOfCredits(low)
   if (credits) return credits
 
+  // ffmpeg's build banner is not an error, but it is what stderr's tail holds
+  // when the process was killed rather than failing with a message. It reached
+  // a client's variant card once; a card must never show it again.
+  if (/--enable-lib|--enable-gpl|configuration:\s*--/.test(low)) {
+    return 'The video tool was cut off mid-job (usually a timeout on a very large file, or the machine running out of memory). Please retry this variant.'
+  }
+
   // ── OpenRouter / Gemini (video analysis, cut plan, b-roll, graphics) ──────────
   if (mentions('openrouter', 'gemini')) {
     if (has(402) || mentions('insufficient', 'credit', 'payment required', 'quota', 'balance'))
@@ -135,8 +142,14 @@ function outOfCredits(low: string): string | null {
   if (!CREDIT_SIGNS.some(s => low.includes(s))) return null
   if (low.includes('auphonic'))
     return 'Auphonic is out of credits (audio cleanup). Top up at auphonic.com — renders continue on the ElevenLabs fallback meanwhile.'
-  if (low.includes('elevenlabs') || low.includes('eleven labs') || low.includes('scribe'))
-    return 'ElevenLabs is out of credits (transcription). Top up at elevenlabs.io, then retry.'
+  if (low.includes('elevenlabs') || low.includes('eleven labs') || low.includes('scribe')) {
+    // Same account, two very different jobs — say which one stopped, because
+    // the consequences differ: sound effects self-synthesise and the render is
+    // fine, transcription falls back to Whisper.
+    if (low.includes('sound-generation') || low.includes('sound effect'))
+      return 'ElevenLabs is out of credits (sound effects). Sound effects are being generated locally instead, so renders continue — top up at elevenlabs.io to restore the richer library.'
+    return 'ElevenLabs is out of credits (transcription). Renders continue on the OpenRouter Whisper fallback — top up at elevenlabs.io to restore it.'
+  }
   if (low.includes('openrouter') || low.includes('gemini') || low.includes('whisper'))
     return 'OpenRouter is out of credits (AI planning + captions). Add credits at openrouter.ai, then retry.'
   if (low.includes('submagic'))
