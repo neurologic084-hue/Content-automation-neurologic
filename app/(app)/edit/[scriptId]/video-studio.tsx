@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
+import { ConfirmModal } from '@/components/confirm-modal'
 import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 
 // Custom B-roll works end-to-end (all 6 variants) but the input is hidden to
@@ -209,6 +210,19 @@ export function VideoStudio({ script, existingJobId }: Props) {
     setSelectedVariant(variantId)
     setSaving(false)
     router.push(`/publish?jobId=${jobId}&variantId=${variantId}`)
+  }
+
+  // Re-rendering costs real money (transcription, AI planning, cloud minutes)
+  // and a mis-tap on a card that is already rendering or already finished is
+  // easy. Confirm first — this is the only guard against someone tapping Retry
+  // repeatedly and stacking renders of the same variant.
+  const [confirmRetry, setConfirmRetry] = useState<{ id: string; force: boolean; label: string } | null>(null)
+
+  function askStartVariant(variantId: string, force = false) {
+    const v = variants.find(x => x.id === variantId)
+    // A never-started variant is a plain "Start" — nothing to lose, no prompt.
+    if (!force && v?.status === 'pending') return handleStartVariant(variantId, force)
+    setConfirmRetry({ id: variantId, force, label: v?.name ?? variantId })
   }
 
   async function handleStartVariant(variantId: string, force = false) {
@@ -706,7 +720,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
                   {isPending || v?.status === 'failed' ? (
                     <button
-                      onClick={() => v?.id && handleStartVariant(v.id)}
+                      onClick={() => v?.id && askStartVariant(v.id)}
                       disabled={isStarting || isPreparingSource || !v?.id}
                       className="w-full h-9 rounded-xl text-xs font-semibold cursor-pointer transition-all disabled:opacity-40"
                       style={{ background: v?.status === 'failed' ? '#FEF2F2' : '#F4F3F0', color: v?.status === 'failed' ? '#EF4444' : '#18181B' }}
@@ -726,7 +740,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                         </button>
                         {canRetryReady && (
                           <button
-                            onClick={() => v?.id && handleStartVariant(v.id, true)}
+                            onClick={() => v?.id && askStartVariant(v.id, true)}
                             disabled={isStarting}
                             className="h-9 w-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-all disabled:opacity-40"
                             style={{ background: '#F4F3F0', color: '#71717A' }}
@@ -795,6 +809,24 @@ export function VideoStudio({ script, existingJobId }: Props) {
           </div>
         </div>
       )}
-    </div>
+    
+      <ConfirmModal
+        open={!!confirmRetry}
+        title={confirmRetry?.force ? 'Render this version again?' : 'Retry this version?'}
+        message={
+          confirmRetry?.force
+            ? `"${confirmRetry?.label}" is already finished. Rendering again replaces it and costs another full render — around 20 minutes plus transcription and AI credits.`
+            : `Start "${confirmRetry?.label}" again? Each attempt is a full render — around 20 minutes plus transcription and AI credits.`
+        }
+        confirmLabel="Yes, render it"
+        cancelLabel="Cancel"
+        onConfirm={() => {
+          const c = confirmRetry
+          setConfirmRetry(null)
+          if (c) handleStartVariant(c.id, c.force)
+        }}
+        onCancel={() => setConfirmRetry(null)}
+      />
+</div>
   )
 }

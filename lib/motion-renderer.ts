@@ -1552,6 +1552,28 @@ interface ClipCandidate {
   description: string
 }
 
+// A creator's B-roll folder is the SAME footage across every job that uses it —
+// her clinic clips do not change between videos. Keying the processed windows
+// by the clip's Drive id (not the job) means the second job that points at the
+// same folder skips the download, the ffmpeg cut and the Gemini description
+// entirely, and just reuses what is already in R2.
+//
+// Stable id from the Drive URL; falls back to a hash of the whole URL for
+// non-Drive links so every source still gets a deterministic key.
+function clipCacheKey(url: string): string {
+  const drive = url.match(/[?&]id=([a-zA-Z0-9_-]+)/) ?? url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
+  if (drive) return drive[1]
+  let h = 0
+  for (let i = 0; i < url.length; i++) h = (Math.imul(31, h) + url.charCodeAt(i)) | 0
+  return `url${(h >>> 0).toString(36)}`
+}
+
+// Where a cut window lives in the shared cache. Same folder in another job ->
+// same key -> straight download, no reprocessing.
+function windowCacheName(url: string, offset: number, seconds: number): string {
+  return `${clipCacheKey(url)}-${Math.round(offset * 100)}-${Math.round(seconds * 100)}.mp4`
+}
+
 // Downloads each of the creator's OWN B-roll clips (Drive links stored on the
 // job) and describes every candidate WINDOW inside it — one for a short clip,
 // up to MAX_WINDOWS_PER_CLIP spread across a long one. Nothing is cut to full
@@ -1672,6 +1694,20 @@ async function stageChosenWindows(
     try {
       const fileName = `custom-${jobId.slice(0, 8)}-${c.entryIndex}-w${n}.mp4`
       const outPath = path.join(cacheDir, fileName)
+      // SHARED CACHE: this exact window of this exact clip may already have been
+      // cut by an earlier variant or an earlier JOB using the same folder. One
+      // small download beats re-fetching the full clip and re-encoding it.
+      const cacheName = windowCacheName(c.sourceUrl, c.offset, c.duration)
+      const cacheUrl = process.env.R2_PUBLIC_URL ? `${process.env.R2_PUBLIC_URL}/broll-cache/shared/${cacheName}` : null
+      if (!fs.existsSync(outPath) && cacheUrl) {
+        try {
+          const head = await fetch(cacheUrl, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
+          if (head.ok) {
+            await downloadFile(cacheUrl, outPath)
+            console.log(`[motion-renderer] window ${c.entryIndex}.${n} reused from the shared B-roll cache`)
+          }
+        } catch { /* cache miss is normal — fall through and cut it */ }
+      }
       if (!fs.existsSync(outPath)) {
         // Cached windows carry no local file — each variant renders on its own
         // fresh machine. Pull the source once per clip before cutting.
@@ -1686,6 +1722,12 @@ async function stageChosenWindows(
       }
       const duration = await getVideoDuration(outPath)
       clips.push({ file: `${publicPrefix}/${fileName}`, description: c.description, duration, entryIndex: c.entryIndex })
+      // Publish it for the next variant / the next job on the same folder.
+      // Best-effort: a failed upload only means someone re-cuts it later.
+      if (cacheUrl) {
+        uploadToStorage(outPath, cacheName, 'shared', 'broll-cache')
+          .catch(e => console.warn(`[motion-renderer] B-roll cache upload skipped: ${(e as Error).message}`))
+      }
     } catch (e) {
       console.warn(`[motion-renderer] staging window for clip ${c.entryIndex} failed, skipping: ${(e as Error).message}`)
     }
