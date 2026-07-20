@@ -343,11 +343,28 @@ async function buildSharedCleanAudio(jobId: string, compressedPath: string, outD
     // exactly what every variant renders from.
     const words = await transcribeLocalFile(cleanPath)
     if (words.length) {
-      const wordsPath = path.join(outDir, SHARED_WORDS_NAME)
-      fs.writeFileSync(wordsPath, JSON.stringify(words))
-      await uploadToStorage(wordsPath, SHARED_WORDS_NAME, jobId)
-      console.log(`[shared-audio] ${words.length} word timings shared with every variant`)
-      try { fs.unlinkSync(wordsPath) } catch { /* best-effort */ }
+      // The job row first: durable, already read by every render, cannot expire
+      // or 404. The R2 JSON stays as the fallback for installs where the
+      // prep_artifacts migration has not been run yet.
+      let stored = false
+      try {
+        const { error } = await supabaseAdmin()
+          .from('video_jobs')
+          .update({ prep_artifacts: { words, cleanUrl: `${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`, builtAt: new Date().toISOString() } })
+          .eq('id', jobId)
+        if (error) throw new Error(error.message)
+        stored = true
+        console.log(`[shared-audio] ${words.length} word timings stored on the job`)
+      } catch (e) {
+        console.warn(`[shared-audio] could not store word timings on the job (run supabase/migration-prep-artifacts.sql) — using the R2 copy: ${(e as Error).message}`)
+      }
+      if (!stored) {
+        const wordsPath = path.join(outDir, SHARED_WORDS_NAME)
+        fs.writeFileSync(wordsPath, JSON.stringify(words))
+        await uploadToStorage(wordsPath, SHARED_WORDS_NAME, jobId)
+        console.log(`[shared-audio] ${words.length} word timings shared via R2`)
+        try { fs.unlinkSync(wordsPath) } catch { /* best-effort */ }
+      }
     }
     // VERIFY, don't assume. These are the job's shared ARTIFACTS, not a
     // best-effort cache: if they are not really readable, all six variants
@@ -394,6 +411,15 @@ async function applySharedCleanAudio(jobId: string, workPath: string): Promise<b
 
 // The word timings that go with the shared cleaned audio.
 async function sharedWords(jobId: string): Promise<{ text: string; start: number; end: number }[] | null> {
+  // Job row first — durable and already local to this render.
+  try {
+    const { data } = await supabaseAdmin().from('video_jobs').select('prep_artifacts').eq('id', jobId).single()
+    const words = (data?.prep_artifacts as { words?: unknown } | null)?.words
+    if (Array.isArray(words) && words.length) return words as { text: string; start: number; end: number }[]
+  } catch { /* column may not exist yet — fall through to the R2 copy */ }
+
+  // EXISTING JOBS: prepped before the column existed, their timings are the R2
+  // JSON. Keep reading it so nothing created earlier changes behaviour.
   if (!process.env.R2_PUBLIC_URL) return null
   try {
     const res = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_WORDS_NAME}`, { signal: AbortSignal.timeout(15_000) })
