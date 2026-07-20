@@ -13,7 +13,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile } from './motion-renderer'
+import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile, SHARED_CUT_CLEAN_NAME } from './motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   resolveCaptionTemplate,
@@ -116,15 +116,31 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
   // Drive file. Cached per job, so every Submagic variant on this job
   // shares one compression + upload pass.
   const videoUrlForSubmagic = await getSubmagicSourceUrl(jobId, job.source_drive_url as string)
-  // When the source was pre-cut by our own planner (source-cut.mp4), Submagic
-  // must NOT cut again: dial silence removal to its gentlest and turn off
-  // bad-take removal so it only adds captions + zoom styling. If the pre-cut
-  // step didn't run, Submagic cuts on its own exactly as before.
-  const isPrecut = videoUrlForSubmagic.endsWith('/source-cut.mp4')
-  const precutOverrides = isPrecut
-    ? { removeSilencePace: 'natural' as const, removeBadTakes: false }
-    : {}
-  if (isPrecut) console.log(`[submagic-start] ${variantId}: using pre-cut source — Submagic styles only`)
+  // WHAT HAS PREP ALREADY DONE? Submagic must only be asked for the work that
+  // is still outstanding — anything else is either wasted spend or a second
+  // pass over audio/cuts that were already handled, which degrades them.
+  // The filename carries the answer, so this survives a restart and needs no
+  // extra database round trip:
+  //   source-cut-clean.mp4 → trimmed AND cleaned by us
+  //   source-cut.mp4       → trimmed by us, audio still raw
+  //   anything else        → untouched compressed source
+  const isPrecutClean = videoUrlForSubmagic.endsWith(`/${SHARED_CUT_CLEAN_NAME}`)
+  const isPrecut = isPrecutClean || videoUrlForSubmagic.endsWith('/source-cut.mp4')
+  const precutOverrides = {
+    // Trimmed already: dial Submagic's silence removal to its gentlest and turn
+    // off bad-take removal so it only styles. Cutting an already-cut file
+    // double-cuts it.
+    ...(isPrecut ? { removeSilencePace: 'natural' as const, removeBadTakes: false } : {}),
+    // Cleaned already (Auphonic, measured ~14 dB below the raw noise floor):
+    // Submagic's Clean Audio would run aggressive denoise over aggressive
+    // denoise. When we have NOT cleaned it, leave Submagic's cleaner ON — that
+    // is the whole point of checking rather than assuming.
+    ...(isPrecutClean ? { cleanAudio: false } : {}),
+  }
+  console.log(
+    `[submagic-start] ${variantId} checklist — trimmed ${isPrecut ? '✓ by us' : '✗ Submagic will cut'} | ` +
+    `audio ${isPrecutClean ? '✓ cleaned by us (Submagic clean OFF)' : '✗ raw (Submagic clean ON)'}`,
+  )
   let projectId: string
   // Local-library music to mix on top AFTER Submagic finishes (v1-v3). Stays
   // null for the autonomous aiEditTemplate + legacy paths, which keep

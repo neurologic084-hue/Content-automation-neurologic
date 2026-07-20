@@ -349,6 +349,11 @@ async function stageRenderWorkCopy(compressedPath: string, workPath: string): Pr
 // Safe to share: the cleaned audio is identical for all variants (only the CUTS
 // differ, and those are computed per-variant from the same word timings).
 const SHARED_CLEAN_NAME = 'source-clean.mp4'
+// The pre-cut made FROM the cleaned audio. Its own name so every downstream
+// step can tell, from the filename alone, that the audio work is already done
+// and Submagic must not clean it a second time. Older jobs keep source-cut.mp4
+// (cut from raw audio) and keep their Submagic-side cleaning.
+export const SHARED_CUT_CLEAN_NAME = 'source-cut-clean.mp4'
 const SHARED_WORDS_NAME = 'source-words.json'
 
 // Builds the shared cleaned source + its word timings and puts both in R2.
@@ -520,17 +525,23 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
   // Retried: this HEAD decides WHICH video Submagic receives — a single
   // transient flake would send the uncut source and let Submagic cut the whole
   // video again instead of only styling the cut we already made.
+  // Cleaned cut first, then the older raw cut. Order matters: a job prepped
+  // before the cleaned cut existed has only source-cut.mp4 and must keep using
+  // it, while a freshly prepped job has both names only if prep was re-run —
+  // and the cleaned one is the better source in that case.
   if (process.env.R2_PUBLIC_URL) {
-    const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
-        if (head.ok) return cutUrl
-        break // definitive answer (404 etc.): no cut clip — use the compressed source
-      } catch {
-        // Network flake or timeout — retry briefly before concluding there is
-        // no cut clip.
-        if (attempt < 2) await new Promise(r => setTimeout(r, 1_500))
+    for (const name of [SHARED_CUT_CLEAN_NAME, 'source-cut.mp4']) {
+      const cutUrl = `${process.env.R2_PUBLIC_URL}/${jobId}/${name}`
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const head = await fetch(cutUrl, { method: 'HEAD', signal: AbortSignal.timeout(5_000) })
+          if (head.ok) return cutUrl
+          break // definitive answer (404 etc.): try the next name
+        } catch {
+          // Network flake or timeout — retry briefly before concluding there is
+          // no cut clip.
+          if (attempt < 2) await new Promise(r => setTimeout(r, 1_500))
+        }
       }
     }
   }
@@ -742,19 +753,44 @@ export async function prepareJobSource(
   // by every Submagic variant. Best-effort — if it fails, getSubmagicSourceUrl
   // falls back to the uncut compressed source and Submagic cuts on its own.
   //
-  // Runs AFTER the shared clean on purpose: the pre-cut needs word timings to
-  // plan cuts, and the clean just made a set. Reusing them drops the pre-cut's
-  // own transcription — one paid Scribe call per job. It still cuts the
-  // COMPRESSED (uncleaned) source unchanged; Submagic runs its own Clean Audio
-  // in-render (SUBMAGIC_ALWAYS_ON), so cleaned input would double-process it.
+  // Runs AFTER the shared clean on purpose, for two reasons: the pre-cut needs
+  // word timings and the clean just made a set (saving a paid Scribe call), and
+  // the cut is made FROM the cleaned audio so v1-v3 inherit the same Auphonic
+  // pass v4-v6 already get. Measured on real footage, that pass drops the room
+  // noise floor ~14 dB — there is no reason the Submagic variants should sound
+  // worse than the Motion Lab ones when the job already paid for it.
+  //
+  // The cleaned cut is published under its own name so the choice is legible
+  // downstream: source-cut-clean.mp4 means "already cleaned, tell Submagic to
+  // skip its own Clean Audio" (double-processing aggressive denoise sounds
+  // worse, not better), while an older job's source-cut.mp4 still means "raw —
+  // let Submagic clean it", which keeps every existing job rendering as before.
   await onProgress?.(98, 'Trimming footage')
   try {
-    const cutPath = path.join(outDir, 'source-cut.mp4')
+    // Cut from the cleaned copy when it exists. On a fresh machine (prep
+    // re-run, or a container that only just booted) the clean lives in R2 but
+    // not on disk, so pull it back rather than silently falling through to the
+    // raw source — that fallback is what this change exists to remove.
+    let cutInput = localPath
+    let cutName = 'source-cut.mp4'
+    const localClean = path.join(outDir, SHARED_CLEAN_NAME)
+    if (!fs.existsSync(localClean) && process.env.R2_PUBLIC_URL) {
+      await downloadFile(`${process.env.R2_PUBLIC_URL}/${jobId}/${SHARED_CLEAN_NAME}`, localClean)
+        .catch(() => { /* no shared clean for this job — the raw source still works */ })
+    }
+    if (fs.existsSync(localClean) && fs.statSync(localClean).size > 10_000) {
+      cutInput = localClean
+      cutName = SHARED_CUT_CLEAN_NAME
+      console.log('[prep] pre-cutting the CLEANED audio — Submagic inherits the same clean as v4-v6')
+    } else {
+      console.warn('[prep] no shared clean available — pre-cutting the raw source (Submagic will clean it itself)')
+    }
+    const cutPath = path.join(outDir, cutName)
     // ALREADY DONE? Re-running prep (to repair a job, or to pick up a fix)
     // must not redo finished steps: this one costs a transcription and a full
     // re-encode. A cut already in R2 is the same cut.
     const cutExists = process.env.R2_PUBLIC_URL
-      ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/source-cut.mp4`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+      ? await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${cutName}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
       : false
     if (cutExists) {
       console.log('[prep] ✓ pre-cut source already built — skipping')
@@ -762,13 +798,13 @@ export async function prepareJobSource(
       throw { __skip: true }
     }
     // Reuse the shared transcript when the clean above produced one; the pre-cut
-    // otherwise transcribes the compressed source itself (unchanged fallback).
+    // otherwise transcribes the source itself (unchanged fallback).
     const sharedForCut = await sharedWords(jobId)
-    const built = await buildSubmagicCutSource(localPath, cutPath, { words: sharedForCut ?? undefined })
+    const built = await buildSubmagicCutSource(cutInput, cutPath, { words: sharedForCut ?? undefined })
     if (built) {
-      await uploadToStorage(built, 'source-cut.mp4', jobId)
+      await uploadToStorage(built, cutName, jobId)
       submagicCutPath = built
-      console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId})`)
+      console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId}, ${cutName})`)
     }
   } catch (e) {
     if (!(e as { __skip?: boolean })?.__skip) {
