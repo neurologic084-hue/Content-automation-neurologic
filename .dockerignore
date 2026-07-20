@@ -6,6 +6,7 @@ remotion/node_modules
 .next
 remotion/.next
 renders
+public/renders
 remotion/public/edit-cache
 remotion/out
 .git
@@ -13,3 +14,4 @@ remotion/out
 *.log
 .DS_Store
 scratchpad
+*.tsbuildinfo

@@ -2,6 +2,13 @@ import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function proxy(request: NextRequest) {
+  // The healthcheck answers before EVERYTHING — auth would 401 it and the
+  // migration redirect would 307 it, and either reads as "dead" to Railway's
+  // deploy probe. It exposes nothing but an uptime counter.
+  if (request.nextUrl.pathname === '/api/health') {
+    return NextResponse.next({ request })
+  }
+
   // Retirement signpost: the app moved to Railway, but the old Vercel URL
   // survives in bookmarks. Anyone opening it would silently use the retired
   // deployment — same database, but renders on the slow ephemeral path with
