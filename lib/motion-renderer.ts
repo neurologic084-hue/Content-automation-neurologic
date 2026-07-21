@@ -582,14 +582,27 @@ async function getLocalCompressedSourceInner(
   // old job revisited later) while the compressed copy still lives in R2 from
   // a previous run -- pull that back down instead of re-fetching from the
   // original Drive link, which may have gone stale or been revoked by then.
+  // When R2 HAS the copy, exhaust it before touching Drive: Google throttles a
+  // file that has been downloaded repeatedly ("too many users have viewed or
+  // downloaded this file"), so on a busy retry day the Drive fallback is the
+  // LESS reliable path — a production render failed exactly this way when one
+  // transient R2 miss fell straight through to a quota'd Drive link.
   if (process.env.R2_PUBLIC_URL) {
-    try {
-      const r2Url = `${process.env.R2_PUBLIC_URL}/${jobId}/source-compressed.mp4`
-      await downloadFile(r2Url, compressedPath, onProgress)
-      return compressedPath
-    } catch {
-      // not in R2 yet (first run for this job) -- fall through to Drive
-      try { if (fs.existsSync(compressedPath)) fs.unlinkSync(compressedPath) } catch { /* best-effort */ }
+    const r2Url = `${process.env.R2_PUBLIC_URL}/${jobId}/source-compressed.mp4`
+    const inR2 = await fetch(r2Url, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+    for (let attempt = 1, attempts = inR2 ? 3 : 1; attempt <= attempts; attempt++) {
+      try {
+        await downloadFile(r2Url, compressedPath, onProgress)
+        return compressedPath
+      } catch (e) {
+        // not in R2 yet (first run for this job) -- fall through to Drive.
+        // But a copy that IS there gets real retries first.
+        try { if (fs.existsSync(compressedPath)) fs.unlinkSync(compressedPath) } catch { /* best-effort */ }
+        if (attempt < attempts) {
+          console.warn(`[motion-renderer] R2 source download ${attempt}/${attempts} failed — retrying: ${(e as Error).message}`)
+          await new Promise(r => setTimeout(r, attempt * 3_000))
+        }
+      }
     }
   }
 

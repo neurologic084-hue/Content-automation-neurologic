@@ -390,10 +390,20 @@ async function fetchSubmagicTemplates(): Promise<SubmagicTemplateOption[]> {
   }
 
   try {
-    const res = await fetch('https://api.submagic.co/v1/templates', {
+    let res = await fetch('https://api.submagic.co/v1/templates', {
       headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(20_000),
     })
+    if (res.status === 429) {
+      // One patient retry: an empty template list quietly downgrades the
+      // caption styling for a whole hour of renders (the cache below), which
+      // is a bad trade for not waiting out one rate-limit window.
+      await submagicRateLimitWait(res, 0, 'template discovery')
+      res = await fetch('https://api.submagic.co/v1/templates', {
+        headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(20_000),
+      })
+    }
     const text = await res.text()
     if (!res.ok) {
       console.warn(`[submagic] template discovery failed (${res.status}): ${text.slice(0, 250)}`)
@@ -752,19 +762,28 @@ export async function fetchSubmagicAudioTrack(
 // B-roll then degrades to fewer/no cutaways, never a dead render.
 export async function createSubmagicUserMedia(url: string): Promise<string | null> {
   try {
-    const res = await fetch('https://api.submagic.co/v1/user-media', {
-      method: 'POST',
-      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(120_000),
-    })
-    const text = await res.text()
-    if (!res.ok) {
-      console.warn(`[submagic] user-media upload failed (${res.status}): ${text.slice(0, 200)}`)
-      return null
+    // Runs in source prep, where time is free — so a 429 is waited out rather
+    // than skipping the clip (a skipped registration means a render without
+    // that piece of her footage).
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch('https://api.submagic.co/v1/user-media', {
+        method: 'POST',
+        headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+        signal: AbortSignal.timeout(120_000),
+      })
+      if (res.status === 429 && attempt < 3) {
+        await submagicRateLimitWait(res, attempt, 'user-media create')
+        continue
+      }
+      const text = await res.text()
+      if (!res.ok) {
+        console.warn(`[submagic] user-media upload failed (${res.status}): ${text.slice(0, 200)}`)
+        return null
+      }
+      const data = JSON.parse(text) as { userMediaId?: string; id?: string }
+      return data.userMediaId ?? data.id ?? null
     }
-    const data = JSON.parse(text) as { userMediaId?: string; id?: string }
-    return data.userMediaId ?? data.id ?? null
   } catch (e) {
     console.warn('[submagic] user-media upload error:', (e as Error).message)
     return null
@@ -817,6 +836,43 @@ export async function checkSubmagicMediaReady(ids: string[]): Promise<Map<string
   }
 }
 
+// One Submagic project-create at a time, each holding the next back a couple
+// of seconds. "Generate all three" fires three POSTs in the same instant, and
+// that burst is what tripped Submagic's limiter in production (2026-07-21: all
+// three v1-v3 submissions bounced with 429 while the account had ~99% of its
+// hourly budget left — it is a burst limit, not an hourly one). Submissions
+// run inside background tasks, so the later variants waiting a few seconds is
+// invisible; a client-facing rate-limit card is not. Pinned on globalThis so a
+// dev-server hot reload cannot fork the queue.
+const gSubmit = globalThis as unknown as { __olySubmagicSubmitQueue?: Promise<unknown> }
+const SUBMIT_GAP_MS = 2_500
+async function inSubmagicSubmitQueue<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = gSubmit.__olySubmagicSubmitQueue ?? Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>(r => { release = r })
+  gSubmit.__olySubmagicSubmitQueue = prev.catch(() => { /* previous failure is its caller's problem */ }).then(() => gate)
+  await prev.catch(() => { /* ditto */ })
+  try {
+    return await fn()
+  } finally {
+    setTimeout(release, SUBMIT_GAP_MS)
+  }
+}
+
+// A 429 on a background task is never worth surfacing: the task has all the
+// time in the world, so wait and go again. Honors Retry-After when Submagic
+// sends one; otherwise exponential with jitter. Five attempts spans ~4 minutes
+// before giving up — past that the limiter is genuinely saturated and the
+// failure is real.
+async function submagicRateLimitWait(res: Response, attempt: number, label: string): Promise<void> {
+  const retryAfter = Number(res.headers.get('retry-after'))
+  const waitMs = (Number.isFinite(retryAfter) && retryAfter > 0
+    ? retryAfter * 1000
+    : Math.min(90_000, 8_000 * 2 ** attempt)) + Math.round(Math.random() * 2_000)
+  console.warn(`[submagic] ${label} rate-limited (attempt ${attempt + 1}) — waiting ${Math.round(waitMs / 1000)}s before retrying`)
+  await new Promise(r => setTimeout(r, waitMs))
+}
+
 export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
@@ -857,26 +913,35 @@ export async function submitSubmagicJob(
     videoUrl: typeof body.videoUrl === 'string' ? `${body.videoUrl.slice(0, 120)}...` : body.videoUrl,
   }))
 
-  // Without a timeout a stalled connection here blocked the variant until the
-  // 30-min safety timer — 60s is generous for a JSON submit (the video itself
-  // is passed by URL, not uploaded in this request).
-  const res = await fetch('https://api.submagic.co/v1/projects', {
-    method: 'POST',
-    headers: {
-      'x-api-key': process.env.SUBMAGIC_API_KEY!,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60_000),
+  // Serialized + 429-aware: see inSubmagicSubmitQueue / submagicRateLimitWait
+  // above. Without a timeout a stalled connection here blocked the variant
+  // until the 30-min safety timer — 60s is generous for a JSON submit (the
+  // video itself is passed by URL, not uploaded in this request).
+  return inSubmagicSubmitQueue(async () => {
+    const MAX_RATE_LIMIT_RETRIES = 5
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch('https://api.submagic.co/v1/projects', {
+        method: 'POST',
+        headers: {
+          'x-api-key': process.env.SUBMAGIC_API_KEY!,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(60_000),
+      })
+
+      if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        await submagicRateLimitWait(res, attempt, 'project create')
+        continue
+      }
+      if (!res.ok) {
+        const err = await res.text()
+        throw new Error(`Submagic job failed: ${err}`)
+      }
+      const data = await res.json()
+      return data.id as string
+    }
   })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Submagic job failed: ${err}`)
-  }
-
-  const data = await res.json()
-  return data.id as string
 }
 
 // ── Submagic   Poll job status ────────────────────────────────────────────────

@@ -47,7 +47,14 @@ async function pollSubmagicUntilDone(
   projectId: string,
   music: { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null } | null = null,
 ) {
-  const INTERVAL_MS = 8_000
+  // 24s, not the old 8s: on Railway this loop runs its full length for EVERY
+  // processing Submagic variant, and three variants at 8s each (plus the
+  // status route's own polling from an open tab) is the burst that got the
+  // whole account rate-limited in production on 2026-07-21. A render takes
+  // 8-15 minutes; noticing it finished ~12s later than the tightest possible
+  // poll is invisible, and the status route usually finalizes first anyway.
+  // The jitter keeps three variants started together from polling in lockstep.
+  const INTERVAL_MS = 24_000
   // Poll for as long as the render could legitimately still be alive. The old
   // ~10-minute cap predates this loop running to completion: on Vercel it died
   // with the lambda, so the cap never fired. On a long-lived host (Railway, any
@@ -60,7 +67,7 @@ async function pollSubmagicUntilDone(
   const MAX_ATTEMPTS = Math.ceil(STALE_MS / INTERVAL_MS)
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    await new Promise(r => setTimeout(r, INTERVAL_MS))
+    await new Promise(r => setTimeout(r, INTERVAL_MS + Math.round(Math.random() * 8_000)))
 
     const result = await pollSubmagicJob(projectId).catch(() => null)
     if (!result || result.status === 'processing') continue

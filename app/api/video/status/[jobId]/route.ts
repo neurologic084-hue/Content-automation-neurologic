@@ -31,6 +31,16 @@ const healAttempted = new Set<string>()
 const GLOBAL_SWEEP_EVERY_MS = 5 * 60 * 1000
 let lastGlobalSweep = 0
 
+// Per-variant throttle on the OUTBOUND Submagic poll. The studio tab hits this
+// route every few seconds, and each hit used to poll Submagic once per
+// processing variant — with three variants rendering that alone is ~2000
+// requests/hour against Submagic's budget, and it is part of what got the
+// whole account 429'd in production (2026-07-21). A render takes 8-15 minutes;
+// learning it finished up to 15s late is imperceptible. Between real polls the
+// route simply serves the DB state it already has.
+const SUBMAGIC_POLL_GAP_MS = 15_000
+const lastSubmagicPoll = new Map<string, number>()
+
 // Fails dead variants on jobs OTHER than the one being viewed. The daily cron
 // does this too; this makes normal app usage close the gap between ticks so a
 // dead variant is not still claiming to be 'processing' hours later.
@@ -133,10 +143,18 @@ export async function GET(
 
   const variants: VideoVariant[] = job.variants ?? []
 
-  // Poll any Submagic variants that are still processing
-  const submagicPending = variants.filter(
-    (v) => v.tool === 'submagic' && v.status === 'processing' && v.external_id
-  )
+  // Poll any Submagic variants that are still processing — at most once per
+  // SUBMAGIC_POLL_GAP_MS per variant (see the throttle note at the top).
+  const pollNow = Date.now()
+  if (lastSubmagicPoll.size > 500) lastSubmagicPoll.clear() // old jobs; repolling once is harmless
+  const submagicPending = variants
+    .filter((v) => v.tool === 'submagic' && v.status === 'processing' && v.external_id)
+    .filter((v) => {
+      const key = `${jobId}:${v.id}`
+      if (pollNow - (lastSubmagicPoll.get(key) ?? 0) < SUBMAGIC_POLL_GAP_MS) return false
+      lastSubmagicPoll.set(key, pollNow)
+      return true
+    })
 
   let variantsChanged = false
 

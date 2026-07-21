@@ -127,6 +127,13 @@ export function explainFailure(raw: unknown): string {
     return 'Storage upload failed (temporary network/R2 issue). Please retry this variant.'
 
   // ── Google Drive source ──────────────────────────────────────────────────────
+  // Quota FIRST: Google throttles a file that has been downloaded repeatedly
+  // ("too many users have viewed or downloaded this file"). Telling the client
+  // to "confirm the link is shared" for that case sends them off to fix a link
+  // that is perfectly fine — the honest answer is that it clears on its own,
+  // and the system's own backup copy usually covers it on retry.
+  if (mentions('drive') && mentions('too many users', 'download quota', 'quota for this file'))
+    return 'Google Drive is temporarily limiting downloads of this file (it was fetched many times today). Retry in a little while — the system will use its own backup copy when it can, and Drive clears this on its own within a day.'
   if (mentions('drive') || (mentions('download') && mentions('footage', 'source')))
     return 'Could not download the footage from Google Drive. Confirm the link is shared/accessible, then retry.'
 
