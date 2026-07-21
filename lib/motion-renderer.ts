@@ -15,7 +15,7 @@ import { getLibraryMusic } from './music-library'
 import { planMotionGraphics, type MotionGraphic } from './graphics-plan'
 import { analyzeVideoFile, FALLBACK_PROFILE, type ContentProfile } from './video-analysis'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
-import { patchVariant } from './job-lock'
+import { patchVariant, withJobLock } from './job-lock'
 import { rendersDir } from './paths'
 import { buildEditPlan, planViralCaptions, planEubankCaptions, planKoeCollageCaptions, planInsetSegments, type CaptionPage, type KoeMotif } from './edit-plan'
 import { cleanAudioInPlace, detectSilences } from './audio-clean'
@@ -3189,14 +3189,21 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     const now = Date.now()
     if (percent < 100 && now - lastProgressWrite < 700) return
     lastProgressWrite = now
-    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
-    const currentVariants = (currentJob?.variants ?? []) as VideoVariant[]
-    const nextVariants = currentVariants.map((v) => (
-      v.status === 'pending'
-        ? { ...v, progress: { step: Math.max(1, Math.min(100, Math.round(percent))), total: 100, label } }
-        : v
-    ))
-    await db.from('video_jobs').update({ variants: nextVariants }).eq('id', jobId)
+    // Read AND write inside the job lock. This fires every 700ms for the whole
+    // of prep, while start-variant already lets a variant begin as soon as the
+    // compressed source lands — so an unlocked read-modify-write here would
+    // periodically overwrite a variant that had just moved to 'processing'
+    // with a stale 'pending' snapshot, reverting a live render's card.
+    await withJobLock(jobId, async () => {
+      const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+      const currentVariants = (currentJob?.variants ?? []) as VideoVariant[]
+      const nextVariants = currentVariants.map((v) => (
+        v.status === 'pending'
+          ? { ...v, progress: { step: Math.max(1, Math.min(100, Math.round(percent))), total: 100, label } }
+          : v
+      ))
+      await db.from('video_jobs').update({ variants: nextVariants }).eq('id', jobId)
+    })
   }
 
   try {
@@ -3212,16 +3219,20 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
       console.warn(`[motion-renderer] custom B-roll analysis failed (renders proceed without it):`, (e as Error).message)
     }
 
-    const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     // Clear the prep spinner from variants that were waiting on it. Anything
     // ready/failed/processing owns its own state — a re-run of prep must not
     // touch a finished video's card or a render already in flight elsewhere.
-    const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
-      v.status === 'pending' ? { ...v, progress: null } : v
-    ))
-    await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
+    // Locked for the same reason as the progress writer above.
+    await withJobLock(jobId, async () => {
+      const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+      const readyVariants = ((currentJob?.variants ?? []) as VideoVariant[]).map((v) => (
+        v.status === 'pending' ? { ...v, progress: null } : v
+      ))
+      await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
+    })
   } catch (e) {
     console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
+    await withJobLock(jobId, async () => {
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     const all = (currentJob?.variants ?? []) as VideoVariant[]
     // Only variants that were WAITING on this prep can be failed by it. A
@@ -3243,6 +3254,7 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     // The job is only 'failed' when nothing usable came out of it.
     const jobStatus = survivors ? 'complete' : 'failed'
     await db.from('video_jobs').update({ variants: failedVariants, status: jobStatus }).eq('id', jobId)
+    })
   }
 }
 
