@@ -183,7 +183,79 @@ Also watch the **Docker image**: it hit 11 GB once because `.dockerignore`
 missed `public/renders`. It is ~3.4 GB now. If Railway builds start failing,
 check image size first.
 
-## 8. Verify all six variants, one at a time
+## 8. Environment variables
+
+Copy `.env.local` from Daniel (it is gitignored and always will be). The names
+below are the ones that change behaviour rather than just existing.
+
+**Must be set or the app does not work:**
+
+```
+NEXT_PUBLIC_SUPABASE_URL          NEXT_PUBLIC_* are baked into the browser
+NEXT_PUBLIC_SUPABASE_ANON_KEY     bundle AT BUILD TIME — see the warning below
+SUPABASE_SERVICE_ROLE_KEY
+OPENROUTER_API_KEY                every LLM call in the app
+R2_ACCESS_KEY_ID  R2_SECRET_ACCESS_KEY  R2_BUCKET  R2_ENDPOINT  R2_PUBLIC_URL
+SUBMAGIC_API_KEY                  v1-v3 only
+AUPHONIC_API_TOKEN                primary audio cleaner
+ELEVENLABS_API_KEY                transcription + sound effects (both have backups)
+PEXELS_API_KEY                    stock B-roll (falls back to Openverse)
+BLOTATO_API_KEY                   publishing
+TAVILY_API_KEY                    script research (falls back to OpenRouter)
+```
+
+**Optional — each one buys a specific behaviour:**
+
+```
+ANTHROPIC_API_KEY                 the ONLY backup for OpenRouter. Without it,
+                                  an OpenRouter outage stops every render.
+                                  Worth setting. Never yet exercised.
+STORAGE_QUOTA_GB                  soft budget for the settings meter (default 25)
+GEMINI_MODEL                      defaults to google/gemini-2.5-flash-lite
+KIE_AI_API_KEY                    collage scenes; without it they are skipped
+REPLICATE_API_TOKEN               subject cutout; without it captions sit in front
+MIGRATED_APP_URL                  set on VERCEL only — forwards the retired
+                                  deployment to Railway
+RAILWAY_DEPLOYMENT_DRAINING_SECONDS=120   Railway default is 0, which SIGKILLs
+                                  renders on every redeploy
+SKIP_SUBMAGIC_CLEAN=1             test renders only, never in production
+```
+
+**The trap that cost a night:** a Docker build receives Railway's variables only
+through explicitly declared `ARG`s. Without them the image builds green, the
+server works, and every browser-side call has no Supabase URL — so login and
+every page hang forever with no error. The `Dockerfile` declares the three
+`NEXT_PUBLIC_*` args and warns loudly if they are empty; do not remove that.
+
+## 9. Concurrency — six variants run at once
+
+Every variant of a job renders concurrently against **shared state**, so this
+is where the subtle bugs live. Three mechanisms hold it together; understand
+them before adding a fourth thing that writes to a shared path.
+
+1. **`withJobLock` / `patchVariant`** (`lib/job-lock.ts`) — all six variants
+   update the same `variants` JSON on one row by read-modify-write. Every write
+   goes through a per-job promise chain so they cannot clobber each other. Any
+   new code touching `variants` must use `patchVariant`, never a raw update.
+2. **Atomic file writes** — downloads and B-roll window cuts write to a private
+   `.part` path and `rename()` into place. Renames are atomic, so a concurrent
+   reader sees either nothing or a finished file. This matters because several
+   shared paths are keyed by job, NOT by variant (`custom-<job>-<clip>-w<n>.mp4`
+   is the same file for all six), and the unplayable-file guard would otherwise
+   delete a file another variant was mid-write on.
+3. **In-flight de-duplication** — the compressed source has one shared promise
+   per job, so six simultaneous starts pull it once rather than six times.
+
+**This all assumes ONE container.** The lock is in-process. `numReplicas` must
+stay at 1 on Railway — two replicas each keep their own lock and see none of
+the other's. The database-level guard in `startSubmagicVariantTask` still
+prevents a double Submagic charge, but nothing else is protected.
+
+If you add a shared artifact, ask: what happens if six variants reach this line
+in the same second? If the answer involves `existsSync` followed by a read,
+write it atomically.
+
+## 10. Verify all six variants, one at a time
 
 This is the acceptance test for everything above. Do not batch it — run them
 individually and actually **watch the output**.

@@ -181,7 +181,25 @@ async function fetchWithRetry(url: string, init: RequestInit, label: string, att
   throw new Error(`${label} failed after ${attempts} attempts: ${message}`)
 }
 
+// Every download lands on a PRIVATE temp path and is renamed into place at the
+// end. Rename is atomic on one filesystem, so a concurrent reader sees either
+// no file or the finished file — never a half-written one. Six variants render
+// the same job at once and several of them probe these exact paths with
+// existsSync, so without this one variant's partial download is another
+// variant's "already there, use it" (truncated footage, or a clip with no
+// video stream).
 async function downloadFile(url: string, dest: string, onProgress?: ProgressCallback): Promise<void> {
+  const finalDest = dest
+  dest = `${dest}.${process.pid}-${Math.round(performance.now())}.part`
+  try {
+    await downloadFileInner(url, dest, onProgress)
+    fs.renameSync(dest, finalDest)
+  } finally {
+    try { if (fs.existsSync(dest)) fs.unlinkSync(dest) } catch { /* best-effort */ }
+  }
+}
+
+async function downloadFileInner(url: string, dest: string, onProgress?: ProgressCallback): Promise<void> {
   const isGdrive = url.includes('drive.google.com') || url.includes('drive.usercontent.google.com')
   await onProgress?.(10, `Connecting to ${isGdrive ? 'Google Drive' : 'download URL'}`)
 
@@ -492,7 +510,28 @@ async function sharedWords(jobId: string): Promise<{ text: string; start: number
 // the smaller file on disk. If the compressed file already exists, skip
 // straight to it instead of re-downloading the (now-deleted) raw file for
 // nothing.
+// One in-flight fetch per job, shared by every variant that asks while it runs.
+// Six variants starting together otherwise each pull the same multi-GB source.
+const compressedSourceInflight = new Map<string, Promise<string>>()
+
 async function getLocalCompressedSource(
+  jobId: string,
+  sourceUrl: string,
+  outDir: string,
+  onProgress?: ProgressCallback,
+): Promise<string> {
+  const inflight = compressedSourceInflight.get(jobId)
+  if (inflight) return inflight
+  const run = getLocalCompressedSourceInner(jobId, sourceUrl, outDir, onProgress)
+  compressedSourceInflight.set(jobId, run)
+  try {
+    return await run
+  } finally {
+    compressedSourceInflight.delete(jobId)
+  }
+}
+
+async function getLocalCompressedSourceInner(
   jobId: string,
   sourceUrl: string,
   outDir: string,
@@ -2129,10 +2168,16 @@ async function stageChosenWindows(
         // -ss before -i seeks fast; normalize to h264/yuv420p 30fps with audio
         // stripped so OffthreadVideo is safe regardless of what the phone
         // produced (HEVC, odd rotation).
+        // Cut to a private path and rename in. This filename is keyed by job +
+        // clip + window, NOT by variant, so all six variants of a job target
+        // the same file — and the unplayable-file guard above would otherwise
+        // delete one that another variant is still writing.
+        const cutTmp = `${outPath}.${process.pid}-${n}.part`
         await run(
-          `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${outPath}"`,
+          `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${cutTmp}"`,
           300_000,
         )
+        fs.renameSync(cutTmp, outPath)
       }
       // Last gate before it can reach the compositor — and before it can be
       // published to a cache that every future job on this folder will trust.
