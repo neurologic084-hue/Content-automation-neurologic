@@ -70,7 +70,10 @@ export interface VideoVariant extends VideoVariantDef {
   download_url: string | null
   duration_seconds: number | null
   error: string | null
-  progress?: { step: number; total: number; label: string } | null
+  // `at` is a heartbeat written on every progress update — the stale sweep
+  // uses it to distinguish a slow render from an abandoned one. Optional:
+  // variants written before it existed simply have no heartbeat.
+  progress?: { step: number; total: number; label: string; at?: string } | null
   // CC-BY credit line for the background track used, when the chosen library
   // track requires attribution. The publish flow appends it to the post so the
   // license is satisfied. null when no credit is needed.

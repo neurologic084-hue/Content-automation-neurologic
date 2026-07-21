@@ -930,7 +930,12 @@ async function setVariantProgress(
   label: string
 ): Promise<void> {
   try {
-    await patchVariant(supabaseAdmin(), jobId, variantId, { progress: { step, total, label } })
+    // `at` is the render's heartbeat: the stale sweep uses it to tell a slow
+    // render from a dead one. Without it the sweep could only measure total
+    // elapsed time, which killed live renders at 45m (see lib/stale-sweep.ts).
+    await patchVariant(supabaseAdmin(), jobId, variantId, {
+      progress: { step, total, label, at: new Date().toISOString() },
+    })
   } catch { /* best-effort */ }
 }
 

@@ -11,10 +11,23 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { VideoVariant } from './video-pipeline'
 import { patchVariant } from './job-lock'
 
-// The sandbox itself caps at 40 min, so anything 'processing' past 45 min from
-// its start stamp is definitively dead. No false positives: real renders finish
-// well under the cap, and the stamp is per-variant (not job-age).
+// Absolute ceiling, used ONLY for variants with no heartbeat (see below). The
+// heartbeat is the real test — this is the backstop for older rows and for any
+// path that renders without reporting progress.
 export const STALE_MS = 45 * 60 * 1000
+
+// How long a render may go WITHOUT a progress update before it counts as dead.
+//
+// This is the real liveness test, and STALE_MS above is only a backstop for
+// variants that never send a heartbeat. Judging by total elapsed time alone was
+// wrong and caused the failure it was meant to catch: a Motion Lab render is
+// allowed 45 minutes on its delayRender budget and then legitimately RETRIES at
+// half the tab count, with a subprocess ceiling of 70 minutes — so the sweep
+// firing at 45 killed live renders at the exact moment they began their retry
+// (job b550d052 lost v4 and v6 that way). A render writing progress every few
+// seconds is alive no matter how long it has been going; one silent for this
+// long is not.
+export const NO_HEARTBEAT_MS = 15 * 60 * 1000
 
 // A much shorter cap for variants that have reported NO progress at all —
 // the render task never checked in (Sandbox VM failed to launch or died during
@@ -42,7 +55,17 @@ export async function sweepStaleVariants(
     }
     const age = now - new Date(v.processing_started_at).getTime()
     const neverStarted = !v.progress && age > NEVER_STARTED_MS
-    return age > STALE_MS || neverStarted
+    if (neverStarted) return true
+
+    // Heartbeat present: trust it over the clock. A long render that is still
+    // reporting is doing its job.
+    const beat = v.progress?.at ? new Date(v.progress.at).getTime() : null
+    if (beat && Number.isFinite(beat)) return now - beat > NO_HEARTBEAT_MS
+
+    // No heartbeat (an older variant, or a path that never reports): fall back
+    // to total elapsed, but allow the full subprocess ceiling the renderer is
+    // permitted rather than cutting in at its retry point.
+    return age > STALE_MS
   })
 
   for (const v of stale) {
@@ -70,15 +93,21 @@ export async function sweepStaleVariants(
     }
     const neverStarted = !v.progress
     console.warn(
-      `[stale-sweep] variant ${jobId}:${v.id} ${neverStarted ? `never reported progress in ${NEVER_STARTED_MS / 60000}m` : `stuck processing past ${STALE_MS / 60000}m`} — marking failed`,
+      `[stale-sweep] variant ${jobId}:${v.id} ${
+        neverStarted
+          ? `never reported progress in ${NEVER_STARTED_MS / 60000}m`
+          : v.progress?.at
+            ? `silent for over ${NO_HEARTBEAT_MS / 60000}m (last: "${v.progress.label}")`
+            : `no heartbeat and processing past ${STALE_MS / 60000}m`
+      } — marking failed`,
     )
     // patchVariant alerts ops on every status:'failed' write, so swept
     // variants notify Slack without extra plumbing here.
     await patchVariant(db, jobId, v.id, {
       status: 'failed',
       error: neverStarted
-        ? 'The render didn\'t start (the worker never came up). Please retry this variant.'
-        : 'The render stopped unexpectedly (the worker was interrupted). Please retry this variant.',
+        ? 'This render never started — the machine that was supposed to pick it up never came up. Please retry it.'
+        : 'This render stopped part-way through and went quiet, usually because the server restarted while it was working. Nothing is lost — press retry and it will pick up from the work already done.',
       progress: null,
     }, { completeWhenAllDone: true })
   }
