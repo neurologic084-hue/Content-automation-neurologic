@@ -1103,6 +1103,21 @@ export function containerMemoryGb(): number {
   return host
 }
 
+// The container's max process/thread count (cgroup v2 pids.max). "Resource
+// temporarily unavailable" (EAGAIN) is what a render hits when this is
+// exhausted — a headless Chrome alone spawns dozens of threads, so several
+// concurrent renders reach it well before they reach the memory limit. Sizing
+// only by memory is exactly how the box got planned for 11 renders and
+// crashed. null when unreadable/unlimited.
+function containerPidLimit(): number | null {
+  try {
+    const raw = fs.readFileSync('/sys/fs/cgroup/pids.max', 'utf8').trim()
+    if (raw === 'max') return null
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : null
+  } catch { return null }
+}
+
 export function containerCores(): number {
   const host = Math.max(1, os.cpus().length)
   try {
@@ -1928,6 +1943,54 @@ async function renderMotionGraphicsTestOnly(
 // and the compositor drops connections (ECONNRESET). So when multiple variants
 // are started together, planning/B-roll/music still run in parallel but the
 // render step itself goes through this queue, one at a time.
+// ── Whole-task admission control for Motion Lab variants ─────────────────────
+// The render-lane limiter below bounds only the Remotion RENDER step. But every
+// variant also downloads B-roll, runs ffmpeg window-cuts, and stages SFX BEFORE
+// it reaches that step — so 16 variants launched together ran 16 concurrent
+// downloads + ffmpeg passes at once, and that prep alone exhausted the
+// container (the EAGAIN / "resource temporarily unavailable" crashes). This
+// gates the ENTIRE per-variant pipeline: at most renderSlots() variants are
+// active end-to-end, the rest wait in a FIFO queue and are admitted one at a
+// time as slots free. Prioritised in arrival order — load 16, the box works
+// through them steadily instead of trying all at once and failing.
+const renderAdmission = { active: 0, waiters: [] as Array<() => void> }
+
+async function acquireRenderSlot(): Promise<void> {
+  if (renderAdmission.active < renderSlots()) {
+    renderAdmission.active++
+    return
+  }
+  await new Promise<void>(resolve => renderAdmission.waiters.push(resolve))
+  // Slot transferred to us by releaseRenderSlot — active already reflects it.
+}
+
+function releaseRenderSlot(): void {
+  const next = renderAdmission.waiters.shift()
+  if (next) next()                                   // hand the slot straight to the next in line
+  else renderAdmission.active = Math.max(0, renderAdmission.active - 1)
+}
+
+// Runs fn holding one admission slot; queues if the box is full, keeping a
+// heartbeat alive while waiting so the stale sweep never mistakes a queued
+// variant for a dead one (the 16th can wait a while).
+async function withRenderSlot<T>(jobId: string, variantId: string, fn: () => Promise<T>): Promise<T> {
+  let beat: ReturnType<typeof setInterval> | null = null
+  if (renderAdmission.active >= renderSlots()) {
+    await setVariantProgress(jobId, variantId, 5, 100, 'Queued — waiting for a free render slot').catch(() => {})
+    beat = setInterval(() => {
+      void setVariantProgress(jobId, variantId, 5, 100, 'Queued — waiting for a free render slot').catch(() => {})
+    }, 60_000)
+    beat.unref?.()
+  }
+  await acquireRenderSlot()
+  if (beat) clearInterval(beat)
+  try {
+    return await fn()
+  } finally {
+    releaseRenderSlot()
+  }
+}
+
 function enqueueRemotionRender<T>(fn: () => Promise<T>): Promise<T> {
   // N lanes instead of one. Each lane is its own promise chain; a new render
   // joins the shortest one, so with slots=3 three renders proceed together and
@@ -3102,6 +3165,9 @@ async function pollSubmagicUntilReady(projectId: string): Promise<string> {
 }
 
 export interface RenderVariantOptions {
+  // Internal only: how many times this render has already been requeued after a
+  // transient resource-exhaustion failure. Not set by callers.
+  __resourceRetry?: number
   hook: string
   cta: string
   nativeCaptions?: boolean
@@ -3268,14 +3334,29 @@ export async function runSingleVariant(
   }
 
   try {
-    await launch()
+    await withRenderSlot(jobId, variantId, launch)
   } catch (e) {
-    // MUST mark the variant failed here — not just log. renderRemotionEdit and
-    // the caption/motion-graphics test paths can throw before they set up their
-    // own error handling (e.g. empty transcription), and renderEditVariantTask
-    // has no catch of its own. Without this the variant sits 'processing' with
-    // no progress ("Connecting to pipeline…") until the 45-min sweep, and the UI
-    // offers no Retry while processing — a frozen, unrecoverable card.
+    // TRANSIENT OVERLOAD auto-retries instead of failing to the client. A
+    // resource-exhaustion error ("Resource temporarily unavailable" / EAGAIN,
+    // an OOM-killed subprocess, a compositor that could not allocate) is not a
+    // problem with THIS video — it is the box being momentarily busy. The
+    // client never picked the concurrency, so they should never see its
+    // failures. Wait a beat for the pressure to clear, requeue through the same
+    // lane limiter (which will not launch until a slot frees), and try again.
+    // Only a repeated transient failure, or a real render error, reaches the
+    // card. delayRender/timeout paths keep their own retry — this is the outer
+    // safety net for the whole task.
+    const msg = (e as Error).message || ''
+    const transient = /resource temporarily unavailable|eagain|cannot allocate|out of memory|oom|enomem|compositor error|econnreset|socket hang up|spawn|timed out/i.test(msg)
+    const attempt = (opts.__resourceRetry ?? 0)
+    if (transient && attempt < 2) {
+      console.warn(`[motion-renderer] transient overload on ${variantId} (attempt ${attempt + 1}/2): ${msg.slice(0, 120)} — backing off and requeueing`)
+      await setVariantProgress(jobId, variantId, 5, 100, 'Waiting for a free render slot').catch(() => {})
+      await new Promise(r => setTimeout(r, 15_000 * (attempt + 1)))
+      active.delete(key)
+      clearTimeout(timeoutId)
+      return runSingleVariant(jobId, variantId, sourceUrl, { ...opts, __resourceRetry: attempt + 1 })
+    }
     console.error('[motion-renderer] runSingleVariant fatal:', e)
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message || 'The render failed to start. Please retry this variant.').catch(() => {})
   } finally {
