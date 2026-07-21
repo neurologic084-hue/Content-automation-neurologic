@@ -3241,7 +3241,10 @@ export async function loadSubmagicBrollPlan(jobId: string): Promise<SubmagicBrol
 async function writeSubmagicBrollPlan(jobId: string, plan: SubmagicBrollPlan): Promise<void> {
   const outDir = rendersDir(jobId)
   fs.mkdirSync(outDir, { recursive: true })
-  const tmp = path.join(outDir, SUBMAGIC_BROLL_PLAN_NAME)
+  // Unique per writer: the upload reads this file back, so a second writer
+  // landing on the same path mid-upload would ship torn JSON to R2 — and every
+  // variant then reads that as its B-roll plan.
+  const tmp = path.join(outDir, `${SUBMAGIC_BROLL_PLAN_NAME}.${process.pid}-${Math.round(performance.now())}.tmp`)
   fs.writeFileSync(tmp, JSON.stringify(plan))
   await uploadToStorage(tmp, SUBMAGIC_BROLL_PLAN_NAME, jobId)
   try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
@@ -3283,7 +3286,7 @@ async function ensureSubmagicWindowMedia(c: ClipCandidate, cacheDir: string): Pr
     if (!hosted) {
       if (!fs.existsSync(c.rawPath)) await downloadFile(c.sourceUrl, c.rawPath)
       const outPath = path.join(cacheDir, cacheName)
-      const cutTmp = `${outPath}.${process.pid}.part`
+      const cutTmp = `${outPath}.${process.pid}-${Math.round(performance.now())}.part`
       await run(
         `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -movflags +faststart "${cutTmp}"`,
         300_000,
@@ -3331,7 +3334,26 @@ async function publishSubmagicMediaSidecar(cacheName: string, userMediaId: strin
  *  once per job as part of source prep (and again on a forced retry, because a
  *  rebuilt cut is a new timeline). Best-effort throughout: no plan simply means
  *  v1-v3 fall back to stock B-roll with a notice on the card. */
+// One plan build per job at a time. refreshPrecutForRetry calls this per
+// VARIANT, so retrying v1/v2/v3 together used to run three concurrent builds
+// that wrote the same temp files (torn JSON) and each paid for its own
+// transcription of the identical cut. Callers that arrive mid-build wait for
+// the one in flight and reuse its result.
+const submagicPlanInflight = new Map<string, Promise<void>>()
+
 export async function prepareSubmagicBrollForJob(jobId: string, opts: { force?: boolean } = {}): Promise<void> {
+  const running = submagicPlanInflight.get(jobId)
+  if (running) return running
+  const run = prepareSubmagicBrollForJobInner(jobId, opts)
+  submagicPlanInflight.set(jobId, run)
+  try {
+    return await run
+  } finally {
+    submagicPlanInflight.delete(jobId)
+  }
+}
+
+async function prepareSubmagicBrollForJobInner(jobId: string, opts: { force?: boolean } = {}): Promise<void> {
   if (!process.env.R2_PUBLIC_URL || !process.env.SUBMAGIC_API_KEY) return
   const db = supabaseAdmin()
   const { data: job } = await db.from('video_jobs').select('custom_broll, variants, content_profile').eq('id', jobId).single()
@@ -3384,7 +3406,7 @@ export async function prepareSubmagicBrollForJob(jobId: string, opts: { force?: 
       const words = await transcribeLocalFile(localCut)
       const cutSeconds = await getVideoDuration(localCut)
       cutWords = { basis, cutSeconds, words }
-      const tmp = path.join(outDir, SUBMAGIC_CUT_WORDS_NAME)
+      const tmp = path.join(outDir, `${SUBMAGIC_CUT_WORDS_NAME}.${process.pid}-${Math.round(performance.now())}.tmp`)
       fs.writeFileSync(tmp, JSON.stringify(cutWords))
       await uploadToStorage(tmp, SUBMAGIC_CUT_WORDS_NAME, jobId)
       try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
