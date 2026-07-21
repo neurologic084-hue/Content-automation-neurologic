@@ -362,6 +362,27 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
 // 3840x2160 -> 1920x1080) is visually lossless for the output and cuts the
 // render work ~4x. Aspect ratio and framing untouched; at or under the cap
 // it's a plain copy, exactly the old behavior.
+// Downscales a file to 1080p IN PLACE (temp + atomic rename), leaving anything
+// already at/under 1080p untouched. Run once in prep so the shared clean is
+// render-ready; harmless to run again (a 1080p file is a no-op). Existing 4K
+// jobs get scaled on their next prep or retry.
+async function downscaleInPlace(videoPath: string): Promise<void> {
+  const { width, height } = await probeVideoDimensions(videoPath)
+  if (Math.min(width, height) <= 1080) return
+  const filter = height >= width ? 'scale=1080:-2' : 'scale=-2:1080'
+  const tmp = `${videoPath}.${process.pid}-${Math.round(performance.now())}.1080.mp4`
+  console.log(`[shared-audio] downscaling ${width}x${height} -> 1080p once for the whole job (${filter})`)
+  await run(
+    `ffmpeg -y -i "${videoPath}" -vf ${filter} -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -c:a copy -movflags +faststart "${tmp}"`,
+    600_000,
+  )
+  if (!fs.existsSync(tmp) || fs.statSync(tmp).size < 10_000) {
+    try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+    throw new Error('1080p downscale produced no output')
+  }
+  fs.renameSync(tmp, videoPath)
+}
+
 async function stageRenderWorkCopy(compressedPath: string, workPath: string): Promise<void> {
   const { width, height } = await probeVideoDimensions(compressedPath)
   if (Math.min(width, height) <= 1080) {
@@ -412,6 +433,12 @@ async function buildSharedCleanAudio(jobId: string, compressedPath: string, outD
     fs.copyFileSync(compressedPath, cleanPath)
     const cleaner = await cleanAudioInPlace(cleanPath)
     console.log(`[shared-audio] cleaned once for the whole job via ${cleaner}`)
+    // Downscale to 1080p HERE, once for the whole job, so the shared clean every
+    // Motion Lab variant reuses is ALREADY render-ready. Previously each variant
+    // re-encoded the 4K source itself — same input, same output, three times a
+    // job. A source at/under 1080p is left untouched; only a 4K/larger one is
+    // scaled (existing 4K jobs included, on their next prep/retry).
+    await downscaleInPlace(cleanPath)
     await uploadToStorage(cleanPath, SHARED_CLEAN_NAME, jobId)
 
     // Transcribe the CLEANED audio: better words, and the timings then match
@@ -2373,20 +2400,11 @@ async function renderRemotionEdit(
     if (sharedClean) {
       await setVariantProgress(jobId, variantId, 2, STEPS, 'Reusing cleaned audio')
       console.log('[motion-renderer] reusing the job\'s shared cleaned audio (no second clean)')
-      // The shared clean is the COMPRESSED (full-resolution) source, so its 4K
-      // downscale into a 1080p work copy happens here — but that scaled result
-      // is byte-identical for every variant (only the CUTS differ later), so it
-      // is cached once per job. On Railway all variants share one container
-      // disk, so the second and third variants just copy the cached file
-      // instead of re-encoding a 4K source (~30-90s each on client footage).
-      const sharedWork = path.join(outDir, 'source-work-1080.mp4')
-      if (fs.existsSync(sharedWork) && fs.statSync(sharedWork).size > 10_000) {
-        fs.copyFileSync(sharedWork, workPath)
-        console.log('[motion-renderer] reusing the job\'s downscaled work copy (no second re-encode)')
-      } else {
-        await stageRenderWorkCopy(sharedCleanPath, workPath)
-        try { fs.copyFileSync(workPath, sharedWork) } catch { /* cache is best-effort */ }
-      }
+      // The shared clean is already 1080p (downscaled once in prep), so this is
+      // a copy, not a re-encode. stageRenderWorkCopy still guards the rare case
+      // of an OLD job whose shared clean predates the prep downscale — it no-ops
+      // when the source is already <=1080p.
+      await stageRenderWorkCopy(sharedCleanPath, workPath)
       try { fs.unlinkSync(sharedCleanPath) } catch { /* best-effort */ }
     } else {
       // Falling back means paying again: this variant runs the whole
