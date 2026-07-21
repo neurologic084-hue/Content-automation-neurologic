@@ -55,7 +55,8 @@ const g = globalThis as unknown as {
   __olyContentProfiles?: Map<string, Promise<ContentProfile>>
   __olySubmagicFinalizes?: Set<string>
   __olyAudioQueue?: Promise<unknown>
-  __olyRemotionQueue?: Promise<unknown>
+  __olyRemotionLanes?: Promise<unknown>[]
+  __olyRemotionDepths?: number[]
 }
 
 const sourceFileCache = (g.__olySourceFiles ??= new Map<string, Promise<string>>())
@@ -1046,6 +1047,44 @@ function isConstrainedRenderHost(): boolean {
 // hand whenever the render host changed — and which silently applied the
 // laptop profile on GitHub for weeks because the host check only knew about
 // Vercel. Deriving it means a bigger runner just goes faster on its own.
+// Tabs for ONE render. Above this a single render stops getting faster — the
+// compositor and the ffmpeg encode become the bottleneck, not frame rendering —
+// so extra capacity is better spent running another render alongside it.
+const TABS_PER_RENDER = Number(process.env.RENDER_TABS) || 4
+
+// How many Remotion renders may run AT THE SAME TIME.
+//
+// This used to be hard-wired to one: every render queued behind the last, so
+// six variants on a 16-core box finished no faster than on a 4-core one — the
+// machine sat mostly idle while a single render used a slice of it. Each
+// render still needs real headroom (Chrome tabs + the compositor + an ffmpeg
+// encode), so slots are granted only when BOTH cores and memory support them.
+// Deliberately capped at 3: past that the encode stage saturates disk and the
+// wins disappear.
+function renderSlots(): number {
+  // Explicit override wins — the whole point is that this is a spend decision,
+  // not a code decision. Raise RENDER_SLOTS after raising the Railway plan and
+  // the app uses the new capacity on the next deploy, no code change.
+  const forced = Number(process.env.RENDER_SLOTS)
+  if (Number.isFinite(forced) && forced >= 1) return Math.floor(forced)
+
+  const cores = Math.max(1, os.cpus().length)
+  const gb = os.totalmem() / 1024 ** 3
+  // Budget per concurrent render, with tabs already shrinking as slots grow:
+  // ~3 cores (Chrome + compositor + the ffmpeg encode) and ~6GB. Memory is the
+  // one that actually kills — an OOM-reaped render loses the work, whereas
+  // being short on cores only makes it slower.
+  // Budget per concurrent render: ~4 cores (its Chrome tabs + the compositor +
+  // an ffmpeg encode) and ~7GB. Memory is the one that actually kills — an
+  // OOM-reaped render loses the work; short cores only make it slower.
+  const byCpu = Math.floor((cores - 1) / 4)
+  const byMem = Math.floor(gb / 7)
+  // No arbitrary ceiling any more: on a big box this is meant to go wide. The
+  // cap only exists so a pathological reading of cores/memory cannot spawn
+  // hundreds of Chrome instances.
+  return Math.max(1, Math.min(byCpu, byMem, 16))
+}
+
 function renderConcurrency(): number {
   const cores = Math.max(1, os.cpus().length)
   const gb = os.totalmem() / 1024 ** 3
@@ -1055,8 +1094,12 @@ function renderConcurrency(): number {
   // used: 6 tabs was tuned on 4-core CI runners, and pinning a 16-core box to
   // it leaves most of the paid machine idle. Memory stays the binding guard —
   // a tab budget the RAM can't back is how renders died in July.
-  const cap = cores >= 12 && gb >= 24 ? 10 : cores >= 8 && gb >= 16 ? 8 : 6
-  return Math.max(1, Math.min(byCpu, byMem, cap))
+  // Each concurrent render gets its OWN budget rather than a slice of a fixed
+  // machine-wide pool — dividing a fixed pool meant a bigger box just split the
+  // same tabs thinner (10 renders x 1 tab beat nobody). Slots are already
+  // capped so that this many tabs each fits in cores and memory.
+  const perRender = Math.min(Math.floor(byCpu / renderSlots()), Math.floor(byMem / renderSlots()))
+  return Math.max(1, Math.min(perRender, TABS_PER_RENDER))
 }
 
 async function finishVariant(
@@ -1822,9 +1865,22 @@ async function renderMotionGraphicsTestOnly(
 // are started together, planning/B-roll/music still run in parallel but the
 // render step itself goes through this queue, one at a time.
 function enqueueRemotionRender<T>(fn: () => Promise<T>): Promise<T> {
-  const prev = g.__olyRemotionQueue ?? Promise.resolve()
-  const p = prev.then(fn, fn)
-  g.__olyRemotionQueue = p.catch(() => undefined)
+  // N lanes instead of one. Each lane is its own promise chain; a new render
+  // joins the shortest one, so with slots=3 three renders proceed together and
+  // a fourth waits behind whichever finishes first. Falls back to exactly the
+  // old single-chain behaviour when the machine only supports one slot.
+  const slots = renderSlots()
+  const lanes: Promise<unknown>[] = (g.__olyRemotionLanes ??= [])
+  while (lanes.length < slots) lanes.push(Promise.resolve())
+  const depths: number[] = (g.__olyRemotionDepths ??= [])
+  while (depths.length < slots) depths.push(0)
+
+  let pick = 0
+  for (let i = 1; i < slots; i++) if (depths[i] < depths[pick]) pick = i
+  depths[pick]++
+
+  const p = lanes[pick].then(fn, fn)
+  lanes[pick] = p.then(() => { depths[pick]-- }, () => { depths[pick]-- })
   return p
 }
 

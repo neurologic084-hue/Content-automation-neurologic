@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import os from 'os'
 
 // Railway's healthcheck target. Deliberately shallow: it answers "this
 // container is serving" and nothing more.
@@ -10,5 +11,15 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 
 export function GET() {
-  return NextResponse.json({ ok: true, uptime: Math.round(process.uptime()) })
+  // Machine shape is reported so the render sizing can be checked against the
+  // box actually paid for — the render tab count and how many renders run at
+  // once are both derived from these numbers, so seeing them is the fastest
+  // way to tell whether capacity is being left on the table.
+  return NextResponse.json({
+    ok: true,
+    uptime: Math.round(process.uptime()),
+    cores: os.cpus().length,
+    memoryGb: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10,
+    freeGb: Math.round((os.freemem() / 1024 ** 3) * 10) / 10,
+  })
 }
