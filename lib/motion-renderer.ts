@@ -2834,93 +2834,109 @@ async function renderRemotionEdit(
     }))
     staged.push(propsPath)
 
+    // Renders are serialised one at a time, so starting all six variants
+    // together leaves five WAITING here. A waiting variant does no work and so
+    // writes no progress — and the stale sweep reads silence as death, which
+    // killed queued variants after 15 minutes with "the server restarted while
+    // it was working" when nothing had restarted at all. Keep the heartbeat
+    // going while it waits: it is alive, just not its turn.
     await setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
-    await enqueueRemotionRender(async () => {
-      await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering your edit')
-      // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
-      // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
-      // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
-      // ffmpeg/ffprobe stay on system glibc 2.34. Verified end-to-end on real
-      // AL2023. Runs from the cloned worker (not the bootstrap) so it can't be
-      // blocked by a lagging Vercel function deploy; once-per-VM via a marker.
-      const gnuDir = path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')
-      if (process.env.SANDBOX) {
-        await patchSandboxCompositorGlibc(gnuDir)
-      }
-      // In the sandbox: lower concurrency so the single render server isn't
-      // hammered by many tabs at once (its asset/frame serving is what stalls
-      // on long renders), a bigger delayRender timeout for headroom, and the
-      // compositor cache cap. Fonts are embedded (data URIs, see fonts-data.ts)
-      // so they never hit the server at all.
-      //
-      // Tab count is MEASURED from the machine (renderConcurrency) rather than
-      // hardcoded per host — a bigger runner now just goes faster on its own.
-      // Only the Sandbox needs the glibc-patched compositor; GitHub runners are
-      // Ubuntu and their stock one is fine.
-      const constrained = isConstrainedRenderHost()
-      const concurrency = renderConcurrency()
+    const queueBeat = setInterval(() => {
+      void setVariantProgress(jobId, variantId, 5, STEPS, 'Waiting for render slot')
+    }, 60_000)
+    // unref so a pending timer can never hold the process open during shutdown.
+    queueBeat.unref?.()
+    try {
+      await enqueueRemotionRender(async () => {
+          clearInterval(queueBeat)
+          await setVariantProgress(jobId, variantId, 5, STEPS, 'Rendering your edit')
+        // Sandbox VM is Amazon Linux 2023 (glibc 2.34); Remotion's gnu compositor
+        // needs glibc 2.35. Remotion's own fix (patchCompositor in @remotion/vercel):
+        // bundle Ubuntu 22.04's glibc 2.35 and patchelf the compositor onto it;
+        // ffmpeg/ffprobe stay on system glibc 2.34. Verified end-to-end on real
+        // AL2023. Runs from the cloned worker (not the bootstrap) so it can't be
+        // blocked by a lagging Vercel function deploy; once-per-VM via a marker.
+        const gnuDir = path.join(REMOTION_DIR, 'node_modules/@remotion/compositor-linux-x64-gnu')
+        if (process.env.SANDBOX) {
+          await patchSandboxCompositorGlibc(gnuDir)
+        }
+        // In the sandbox: lower concurrency so the single render server isn't
+        // hammered by many tabs at once (its asset/frame serving is what stalls
+        // on long renders), a bigger delayRender timeout for headroom, and the
+        // compositor cache cap. Fonts are embedded (data URIs, see fonts-data.ts)
+        // so they never hit the server at all.
+        //
+        // Tab count is MEASURED from the machine (renderConcurrency) rather than
+        // hardcoded per host — a bigger runner now just goes faster on its own.
+        // Only the Sandbox needs the glibc-patched compositor; GitHub runners are
+        // Ubuntu and their stock one is fine.
+        const constrained = isConstrainedRenderHost()
+        const concurrency = renderConcurrency()
 
-      // TIMERS — three are stacked, and for years the tightest silently killed
-      // healthy renders. Proven by the verbose diag (run 29731128897): the
-      // render was NEVER wedged; it died at 57% with frames still advancing and
-      // ~4 minutes to go. Besides the rendering tabs, a non-rendering page sits
-      // CPU-starved on a small runner and its module-scope font handles
-      // ("Loading font EditCapBase…") never clear — harmless right up until the
-      // render outlives the delayRender budget, at which point that page's timer
-      // kills a perfectly healthy render. Every job that finished inside the
-      // budget passed; every longer one died at exactly the budget mark, which
-      // is why short demo videos "worked" and the client's longer ones "didn't".
-      //
-      // So the budget must exceed WORST-CASE TOTAL RENDER TIME, not page load,
-      // and each timer must sit above the one below it:
-      //   delayRender 45min  <  subprocess 70min  <  workflow 120min
-      const renderTimeout = 45 * 60_000        // delayRender budget
-      const renderHardKill = 70 * 60_000       // subprocess ceiling, above it
+        // TIMERS — three are stacked, and for years the tightest silently killed
+        // healthy renders. Proven by the verbose diag (run 29731128897): the
+        // render was NEVER wedged; it died at 57% with frames still advancing and
+        // ~4 minutes to go. Besides the rendering tabs, a non-rendering page sits
+        // CPU-starved on a small runner and its module-scope font handles
+        // ("Loading font EditCapBase…") never clear — harmless right up until the
+        // render outlives the delayRender budget, at which point that page's timer
+        // kills a perfectly healthy render. Every job that finished inside the
+        // budget passed; every longer one died at exactly the budget mark, which
+        // is why short demo videos "worked" and the client's longer ones "didn't".
+        //
+        // So the budget must exceed WORST-CASE TOTAL RENDER TIME, not page load,
+        // and each timer must sit above the one below it:
+        //   delayRender 45min  <  subprocess 70min  <  workflow 120min
+        const renderTimeout = 45 * 60_000        // delayRender budget
+        const renderHardKill = 70 * 60_000       // subprocess ceiling, above it
 
-      // --log=verbose on constrained hosts: these renders used to die blind
-      // (zero output between start and the timeout), so a slow render and a
-      // wedged page looked identical. Per-frame progress is what made the root
-      // cause findable. Cost is log volume only.
-      //
-      // Efficiency: veryfast + crf 21 encodes markedly quicker for output that
-      // is visually indistinguishable at 1080x1920, and JPEG frames cut
-      // per-frame serialisation. With the measured tab count and the 4K
-      // downscale, this is where the speedup comes from.
-      const perfFlags =
-        ` --concurrency=${concurrency}` +
-        ` --x264-preset=veryfast --crf=21 --image-format=jpeg --jpeg-quality=90` +
-        ` --offthreadvideo-cache-size-in-bytes=${constrained ? 536870912 : 1073741824}` +
-        (constrained ? ' --log=verbose' : '') +
-        (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
+        // --log=verbose on constrained hosts: these renders used to die blind
+        // (zero output between start and the timeout), so a slow render and a
+        // wedged page looked identical. Per-frame progress is what made the root
+        // cause findable. Cost is log volume only.
+        //
+        // Efficiency: veryfast + crf 21 encodes markedly quicker for output that
+        // is visually indistinguishable at 1080x1920, and JPEG frames cut
+        // per-frame serialisation. With the measured tab count and the 4K
+        // downscale, this is where the speedup comes from.
+        const perfFlags =
+          ` --concurrency=${concurrency}` +
+          ` --x264-preset=veryfast --crf=21 --image-format=jpeg --jpeg-quality=90` +
+          ` --offthreadvideo-cache-size-in-bytes=${constrained ? 536870912 : 1073741824}` +
+          (constrained ? ' --log=verbose' : '') +
+          (process.env.SANDBOX ? ` --binaries-directory="${gnuDir}"` : '')
 
-      console.log(
-        `[motion-renderer] rendering ${variantId} with ${concurrency} tab(s) ` +
-        `on ${os.cpus().length} core / ${(os.totalmem() / 1024 ** 3).toFixed(1)}GB host ` +
-        `(delayRender budget ${renderTimeout / 60000}min)`,
-      )
-
-
-      // One retry, at half the tabs. A render that dies from resource pressure
-      // usually survives with fewer tabs, and retrying once beats failing the
-      // variant outright — but only once, so a genuinely broken render fails
-      // fast instead of burning the runner twice over.
-      const renderCmd = (tabs: number) =>
-        `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
-        `--props="${propsPath}" --codec=h264 --timeout=${renderTimeout}` +
-        perfFlags.replace(`--concurrency=${concurrency}`, `--concurrency=${tabs}`)
-
-      try {
-        await run(renderCmd(concurrency), renderHardKill)
-      } catch (e) {
-        const halved = Math.max(1, Math.floor(concurrency / 2))
-        if (halved === concurrency) throw e
-        console.warn(
-          `[motion-renderer] render failed on ${concurrency} tab(s) (${(e as Error).message.slice(0, 160)}) — ` +
-          `retrying ONCE at ${halved}`,
+        console.log(
+          `[motion-renderer] rendering ${variantId} with ${concurrency} tab(s) ` +
+          `on ${os.cpus().length} core / ${(os.totalmem() / 1024 ** 3).toFixed(1)}GB host ` +
+          `(delayRender budget ${renderTimeout / 60000}min)`,
         )
-        await run(renderCmd(halved), renderHardKill)
-      }
-    })
+
+
+        // One retry, at half the tabs. A render that dies from resource pressure
+        // usually survives with fewer tabs, and retrying once beats failing the
+        // variant outright — but only once, so a genuinely broken render fails
+        // fast instead of burning the runner twice over.
+        const renderCmd = (tabs: number) =>
+          `cd "${REMOTION_DIR}" && npx remotion render src/Root.tsx ShortEdit "${outputPath}" ` +
+          `--props="${propsPath}" --codec=h264 --timeout=${renderTimeout}` +
+          perfFlags.replace(`--concurrency=${concurrency}`, `--concurrency=${tabs}`)
+
+        try {
+          await run(renderCmd(concurrency), renderHardKill)
+        } catch (e) {
+          const halved = Math.max(1, Math.floor(concurrency / 2))
+          if (halved === concurrency) throw e
+          console.warn(
+            `[motion-renderer] render failed on ${concurrency} tab(s) (${(e as Error).message.slice(0, 160)}) — ` +
+            `retrying ONCE at ${halved}`,
+          )
+          await run(renderCmd(halved), renderHardKill)
+        }
+      })
+    } finally {
+      clearInterval(queueBeat)
+    }
     if (!fs.existsSync(outputPath)) throw new Error('Remotion render produced no output file')
 
     if (MUSIC_ENABLED && musicMode !== 'off') {

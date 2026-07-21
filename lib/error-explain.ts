@@ -69,13 +69,21 @@ export function explainFailure(raw: unknown): string {
 
   // ── Submagic (v1-v3 captions/styling) ────────────────────────────────────────
   if (mentions('submagic')) {
-    if (has(402) || mentions('plan', 'upgrade', 'limit', 'quota', 'credits', 'exceeded'))
-      return 'Submagic limit reached (plan or usage). Check your Submagic plan/usage, then retry.'
+    // Deliberately NARROW. This used to match the bare word 'limit', which
+    // appears in plenty of unrelated Submagic errors ("rate limit", "limit of
+    // 100 items", a field-length complaint) — so ordinary failures were
+    // reported to the client as "your plan is finished" and sent them to a
+    // billing page for no reason. Only claim a plan/usage problem when the
+    // message actually says so.
+    if (has(402) || mentions('upgrade your plan', 'plan limit', 'usage limit', 'requires a higher plan', 'exceeded your plan', 'out of credits', 'insufficient credits'))
+      return 'Your Submagic plan or usage limit has been reached, so this edit could not be made. Check your Submagic account, then retry this version.'
     if (has(401) || has(403) || mentions('unauthorized', 'api key', 'api-key', 'invalid key'))
       return 'Submagic key is invalid. Check SUBMAGIC_API_KEY.'
     if (has(429) || mentions('rate limit', 'too many requests'))
       return 'Submagic is rate-limited right now. Wait a minute, then retry.'
-    return 'Submagic had an error finishing this edit. Please retry this variant.'
+    // Unknown Submagic failure: say what we actually know rather than
+    // inventing a cause. The raw reason is already on the card via the caller.
+    return 'The editing engine could not finish this version. This is usually temporary — press retry. If it keeps happening, the detail in the logs will say why.'
   }
 
   // ── ElevenLabs (transcription + voice isolation) ─────────────────────────────
@@ -199,7 +207,10 @@ export function failureAction(raw: unknown): { label: string; url: string } | nu
   if (low.includes('openrouter'))
     return { label: 'Add OpenRouter credits', url: 'https://openrouter.ai/credits' }
   if (low.includes('submagic'))
-    return { label: 'Check Submagic plan', url: 'https://app.submagic.co/settings/billing' }
+    // App root, not a guessed deep link: Submagic is a single-page app, so
+    // /settings/billing answers 200 even if that route does not exist and the
+    // client would land on an in-app 404.
+    return { label: 'Open Submagic', url: 'https://app.submagic.co' }
   if (low.includes('pexels'))
     return { label: 'Check Pexels API', url: 'https://www.pexels.com/api/' }
   if (low.includes('blotato'))
