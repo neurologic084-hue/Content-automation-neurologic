@@ -14,13 +14,18 @@ export type MusicMode = 'smart' | 'off'
 
 export const DEFAULT_MUSIC_MODE: MusicMode = 'smart'
 
-// One creator-supplied B-roll clip attached to a job. Only the Motion Lab
-// variants (v4-v6) use these — v1-v3 always render with Submagic's own stock
-// B-roll — and the prepare-source task enriches each one with the Gemini
-// analysis those variants read.
+// One creator-supplied B-roll clip attached to a job. Every variant can use
+// these — v4-v6 place them in-render, v1-v3 through the Submagic B-roll plan
+// built in source prep — and the prepare-source task enriches each one with
+// the Gemini analysis both paths read.
 export interface CustomBrollEntry {
   url: string
   description?: string | null
+  // Total length of the source the window offsets are measured against —
+  // stamped when the clip is analysed. Windows without it (or with offsets
+  // outside it) are untrusted and re-derived; see ClipAnalysis in
+  // lib/motion-renderer.ts.
+  sourceSeconds?: number
   // Candidate windows computed ONCE per job during source prep: where each
   // usable moment sits inside the clip and what Gemini saw there. Cached here
   // because every Motion Lab variant used to redo the whole thing — the full
@@ -336,6 +341,15 @@ export interface SubmagicJobOptions {
   removeBadTakes?: boolean
   cleanAudio?: boolean
   musicTrackId?: string
+  // Timed creator B-roll: clips previously registered in Submagic's user-media
+  // library, placed at seconds ON THE TIMELINE OF THE FILE SUBMAGIC RECEIVES
+  // (the pre-cut source — see lib/motion-renderer prepareSubmagicBrollForJob,
+  // which is the only producer of these). Submagic rejects the WHOLE submission
+  // if any item overlaps another or runs past the end of the video, so the
+  // producer clamps and drops rather than trusting the planner. Layout must be
+  // one of cover/contain/rounded/square/split-*/pip-* — 'full' is NOT accepted
+  // and fails the submission (learned the hard way, commit 351bf63).
+  items?: Array<{ type: 'user-media'; startTime: number; endTime: number; userMediaId: string; layout: string }>
 }
 
 interface SubmagicTemplateOption {
@@ -728,6 +742,81 @@ export async function fetchSubmagicAudioTrack(
   }
 }
 
+// Registers a hosted clip (its shared broll-cache R2 URL) in Submagic's
+// ACCOUNT-LEVEL user-media library so timed items can reference it. The library
+// persists across projects, so the caller caches the returned id keyed by the
+// window's cache name — each window of each clip is registered ONCE EVER, not
+// once per job. (The 2026-07-08 version of this registered every clip on every
+// job inside the start-variant request, which helped blow the old 300s cap;
+// that per-job pattern must not come back.) Returns null on failure: custom
+// B-roll then degrades to fewer/no cutaways, never a dead render.
+export async function createSubmagicUserMedia(url: string): Promise<string | null> {
+  try {
+    const res = await fetch('https://api.submagic.co/v1/user-media', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY!, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      console.warn(`[submagic] user-media upload failed (${res.status}): ${text.slice(0, 200)}`)
+      return null
+    }
+    const data = JSON.parse(text) as { userMediaId?: string; id?: string }
+    return data.userMediaId ?? data.id ?? null
+  } catch (e) {
+    console.warn('[submagic] user-media upload error:', (e as Error).message)
+    return null
+  }
+}
+
+// Whether each of the given user-media ids has FINISHED ingesting. A create
+// returns 201 + an id immediately, but the fetch/transcode behind it is async
+// and ~2-5% of registrations silently never complete (observed across every
+// batch in this account's library) — and a project item that references one of
+// those stalls Submagic's chunk renderer until the whole render aborts
+// ("stalled in download phase"). Readiness signal: the list endpoint populates
+// metadata (duration etc.) only once ingestion is done. One paged GET, cost
+// independent of clip count; pages only until every asked-about id is found.
+// Returns null when the list itself can't be read — callers should fail OPEN
+// on null (keep their items) rather than dropping media over a flaky list call.
+export async function checkSubmagicMediaReady(ids: string[]): Promise<Map<string, boolean> | null> {
+  if (!ids.length) return new Map()
+  const remaining = new Set(ids)
+  const ready = new Map<string, boolean>()
+  try {
+    let cursor: string | undefined
+    for (let page = 0; page < 10 && remaining.size; page++) {
+      const url = `https://api.submagic.co/v1/user-media?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      const res = await fetch(url, {
+        headers: { 'x-api-key': process.env.SUBMAGIC_API_KEY! },
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (!res.ok) return null
+      const body = await res.json() as {
+        data?: { id?: string; metadata?: { duration?: number | null } | null }[]
+        hasMore?: boolean
+        nextCursor?: string
+      }
+      for (const m of body.data ?? []) {
+        if (m.id && remaining.has(m.id)) {
+          ready.set(m.id, m.metadata?.duration != null)
+          remaining.delete(m.id)
+        }
+      }
+      if (!body.hasMore || !body.nextCursor) break
+      cursor = body.nextCursor
+    }
+    // Anything never seen in the library was deleted or never landed — not ready.
+    for (const id of remaining) ready.set(id, false)
+    return ready
+  } catch (e) {
+    console.warn('[submagic] media readiness check failed:', (e as Error).message)
+    return null
+  }
+}
+
 export async function submitSubmagicJob(
   videoUrl: string,
   opts: SubmagicJobOptions
@@ -756,6 +845,7 @@ export async function submitSubmagicJob(
     if (opts.magicBrolls) body.magicBrollsPercentage = opts.magicBrollsPercentage ?? 40
     if (opts.hookTitle !== undefined) body.hookTitle = opts.hookTitle
     if (opts.musicTrackId) body.music = { userMediaId: opts.musicTrackId, volume: 30, fade: true }
+    if (opts.items?.length) body.items = opts.items
     if (opts.userThemeId) {
       body.userThemeId = opts.userThemeId
       delete body.templateName

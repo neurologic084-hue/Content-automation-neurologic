@@ -13,7 +13,7 @@
 
 import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile, refreshPrecutForRetry, SHARED_CUT_CLEAN_NAME } from './motion-renderer'
+import { finalizeSubmagicVariant, getSubmagicSourceUrl, ensureContentProfile, refreshPrecutForRetry, SHARED_CUT_CLEAN_NAME, loadSubmagicBrollPlan } from './motion-renderer'
 import {
   deriveSmartSubmagicSettings,
   resolveCaptionTemplate,
@@ -22,11 +22,12 @@ import {
   pollSubmagicJob,
   fetchSubmagicAudioTrack,
   transcribeVideo,
+  checkSubmagicMediaReady,
   VARIANT_DEFINITIONS,
   SUBMAGIC_ALWAYS_ON,
 } from './video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
-import { normalizeBrollSetting, submagicBrollKnobs } from './broll'
+import { normalizeBrollSetting, normalizeBrollSource, submagicBrollKnobs } from './broll'
 import { explainFailure } from './error-explain'
 import { patchVariant } from './job-lock'
 import { STALE_MS } from './stale-sweep'
@@ -157,6 +158,10 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
   let postMusic:
     | { hook: string; moodTag: string | null; scriptFormat?: string; profile?: ContentProfile | null; transcript?: string | null }
     | null = null
+  // The custom-B-roll outcome for the card, written with the external_id patch
+  // below — null clears a previous run's notice, so a retry that DOES use her
+  // clips stops claiming otherwise.
+  let brollNotice: string | null = null
 
   if (preset.aiEditTemplate) {
     // Fully autonomous mode — Submagic controls everything itself, no
@@ -217,29 +222,146 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
       // ALWAYS_ON first, then the resolved knobs — so resolved.magicZooms
       // (a per-variant/guardrail decision now) wins over the baseline's
       // magicZooms:true instead of being forced back on.
-      //
-      // variant.broll_source ('both' | 'custom' | 'stock') is read NOWHERE on
-      // this path, on purpose: v1-v3 always use Submagic's own stock B-roll.
-      // The creator's clips had to be timed against the pre-cut source
-      // Submagic receives, and any mismatch made Submagic reject the whole
-      // submission — losing the variant outright — while hosting and
-      // registering each clip pushed this task toward the 300s cap. The
-      // source picker still steers the Motion Lab variants (v4-v6); don't
-      // wire it back in here.
       const brollKnobs = submagicBrollKnobs(brollSetting, resolved)
-      projectId = await submitSubmagicJob(videoUrlForSubmagic, {
+
+      // ── Creator's own B-roll (broll_source: 'both' | 'custom' | 'stock') ──
+      // The plan (content-matched placements on the CUT file's timeline, each
+      // backed by a Submagic user-media id) was built once in source prep —
+      // this path only READS it, so nothing here scales with clip count. The
+      // 2026-07-08 version registered clips inline right here and collapsed
+      // 'both' to custom-only; both mistakes are structural now, not policed.
+      const brollSource = normalizeBrollSource(variant.broll_source)
+      const hasCustomClips = !!(job.custom_broll as unknown[] | null)?.length
+      let customItems: NonNullable<Parameters<typeof submitSubmagicJob>[1]['items']> = []
+      let planCutSeconds = 0
+      if (hasCustomClips && brollSource !== 'stock' && brollSetting.mode !== 'none') {
+        const plan = await loadSubmagicBrollPlan(jobId)
+        // The plan's timings are only valid on the file they were planned
+        // against. If the source resolver picked a different file (older cut,
+        // prep raced, cut rebuilt), sending them would place cutaways on the
+        // wrong moments — or past the end, which fails the whole submission.
+        if (!plan) {
+          brollNotice = brollSource === 'custom'
+            ? 'Your clips could not be prepared in time, so this render has no B-roll cutaways.'
+            : 'Your clips could not be prepared in time, so this render uses stock B-roll only.'
+          console.warn(`[submagic-start] ${variantId}: no custom B-roll plan — ${brollSource === 'custom' ? 'rendering without B-roll' : 'stock only'}`)
+        } else if (!plan.items.length) {
+          // The planner ran and matched nothing (or prep wrote an empty plan
+          // because the clips could not be used) — a correct answer, not a
+          // failure. Daniel's rule: use her clips when they make sense,
+          // otherwise it's fine. Checked BEFORE the basis guard: an empty plan
+          // carries no timings, so "wrong timeline" would be the wrong message.
+          brollNotice = brollSource === 'custom'
+            ? 'None of your clips matched what is being said in this video, so it has no B-roll cutaways.'
+            : 'None of your clips matched what is being said in this video, so it uses stock B-roll only.'
+          console.log(`[submagic-start] ${variantId}: planner placed none of her clips — ${brollSource === 'custom' ? 'no cutaways' : 'stock only'}`)
+        } else if (!videoUrlForSubmagic.endsWith(`/${plan.basis}`)) {
+          brollNotice = brollSource === 'custom'
+            ? 'Your clips were timed against a different cut of this footage, so this render has no B-roll cutaways. Retry the variant to rebuild them.'
+            : 'Your clips were timed against a different cut of this footage, so this render uses stock B-roll only. Retry the variant to rebuild them.'
+          console.warn(`[submagic-start] ${variantId}: plan basis ${plan.basis} does not match the submitted file — dropping custom items`)
+        } else {
+          planCutSeconds = plan.cutSeconds
+          customItems = plan.items.map(i => ({
+            type: 'user-media' as const,
+            startTime: Number(i.start.toFixed(2)),
+            endTime: Number((i.start + i.duration).toFixed(2)),
+            userMediaId: i.userMediaId,
+            // 'cover' fills the frame like the Motion Lab cutaways. NOT 'full':
+            // Submagic rejects that value and fails the whole submission.
+            layout: 'cover',
+          }))
+
+          // Last line of defense against the render-stall failure: an item
+          // whose media never finished ingesting (or has since been deleted
+          // from the library) hangs Submagic's chunk renderer until the WHOLE
+          // render aborts. One list call regardless of item count; fails OPEN
+          // on null so a flaky list read never strips a healthy render.
+          const readiness = await checkSubmagicMediaReady([...new Set(customItems.map(i => i.userMediaId))])
+          if (readiness) {
+            const before = customItems.length
+            customItems = customItems.filter(i => readiness.get(i.userMediaId))
+            if (customItems.length < before) {
+              console.warn(`[submagic-start] ${variantId}: dropped ${before - customItems.length}/${before} item(s) whose media is not ingested`)
+            }
+            if (!customItems.length) {
+              brollNotice = brollSource === 'custom'
+                ? 'Your clips have not finished uploading to the editing engine, so this render has no B-roll cutaways. Retry the variant to use them.'
+                : 'Your clips have not finished uploading to the editing engine, so this render uses stock B-roll only. Retry the variant to use them.'
+            }
+          }
+        }
+      }
+
+      // Stock knobs, mode-aware. 'both' genuinely mixes: her placed clips go
+      // in as items and magicBrolls stays ON, with its percentage scaled DOWN
+      // by the share of the timeline her clips already cover — so the mix
+      // adapts to how well her folder fits this script instead of a fixed
+      // 50/50. 'custom' turns stock off entirely.
+      let magicBrolls = brollKnobs.magicBrolls
+      let magicBrollsPercentage = brollKnobs.magicBrollsPercentage
+      if (customItems.length) {
+        if (brollSource === 'custom') {
+          magicBrolls = false
+          magicBrollsPercentage = undefined
+        } else {
+          const customSeconds = customItems.reduce((s, i) => s + (i.endTime - i.startTime), 0)
+          const coveredPct = planCutSeconds ? Math.round((customSeconds / planCutSeconds) * 100) : 0
+          const remaining = Math.max(0, (magicBrollsPercentage ?? 16) - coveredPct)
+          // Below ~4% Submagic would be placing one token clip at best — at
+          // that point her clips have covered what the video wanted.
+          if (!magicBrolls || remaining < 4) {
+            magicBrolls = false
+            magicBrollsPercentage = undefined
+          } else {
+            magicBrollsPercentage = Math.min(remaining, 49)
+          }
+          console.log(`[submagic-start] ${variantId}: 'both' mix — ${customItems.length} of her clip(s) covering ~${coveredPct}%, stock ${magicBrolls ? `${magicBrollsPercentage}%` : 'off'}`)
+        }
+      }
+
+      const submitOnce = (withItems: boolean) => submitSubmagicJob(videoUrlForSubmagic, {
         title: `${variantId}-${jobId.slice(0, 8)}`,
         ...SUBMAGIC_ALWAYS_ON,
         templateName: resolved.templateName,
         userThemeId: resolved.userThemeId,
-        magicBrolls: brollKnobs.magicBrolls,
-        magicBrollsPercentage: brollKnobs.magicBrollsPercentage,
+        // Without items (the degrade path), stock reverts to the plain knobs —
+        // except in 'custom' mode, where she asked for no stock at all.
+        magicBrolls: withItems ? magicBrolls : (brollSource === 'custom' && hasCustomClips ? false : brollKnobs.magicBrolls),
+        magicBrollsPercentage: withItems ? magicBrollsPercentage : (brollSource === 'custom' && hasCustomClips ? undefined : brollKnobs.magicBrollsPercentage),
         magicZooms: resolved.magicZooms,
         hookTitle: resolved.hookTitle,
         removeSilencePace: resolved.removeSilencePace,
         musicTrackId,
         ...precutOverrides,
+        ...(withItems && customItems.length ? { items: customItems } : {}),
       })
+
+      if (customItems.length) {
+        // Degrade ladder, never a dead render: a submission with items can fail
+        // because a user-media registration is still ingesting on Submagic's
+        // side. One short retry covers that; after it, submit WITHOUT items so
+        // the variant ships rather than dying over cutaways.
+        try {
+          projectId = await submitOnce(true)
+          console.log(`[submagic-start] ${variantId}: submitted with ${customItems.length} custom B-roll item(s)`)
+        } catch (e) {
+          console.warn(`[submagic-start] ${variantId}: submit with custom items failed (${(e as Error).message.slice(0, 200)}) — retrying once in 15s`)
+          await new Promise(r => setTimeout(r, 15_000))
+          try {
+            projectId = await submitOnce(true)
+            console.log(`[submagic-start] ${variantId}: submitted with ${customItems.length} custom B-roll item(s) on retry`)
+          } catch (e2) {
+            console.warn(`[submagic-start] ${variantId}: custom items rejected twice — submitting without them: ${(e2 as Error).message.slice(0, 200)}`)
+            projectId = await submitOnce(false)
+            brollNotice = brollSource === 'custom'
+              ? 'The editing engine rejected your clips this time, so this render has no B-roll cutaways.'
+              : 'The editing engine rejected your clips this time, so this render uses stock B-roll only.'
+          }
+        }
+      } else {
+        projectId = await submitOnce(false)
+      }
 
       // Music comes from our library AFTER Submagic returns — same matcher
       // inputs as v4/v5: Gemini's footage profile + null transcript, with a
@@ -292,10 +414,13 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
     }
   }
 
-  // Save external_id immediately
+  // Save external_id immediately — one write, nothing between the submit and
+  // this patch, so a crash can't orphan a render that was already paid for.
+  // The B-roll notice rides along rather than costing its own round trip.
   await patchVariant(db, jobId, variantId, {
     status: 'processing',
     external_id: projectId,
+    broll_notice: brollNotice,
     // v1-v3 are already cut by our own planner before this point, so the
     // engine here only adds captions + styling — say exactly that.
     progress: { step: 2, total: 4, label: 'Adding captions & styling' },

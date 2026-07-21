@@ -50,9 +50,9 @@ type BrollSourceUi = 'both' | 'custom' | 'stock'
 // client bundle). Only shown when a folder/link is actually provided.
 type BrollSource = 'both' | 'custom' | 'stock'
 const BROLL_SOURCE_OPTIONS: { value: BrollSource; label: string; hint: string }[] = [
-  { value: 'both',   label: 'Smart',     hint: 'Your clips + AI B-roll' },
-  { value: 'custom', label: 'Only mine', hint: 'Your clips only, no AI' },
-  { value: 'stock',  label: 'Only AI',   hint: 'Ignore my clips this time' },
+  { value: 'both',   label: 'Smart',      hint: 'Your clips + stock footage' },
+  { value: 'custom', label: 'Only mine',  hint: 'Your clips only, no stock' },
+  { value: 'stock',  label: 'Only stock', hint: 'Ignore my clips this time' },
 ]
 
 const DEFAULT_BROLL_PERCENT = 25
@@ -690,11 +690,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     )
                   })}
                 </div>
-                {/* v1-v3 are always stock by product decision (see
-                    lib/submagic-start.ts), so this control only reaches the
-                    last three styles — say so rather than let a video quietly
-                    ignore the choice. */}
-                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to the last three styles. The first three always use AI B-roll.</p>
+                {/* Reaches all six styles: v4-v6 place her clips in-render,
+                    v1-v3 through the Submagic B-roll plan built in source prep
+                    (lib/motion-renderer.ts prepareSubmagicBrollForJob). */}
+                <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to all six styles. Smart mixes your clips with stock footage based on what fits each moment.</p>
               </div>
             )}
           </div>
