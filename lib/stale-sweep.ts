@@ -70,16 +70,23 @@ export async function sweepStaleVariants(
 
   for (const v of stale) {
     // LAST LOOK before declaring a Submagic render dead: it runs on THEIR
-    // servers and survives anything that happens to ours. If the process that
-    // was polling it died (container restart, OOM), the render may have
-    // FINISHED with nobody watching — failing it here would throw away a
-    // completed, paid-for video. One poll decides; a still-processing answer
-    // past the sweep threshold falls through to the failure below, since no
-    // real Submagic render takes that long.
+    // servers and survives anything that happens to ours. Ask Submagic what it
+    // actually is before failing it:
+    //   ready      → rescue the finished, paid-for video (below)
+    //   processing → it is ALIVE on their side; NEVER fail it. Our heartbeat
+    //                stops the moment we hand off to the background poll, so a
+    //                long render (or a dropped poller) crosses the sweep's
+    //                silence threshold while the render is perfectly fine —
+    //                failing it here would kill a live, paid render.
+    //   failed/gone→ fall through and fail it with a real reason.
     if (v.external_id) {
       try {
         const { pollSubmagicJob } = await import('./video-pipeline')
         const res = await pollSubmagicJob(v.external_id)
+        if (res.status === 'processing') {
+          console.log(`[stale-sweep] ${jobId}:${v.id} quiet locally but Submagic still rendering it — leaving alone`)
+          continue
+        }
         if (res.status === 'ready' && res.downloadUrl) {
           console.warn(`[stale-sweep] ${jobId}:${v.id} actually FINISHED on Submagic — rescuing instead of failing`)
           // Dynamic import to stay off this module's init path: sandbox-tasks

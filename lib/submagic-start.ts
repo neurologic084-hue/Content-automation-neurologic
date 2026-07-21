@@ -473,7 +473,23 @@ export async function startSubmagicVariantTask(jobId: string, variantId: string,
         return
       }
     }
-    await submitVariant(db, jobId, variantId, force)
+    // Heartbeat through the submission phase. Everything in submitVariant —
+    // source resolution, the retry re-cut, registering + submitting to Submagic
+    // — runs under the "Sending your footage" label with no updates, so a slow
+    // or wedged step looked frozen for up to the 45-min sweep. A ticking
+    // progress.at means the card shows life AND the stale sweep can tell a dead
+    // task (beats stop) from a slow one (beats continue) in minutes, not 45.
+    const beat = setInterval(() => {
+      void patchVariant(db, jobId, variantId, {
+        progress: { step: 1, total: 4, label: 'Preparing your footage', at: new Date().toISOString() },
+      }).catch(() => {})
+    }, 30_000)
+    beat.unref?.()
+    try {
+      await submitVariant(db, jobId, variantId, force)
+    } finally {
+      clearInterval(beat)
+    }
   } catch (e) {
     console.error(`[submagic-start] ${jobId}:${variantId} failed:`, (e as Error).message)
     await patchVariant(db, jobId, variantId, { status: 'failed', error: explainFailure(e), progress: null })

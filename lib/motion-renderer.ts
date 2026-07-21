@@ -3748,6 +3748,21 @@ async function prepareSubmagicBrollForJobInner(jobId: string, opts: { force?: bo
  *  and best-effort — a failure here just means the render proceeds against the
  *  cut it already had, which is what it would have done anyway. */
 export async function refreshPrecutForRetry(jobId: string, sourceUrl: string): Promise<void> {
+  // Do NOT re-cut when a cut already exists. A forced retry used to rebuild the
+  // cut unconditionally — re-download the source, re-transcribe, re-encode —
+  // minutes of silent work behind a frozen "Sending your footage" label, which
+  // is the exact stuck-looking retry it was meant to prevent. If the cut is
+  // already there (the common case), reuse it and go straight to submitting.
+  // Only build when there is genuinely nothing to reuse.
+  if (process.env.R2_PUBLIC_URL) {
+    const has = (name: string) =>
+      fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${name}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
+        .then(r => r.ok).catch(() => false)
+    if (await has(SHARED_CUT_CLEAN_NAME) || await has('source-cut.mp4')) {
+      console.log(`[prep] retry ${jobId.slice(0, 8)}: existing cut reused — no re-cut`)
+      return
+    }
+  }
   try {
     await prepareJobSource(jobId, sourceUrl, undefined, { forceRecut: true })
     // A rebuilt cut is a NEW timeline: every custom B-roll placement in the old
