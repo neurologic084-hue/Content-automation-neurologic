@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import os from 'os'
+import { containerCores, containerMemoryGb, renderSlots, renderConcurrency } from '@/lib/motion-renderer'
 
 // Railway's healthcheck target. Deliberately shallow: it answers "this
 // container is serving" and nothing more.
@@ -11,15 +12,17 @@ import os from 'os'
 export const dynamic = 'force-dynamic'
 
 export function GET() {
-  // Machine shape is reported so the render sizing can be checked against the
-  // box actually paid for — the render tab count and how many renders run at
-  // once are both derived from these numbers, so seeing them is the fastest
-  // way to tell whether capacity is being left on the table.
+  // Report the HOST numbers (what os sees) next to the CONTAINER numbers (the
+  // cgroup limit the kernel actually enforces) and the render plan derived from
+  // them. In a container these diverge hard — a Railway box shows 48 host cores
+  // while the container is capped near 24GB — and sizing renders off the host
+  // would OOM the container. Seeing both confirms the sizing uses the real cap.
+  const slots = renderSlots()
   return NextResponse.json({
     ok: true,
     uptime: Math.round(process.uptime()),
-    cores: os.cpus().length,
-    memoryGb: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10,
-    freeGb: Math.round((os.freemem() / 1024 ** 3) * 10) / 10,
+    host: { cores: os.cpus().length, memoryGb: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10 },
+    container: { cores: containerCores(), memoryGb: Math.round(containerMemoryGb() * 10) / 10 },
+    render: { concurrentRenders: slots, tabsPerRender: renderConcurrency(), variantsPerWave: slots },
   })
 }

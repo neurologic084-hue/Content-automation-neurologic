@@ -1052,6 +1052,43 @@ function isConstrainedRenderHost(): boolean {
 // so extra capacity is better spent running another render alongside it.
 const TABS_PER_RENDER = Number(process.env.RENDER_TABS) || 4
 
+// ── Real container limits, not the host's ────────────────────────────────────
+// In a container, os.totalmem()/os.cpus() report the HOST machine (a Railway
+// box can show 48 cores / 372GB) while the container is actually capped far
+// lower (~24GB). Sizing renders off the host would spawn dozens of Chrome
+// instances into a 24GB cap and OOM-kill the lot. Read the cgroup limits the
+// kernel actually enforces; fall back to os values only when unreadable.
+export function containerMemoryGb(): number {
+  const host = os.totalmem() / 1024 ** 3
+  for (const f of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+    try {
+      const raw = fs.readFileSync(f, 'utf8').trim()
+      if (raw === 'max') continue
+      const bytes = Number(raw)
+      // A cgroup with "no limit" reports a huge sentinel — ignore it and any
+      // value at/above the host (means unlimited), keeping the host figure.
+      if (Number.isFinite(bytes) && bytes > 0) {
+        const gb = bytes / 1024 ** 3
+        if (gb < host * 0.98) return gb
+      }
+    } catch { /* not this cgroup version, or not in a container */ }
+  }
+  return host
+}
+
+export function containerCores(): number {
+  const host = Math.max(1, os.cpus().length)
+  try {
+    // cgroup v2: "<quota> <period>", quota='max' means unlimited.
+    const raw = fs.readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/)
+    if (raw[0] && raw[0] !== 'max') {
+      const quota = Number(raw[0]), period = Number(raw[1] || 100000)
+      if (quota > 0 && period > 0) return Math.max(1, Math.min(host, Math.round(quota / period)))
+    }
+  } catch { /* fall through */ }
+  return host
+}
+
 // How many Remotion renders may run AT THE SAME TIME.
 //
 // This used to be hard-wired to one: every render queued behind the last, so
@@ -1061,7 +1098,7 @@ const TABS_PER_RENDER = Number(process.env.RENDER_TABS) || 4
 // encode), so slots are granted only when BOTH cores and memory support them.
 // Deliberately capped at 3: past that the encode stage saturates disk and the
 // wins disappear.
-function renderSlots(): number {
+export function renderSlots(): number {
   // Explicit override wins — the whole point is that this is a spend decision,
   // not a code decision. Raise RENDER_SLOTS after raising the Railway plan and
   // the app uses the new capacity on the next deploy, no code change.
@@ -1085,9 +1122,9 @@ function renderSlots(): number {
   return Math.max(1, Math.min(byCpu, byMem, 16))
 }
 
-function renderConcurrency(): number {
-  const cores = Math.max(1, os.cpus().length)
-  const gb = os.totalmem() / 1024 ** 3
+export function renderConcurrency(): number {
+  const cores = containerCores()
+  const gb = containerMemoryGb()
   const byCpu = cores - 2               // leave room for ffmpeg + compositor
   const byMem = Math.floor(gb / 2.5)    // ~2.5GB of headroom per tab
   // The ceiling scales with the machine so a big Railway instance is actually
@@ -2336,9 +2373,20 @@ async function renderRemotionEdit(
     if (sharedClean) {
       await setVariantProgress(jobId, variantId, 2, STEPS, 'Reusing cleaned audio')
       console.log('[motion-renderer] reusing the job\'s shared cleaned audio (no second clean)')
-      // The shared clean is the COMPRESSED (full-resolution) source, so this is
-      // the one place its 4K downscale into the work copy happens.
-      await stageRenderWorkCopy(sharedCleanPath, workPath)
+      // The shared clean is the COMPRESSED (full-resolution) source, so its 4K
+      // downscale into a 1080p work copy happens here — but that scaled result
+      // is byte-identical for every variant (only the CUTS differ later), so it
+      // is cached once per job. On Railway all variants share one container
+      // disk, so the second and third variants just copy the cached file
+      // instead of re-encoding a 4K source (~30-90s each on client footage).
+      const sharedWork = path.join(outDir, 'source-work-1080.mp4')
+      if (fs.existsSync(sharedWork) && fs.statSync(sharedWork).size > 10_000) {
+        fs.copyFileSync(sharedWork, workPath)
+        console.log('[motion-renderer] reusing the job\'s downscaled work copy (no second re-encode)')
+      } else {
+        await stageRenderWorkCopy(sharedCleanPath, workPath)
+        try { fs.copyFileSync(workPath, sharedWork) } catch { /* cache is best-effort */ }
+      }
       try { fs.unlinkSync(sharedCleanPath) } catch { /* best-effort */ }
     } else {
       // Falling back means paying again: this variant runs the whole
