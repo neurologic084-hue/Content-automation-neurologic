@@ -7,7 +7,7 @@ import crypto from 'crypto'
 import { createClient } from '@supabase/supabase-js'
 import { uploadToStorage, deleteStorageKey } from './storage'
 import type { MusicMode } from './video-pipeline'
-import { submitSubmagicJob, pollSubmagicJob, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
+import { submitSubmagicJob, pollSubmagicJob, createSubmagicUserMedia, checkSubmagicMediaReady, DEFAULT_MUSIC_MODE, resolveCaptionTemplate, pickPremiumTemplates, VARIANT_DEFINITIONS } from './video-pipeline'
 import type { CustomBrollEntry } from './video-pipeline'
 import type { VideoVariant } from './video-pipeline'
 import { transcribeLocalFile, generateASSCaptions, writeASSFile, FONTS_DIR } from './caption-renderer'
@@ -23,7 +23,7 @@ import { isolateVoiceInPlace } from './voice-isolation'
 import { trimResidualSilences } from './post-trim'
 import { applyVisualTransitions } from './visual-transitions'
 import { applyColorGrade, resolveEditGrade, type GradeMode } from './color-grade'
-import { buildSubmagicCutSource } from './precut'
+import { buildSubmagicCutSource, mapWordsToCutTimeline } from './precut'
 import { explainFailure } from './error-explain'
 import { buildRenderKit, planSfxCues, pickTransitionSmart, transitionSoundFamily } from './render-kit'
 import { stageSfxCues } from './sfx-stage'
@@ -392,6 +392,15 @@ const SHARED_CLEAN_NAME = 'source-clean.mp4'
 // (cut from raw audio) and keep their Submagic-side cleaning.
 export const SHARED_CUT_CLEAN_NAME = 'source-cut-clean.mp4'
 const SHARED_WORDS_NAME = 'source-words.json'
+// The transcript mapped onto the pre-cut file's own timeline (see the publish
+// step in prepareJobSource) — the ONLY timeline v1-v3 custom B-roll placements
+// may be planned against, because it is the timeline of the file Submagic
+// actually receives.
+const SUBMAGIC_CUT_WORDS_NAME = 'source-cut-words.json'
+// The finished v1-v3 custom B-roll plan: window → Submagic userMediaId +
+// timed placements on the cut timeline. Built once per job in prep (never on
+// the start-variant request path); submitVariant only reads it.
+export const SUBMAGIC_BROLL_PLAN_NAME = 'submagic-broll-plan.json'
 
 // Builds the shared cleaned source + its word timings and puts both in R2.
 // Best-effort throughout: any failure just means variants fall back to doing
@@ -869,9 +878,26 @@ export async function prepareJobSource(
     const sharedForCut = await sharedWords(jobId)
     const built = await buildSubmagicCutSource(cutInput, cutPath, { words: sharedForCut ?? undefined })
     if (built) {
-      await uploadToStorage(built, cutName, jobId)
-      submagicCutPath = built
+      await uploadToStorage(built.path, cutName, jobId)
+      submagicCutPath = built.path
       console.log(`[motion-renderer] pre-cut source ready for Submagic variants (job=${jobId}, ${cutName})`)
+      // Publish the transcript ON THE CUT'S OWN TIMELINE, mapped through the
+      // exact keep-windows the cut was made from. This is the timeline custom
+      // B-roll placements for v1-v3 must be planned against — the file Submagic
+      // actually receives — and deriving it here is free, versus paying to
+      // re-transcribe the cut later. Best-effort: without it, the Submagic
+      // B-roll prep transcribes the cut once and caches that instead.
+      try {
+        const cutWords = mapWordsToCutTimeline(built.words, built.keep)
+        const cutSeconds = await getVideoDuration(built.path)
+        const tmp = path.join(outDir, SUBMAGIC_CUT_WORDS_NAME)
+        fs.writeFileSync(tmp, JSON.stringify({ basis: cutName, cutSeconds, words: cutWords }))
+        await uploadToStorage(tmp, SUBMAGIC_CUT_WORDS_NAME, jobId)
+        try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+        console.log(`[prep] cut-timeline transcript published (${cutWords.length} words, ${cutSeconds.toFixed(1)}s)`)
+      } catch (e) {
+        console.warn('[prep] could not publish the cut-timeline transcript:', (e as Error).message)
+      }
     }
   } catch (e) {
     if (!(e as { __skip?: boolean })?.__skip) {
@@ -3140,9 +3166,9 @@ export function startSingleVariant(
 
 // Once-per-job custom B-roll analysis. Describes every window of every
 // video_jobs.custom_broll clip with Gemini once, and caches the result on the
-// job plus the cross-job R2 cache. Only the Motion Lab variants (v4-v6) use the
-// creator's clips — v1-v3 always render with Submagic's own stock B-roll — but
-// doing this here is what lets each of those variants start from
+// job plus the cross-job R2 cache. Every variant builds on this: v4-v6 read
+// the cached windows in-render, and prepareSubmagicBrollForJob (below) turns
+// them into timed Submagic items for v1-v3 — so each starts from
 // "reusing N cached window(s)" instead of re-downloading and re-describing the
 // whole folder itself.
 async function analyzeCustomBrollForJob(jobId: string): Promise<void> {
@@ -3166,6 +3192,335 @@ async function analyzeCustomBrollForJob(jobId: string): Promise<void> {
   }
 }
 
+// ── Custom B-roll for the Submagic variants (v1-v3) ──────────────────────────
+// The 2026-07-08 version of this feature is the one that broke v1-v3 and was
+// deleted on 2026-07-20. Three rules below are the lessons, do not relax them:
+//
+//  1. TIMELINE — placements are planned against the transcript OF THE CUT FILE
+//     Submagic receives (source-cut-words.json), never the uncut source. A
+//     placement timed on the wrong timeline lands past the end of the video
+//     and Submagic rejects the ENTIRE submission — that, not Submagic flakiness,
+//     is what killed v1-v3 on real footage.
+//  2. REQUEST PATH — nothing here runs when a variant starts. This is a prep
+//     step: the plan (placements + registered media ids) is built once per job
+//     in the background and submitVariant only READS it. Hosting + registering
+//     12 clips inside the start request is part of what blew the old 300s cap.
+//  3. ONCE EVER — the cut window mp4s already live in the cross-job R2 cache
+//     (broll-cache/shared/), and each window's Submagic registration is cached
+//     right next to it (<window>.media.json). The second job on the same folder
+//     downloads nothing, calls Gemini zero times and registers zero media.
+
+export interface SubmagicBrollPlan {
+  // Which cut file the timings are measured against ('source-cut-clean.mp4' /
+  // 'source-cut.mp4'). submitVariant verifies this matches the file it is about
+  // to send — a mismatch means the timings are for a different timeline, and
+  // the items are dropped rather than risked (rule 1 above).
+  basis: string
+  cutSeconds: number
+  preparedAt: string
+  items: { start: number; duration: number; userMediaId: string; description: string }[]
+}
+
+export async function loadSubmagicBrollPlan(jobId: string): Promise<SubmagicBrollPlan | null> {
+  if (!process.env.R2_PUBLIC_URL) return null
+  try {
+    const res = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SUBMAGIC_BROLL_PLAN_NAME}`, { signal: AbortSignal.timeout(10_000) })
+    if (!res.ok) return null
+    const plan = await res.json() as SubmagicBrollPlan
+    if (typeof plan?.basis !== 'string' || !Number.isFinite(plan?.cutSeconds) || !Array.isArray(plan?.items)) return null
+    return plan
+  } catch { return null }
+}
+
+// Publishes the plan (possibly EMPTY — items: []). An empty plan is a real
+// answer: it tells the start-variant gate "prep has spoken, stop waiting" and
+// tells submitVariant "render without her clips, with a notice" — as opposed
+// to a MISSING plan, which can also mean prep never ran. Every skip-path below
+// writes one so a variant is never left waiting out the grace window on a
+// plan that will never come.
+async function writeSubmagicBrollPlan(jobId: string, plan: SubmagicBrollPlan): Promise<void> {
+  const outDir = rendersDir(jobId)
+  fs.mkdirSync(outDir, { recursive: true })
+  // Unique per writer: the upload reads this file back, so a second writer
+  // landing on the same path mid-upload would ship torn JSON to R2 — and every
+  // variant then reads that as its B-roll plan.
+  const tmp = path.join(outDir, `${SUBMAGIC_BROLL_PLAN_NAME}.${process.pid}-${Math.round(performance.now())}.tmp`)
+  fs.writeFileSync(tmp, JSON.stringify(plan))
+  await uploadToStorage(tmp, SUBMAGIC_BROLL_PLAN_NAME, jobId)
+  try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+}
+
+// Ensures one chosen window is (a) hosted in the shared R2 cache and (b)
+// registered in Submagic's account-level user-media library, reusing both when
+// a previous job already paid for them. Returns null on any failure — the
+// window is then simply not offered to the planner (skip, never fail).
+// `verified: false` means the registration is FRESH and its async ingestion is
+// unconfirmed — the caller batch-verifies those and only then writes the
+// sidecar cache, so a registration that silently never ingests (a real
+// Submagic failure mode, ~2-5% of creates in this account's library) can never
+// be cached as good.
+async function ensureSubmagicWindowMedia(c: ClipCandidate, cacheDir: string): Promise<{ userMediaId: string; cacheName: string; verified: boolean } | null> {
+  if (!process.env.R2_PUBLIC_URL) return null
+  const cacheName = windowCacheName(c.sourceUrl, c.sourceSeconds, c.offset, c.duration)
+  const mediaName = `${cacheName}.media.json`
+  const base = `${process.env.R2_PUBLIC_URL}/broll-cache/shared`
+  try {
+    // Registration already cached by an earlier job? It was verified ready
+    // before being written, so there is nothing to host, register or re-check —
+    // this is the warm path that makes the second job on a folder free.
+    try {
+      const res = await fetch(`${base}/${mediaName}`, { signal: AbortSignal.timeout(8_000) })
+      if (res.ok) {
+        const cached = await res.json() as { userMediaId?: string }
+        if (typeof cached?.userMediaId === 'string' && cached.userMediaId) {
+          return { userMediaId: cached.userMediaId, cacheName, verified: true }
+        }
+      }
+    } catch { /* no cached registration — do the work below */ }
+
+    // Host the cut window (the same artifact v4-v6's staging produces, same
+    // key). Cut from the ORIGINAL source, never a staged file — seeking into an
+    // already-cut file lands on the wrong footage (the elevator/sidewalk bug).
+    const cacheUrl = `${base}/${cacheName}`
+    const hosted = await fetch(cacheUrl, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+    if (!hosted) {
+      if (!fs.existsSync(c.rawPath)) await downloadFile(c.sourceUrl, c.rawPath)
+      const outPath = path.join(cacheDir, cacheName)
+      const cutTmp = `${outPath}.${process.pid}-${Math.round(performance.now())}.part`
+      await run(
+        `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -movflags +faststart "${cutTmp}"`,
+        300_000,
+      )
+      fs.renameSync(cutTmp, outPath)
+      if (!(await hasVideoStream(outPath))) throw new Error(`cut produced no video stream (${cacheName})`)
+      await uploadToStorage(outPath, cacheName, 'shared', 'broll-cache')
+      try { fs.unlinkSync(outPath) } catch { /* best-effort */ }
+    }
+
+    // Register it with Submagic — once ever for this window. Two jobs racing
+    // here register twice; both ids are valid and last-write-wins on the cache,
+    // which is harmless. NOT verified yet: ingestion is async, and the sidecar
+    // is only written after the batch readiness check confirms it landed.
+    const userMediaId = await createSubmagicUserMedia(cacheUrl)
+    if (!userMediaId) return null
+    return { userMediaId, cacheName, verified: false }
+  } catch (e) {
+    console.warn(`[submagic-broll] window ${cacheName} skipped: ${(e as Error).message}`)
+    return null
+  }
+}
+
+// Caches one verified registration next to its window in broll-cache/shared,
+// so every future job skips both the registration and the readiness wait.
+async function publishSubmagicMediaSidecar(cacheName: string, userMediaId: string, cacheDir: string): Promise<void> {
+  const mediaName = `${cacheName}.media.json`
+  const tmp = path.join(cacheDir, `${mediaName}.${process.pid}.tmp`)
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({
+      userMediaId,
+      url: `${process.env.R2_PUBLIC_URL}/broll-cache/shared/${cacheName}`,
+      registeredAt: new Date().toISOString(),
+    }))
+    await uploadToStorage(tmp, mediaName, 'shared', 'broll-cache')
+  } catch (e) {
+    console.warn(`[submagic-broll] sidecar for ${cacheName} not cached (re-registers next job): ${(e as Error).message}`)
+  } finally {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch { /* best-effort */ }
+  }
+}
+
+/** Builds the v1-v3 custom B-roll plan for a job: content-matched placements on
+ *  the cut file's own timeline, each backed by a Submagic user-media id. Runs
+ *  once per job as part of source prep (and again on a forced retry, because a
+ *  rebuilt cut is a new timeline). Best-effort throughout: no plan simply means
+ *  v1-v3 fall back to stock B-roll with a notice on the card. */
+// One plan build per job at a time. refreshPrecutForRetry calls this per
+// VARIANT, so retrying v1/v2/v3 together used to run three concurrent builds
+// that wrote the same temp files (torn JSON) and each paid for its own
+// transcription of the identical cut. Callers that arrive mid-build wait for
+// the one in flight and reuse its result.
+const submagicPlanInflight = new Map<string, Promise<void>>()
+
+export async function prepareSubmagicBrollForJob(jobId: string, opts: { force?: boolean } = {}): Promise<void> {
+  const running = submagicPlanInflight.get(jobId)
+  if (running) return running
+  const run = prepareSubmagicBrollForJobInner(jobId, opts)
+  submagicPlanInflight.set(jobId, run)
+  try {
+    return await run
+  } finally {
+    submagicPlanInflight.delete(jobId)
+  }
+}
+
+async function prepareSubmagicBrollForJobInner(jobId: string, opts: { force?: boolean } = {}): Promise<void> {
+  if (!process.env.R2_PUBLIC_URL || !process.env.SUBMAGIC_API_KEY) return
+  const db = supabaseAdmin()
+  const { data: job } = await db.from('video_jobs').select('custom_broll, variants, content_profile').eq('id', jobId).single()
+  const entries = (job?.custom_broll ?? null) as CustomBrollEntry[] | null
+  if (!entries?.length) return
+
+  // The picker is job-level (stamped identically onto every variant), so the
+  // first Submagic variant speaks for all three.
+  const submagicVariant = ((job?.variants ?? []) as VideoVariant[]).find(v => v.tool === 'submagic')
+  if (!submagicVariant) return
+  const source = normalizeBrollSource(submagicVariant.broll_source)
+  const setting = normalizeBrollSetting(submagicVariant.broll_mode, submagicVariant.broll_percent)
+  if (source === 'stock' || setting.mode === 'none') return
+
+  if (!opts.force && await loadSubmagicBrollPlan(jobId)) {
+    console.log('[submagic-broll] ✓ plan already built for this job — skipping')
+    return
+  }
+
+  // The transcript on the CUT file's timeline. Published for free when the cut
+  // is built; a job cut before that existed pays one transcription of the cut
+  // file here, then never again.
+  let cutWords: { basis: string; cutSeconds: number; words: { text: string; start: number; end: number }[] } | null = null
+  try {
+    const res = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SUBMAGIC_CUT_WORDS_NAME}`, { signal: AbortSignal.timeout(10_000) })
+    if (res.ok) {
+      const parsed = await res.json()
+      if (typeof parsed?.basis === 'string' && Number.isFinite(parsed?.cutSeconds) && Array.isArray(parsed?.words)) cutWords = parsed
+    }
+  } catch { /* fall through to deriving it */ }
+  if (!cutWords) {
+    // Which cut does this job actually have? Same preference order as
+    // getSubmagicSourceUrl. No cut at all → no custom items: Submagic would cut
+    // the video itself and shift every timing we computed (rule 1).
+    let basis: string | null = null
+    for (const name of [SHARED_CUT_CLEAN_NAME, 'source-cut.mp4']) {
+      const ok = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${name}`, { method: 'HEAD', signal: AbortSignal.timeout(8_000) }).then(r => r.ok).catch(() => false)
+      if (ok) { basis = name; break }
+    }
+    if (!basis) {
+      console.log('[submagic-broll] no pre-cut source for this job — v1-v3 keep stock B-roll (custom items need the cut timeline)')
+      await writeSubmagicBrollPlan(jobId, { basis: '', cutSeconds: 0, preparedAt: new Date().toISOString(), items: [] })
+      return
+    }
+    try {
+      const outDir = rendersDir(jobId)
+      fs.mkdirSync(outDir, { recursive: true })
+      const localCut = path.join(outDir, basis)
+      if (!fs.existsSync(localCut)) await downloadFile(`${process.env.R2_PUBLIC_URL}/${jobId}/${basis}`, localCut)
+      const words = await transcribeLocalFile(localCut)
+      const cutSeconds = await getVideoDuration(localCut)
+      cutWords = { basis, cutSeconds, words }
+      const tmp = path.join(outDir, `${SUBMAGIC_CUT_WORDS_NAME}.${process.pid}-${Math.round(performance.now())}.tmp`)
+      fs.writeFileSync(tmp, JSON.stringify(cutWords))
+      await uploadToStorage(tmp, SUBMAGIC_CUT_WORDS_NAME, jobId)
+      try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
+      console.log(`[submagic-broll] transcribed the existing cut once (${words.length} words) — cached for every retry`)
+    } catch (e) {
+      console.warn('[submagic-broll] could not derive the cut-timeline transcript — v1-v3 keep stock B-roll:', (e as Error).message)
+      await writeSubmagicBrollPlan(jobId, { basis: '', cutSeconds: 0, preparedAt: new Date().toISOString(), items: [] })
+      return
+    }
+  }
+
+  const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
+  const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir)
+  try {
+    if (!candidates.length) {
+      console.warn('[submagic-broll] no usable clip windows — v1-v3 keep stock B-roll')
+      await writeSubmagicBrollPlan(jobId, { basis: cutWords.basis, cutSeconds: cutWords.cutSeconds, preparedAt: new Date().toISOString(), items: [] })
+      return
+    }
+
+    const editedWords = cutWords.words.map(w => ({ ...w, segmentIndex: 0 }))
+    const narrowed = await selectBestClips(candidates, editedWords)
+
+    // Host + register each surviving window (warm path: two cached GETs each).
+    const media = new Map<string, { userMediaId: string; duration: number }>()
+    const clips: CustomClip[] = []
+    const unverified: { cacheName: string; userMediaId: string; description: string; duration: number; entryIndex?: number }[] = []
+    for (const c of narrowed) {
+      const m = await ensureSubmagicWindowMedia(c, cacheDir)
+      if (!m) continue
+      if (m.verified) {
+        media.set(m.cacheName, { userMediaId: m.userMediaId, duration: c.duration })
+        clips.push({ file: m.cacheName, description: c.description, duration: c.duration, entryIndex: c.entryIndex })
+      } else {
+        unverified.push({ cacheName: m.cacheName, userMediaId: m.userMediaId, description: c.description, duration: c.duration, entryIndex: c.entryIndex })
+      }
+    }
+
+    // Fresh registrations: wait for Submagic's async ingestion to actually
+    // finish before trusting (or caching) any of them. A created-but-never-
+    // ingested media passes project validation and then stalls the chunk
+    // renderer mid-render ("stalled in download phase") — the whole variant
+    // dies for one bad clip. One paged list call per poll, whatever the count.
+    if (unverified.length) {
+      const deadline = Date.now() + 120_000
+      let states = new Map<string, boolean>()
+      while (Date.now() < deadline) {
+        const check = await checkSubmagicMediaReady(unverified.map(u => u.userMediaId))
+        if (check) {
+          states = check
+          if (unverified.every(u => states.get(u.userMediaId))) break
+        }
+        await new Promise(r => setTimeout(r, 8_000))
+      }
+      for (const u of unverified) {
+        if (states.get(u.userMediaId)) {
+          media.set(u.cacheName, { userMediaId: u.userMediaId, duration: u.duration })
+          clips.push({ file: u.cacheName, description: u.description, duration: u.duration, entryIndex: u.entryIndex })
+          // Only a CONFIRMED registration is worth caching for future jobs.
+          await publishSubmagicMediaSidecar(u.cacheName, u.userMediaId, cacheDir)
+        } else {
+          console.warn(`[submagic-broll] media for ${u.cacheName} never finished ingesting — window skipped (re-registers next job)`)
+        }
+      }
+      const readyCount = unverified.filter(u => states.get(u.userMediaId)).length
+      console.log(`[submagic-broll] ${readyCount}/${unverified.length} fresh registration(s) confirmed ingested`)
+    }
+    if (!clips.length) {
+      console.warn('[submagic-broll] no window could be hosted/registered — v1-v3 keep stock B-roll')
+      await writeSubmagicBrollPlan(jobId, { basis: cutWords.basis, cutSeconds: cutWords.cutSeconds, preparedAt: new Date().toISOString(), items: [] })
+      return
+    }
+
+    // Same brain as v4-v6: content-matched, hook/CTA-protected, never forced.
+    // An empty result is a correct answer and is still written as a plan, so
+    // submitVariant can tell "nothing fits" apart from "prep never ran".
+    const planned = await planCustomBrollSlots(
+      editedWords,
+      cutWords.cutSeconds,
+      (job?.content_profile as ContentProfile | null) ?? null,
+      clips,
+      [],
+      false,
+      setting.mode === 'manual' ? setting.percent : null,
+    )
+
+    // Submagic rejects the WHOLE submission over one bad item, so the clamp is
+    // hard: drop anything that would run past the end of the cut (belt — the
+    // planner's CTA guard is the suspenders) and anything whose media is gone.
+    const items = planned
+      .filter(p => p.start >= 0 && p.start + p.duration <= cutWords!.cutSeconds - 0.05)
+      .flatMap(p => {
+        const m = media.get(p.file)
+        return m ? [{ start: p.start, duration: p.duration, userMediaId: m.userMediaId, description: p.query ?? '' }] : []
+      })
+
+    await writeSubmagicBrollPlan(jobId, {
+      basis: cutWords.basis,
+      cutSeconds: cutWords.cutSeconds,
+      preparedAt: new Date().toISOString(),
+      items,
+    })
+    console.log(
+      `[submagic-broll] plan ready: ${items.length} placement(s), ` +
+      `${items.reduce((s, i) => s + i.duration, 0).toFixed(1)}s of her footage on a ${cutWords.cutSeconds.toFixed(1)}s cut (${cutWords.basis})`,
+    )
+  } finally {
+    // The full-length downloads only existed to cut windows out of.
+    for (const raw of new Set(candidates.map(c => c.rawPath))) {
+      try { if (fs.existsSync(raw)) fs.unlinkSync(raw) } catch { /* best-effort */ }
+    }
+  }
+}
+
 // Downloads + compresses the job's footage and uploads it to R2, writing prep
 // progress onto the pending variants; marks the whole job failed if the
 // footage can't be fetched.
@@ -3176,6 +3531,12 @@ async function analyzeCustomBrollForJob(jobId: string): Promise<void> {
 export async function refreshPrecutForRetry(jobId: string, sourceUrl: string): Promise<void> {
   try {
     await prepareJobSource(jobId, sourceUrl, undefined, { forceRecut: true })
+    // A rebuilt cut is a NEW timeline: every custom B-roll placement in the old
+    // plan is now measured against footage that no longer lines up. Rebuild the
+    // plan too (cheap: windows + registrations come from the shared cache; only
+    // the placement pass reruns) — a stale plan here is exactly the
+    // wrong-timeline bug that used to fail whole submissions.
+    await prepareSubmagicBrollForJob(jobId, { force: true })
   } catch (e) {
     console.warn(`[prep] retry re-cut failed for ${jobId.slice(0, 8)} — using the existing cut:`, (e as Error).message)
   }
@@ -3217,6 +3578,15 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
       await analyzeCustomBrollForJob(jobId)
     } catch (e) {
       console.warn(`[motion-renderer] custom B-roll analysis failed (renders proceed without it):`, (e as Error).message)
+    }
+
+    // Then turn those windows into the v1-v3 plan (timed Submagic items on the
+    // cut timeline + registered media ids). Also best-effort: without a plan,
+    // v1-v3 render with stock B-roll and say so on the card.
+    try {
+      await prepareSubmagicBrollForJob(jobId)
+    } catch (e) {
+      console.warn(`[motion-renderer] Submagic B-roll prep failed (v1-v3 fall back to stock):`, (e as Error).message)
     }
 
     // Clear the prep spinner from variants that were waiting on it. Anything

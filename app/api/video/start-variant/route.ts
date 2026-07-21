@@ -5,6 +5,8 @@ import { VARIANT_DEFINITIONS } from '@/lib/video-pipeline'
 import { explainFailure } from '@/lib/error-explain'
 import { patchVariant } from '@/lib/job-lock'
 import { rendersDir } from '@/lib/paths'
+import { normalizeBrollSource, normalizeBrollSetting } from '@/lib/broll'
+import { SUBMAGIC_BROLL_PLAN_NAME } from '@/lib/motion-renderer'
 import fs from 'fs'
 import path from 'path'
 import type { VideoVariant, CustomBrollEntry } from '@/lib/video-pipeline'
@@ -82,11 +84,16 @@ export async function POST(req: NextRequest) {
     // check above can pass while the creator's clips are still being described.
     // Starting inside that window used to render a perfectly good video that
     // silently contained NONE of her B-roll — the worst kind of failure,
-    // because nothing looks broken. Only the Motion Lab variants use her clips
-    // (v1-v3 are always stock), so only they have to wait.
-    const pendingBroll = variant.tool === 'submagic'
-      ? null
-      : (job.custom_broll ?? null) as CustomBrollEntry[] | null
+    // because nothing looks broken. Every variant that will use her clips has
+    // to wait: v4-v6 need the analysed windows, and v1-v3 (unless the picker
+    // says stock-only) need the Submagic plan built from them, which lands
+    // moments later in the same prep task.
+    const usesCustomBroll = variant.tool !== 'submagic'
+      || (normalizeBrollSource(variant.broll_source) !== 'stock'
+        && normalizeBrollSetting(variant.broll_mode, variant.broll_percent).mode !== 'none')
+    const pendingBroll = usesCustomBroll
+      ? (job.custom_broll ?? null) as CustomBrollEntry[] | null
+      : null
     if (pendingBroll?.length) {
       const prepared = pendingBroll.some(e => !!e.windows?.length)
       if (!prepared) {
@@ -94,6 +101,18 @@ export async function POST(req: NextRequest) {
           { error: 'Your B-roll clips are still being prepared — give it a moment and try again.' },
           { status: 409 },
         )
+      }
+      if (variant.tool === 'submagic' && process.env.R2_PUBLIC_URL) {
+        const planReady = await fetch(`${process.env.R2_PUBLIC_URL}/${jobId}/${SUBMAGIC_BROLL_PLAN_NAME}`, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(5_000),
+        }).then(r => r.ok).catch(() => false)
+        if (!planReady) {
+          return NextResponse.json(
+            { error: 'Your B-roll clips are still being prepared — give it a moment and try again.' },
+            { status: 409 },
+          )
+        }
       }
     }
   }
