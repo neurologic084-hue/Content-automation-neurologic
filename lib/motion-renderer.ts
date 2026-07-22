@@ -334,13 +334,44 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
   // renames succeed; the second atomically overwrites with identical content.
   const tmpPath = path.join(outDir, `source-compressed.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}.mp4`)
 
+  // Timeout scales with the footage: the old fixed 600s was sized for shorts,
+  // and a long upload was killed mid-encode — surfacing as a cryptic
+  // "Conversion failed!" on every card. (A separate duration CAP in
+  // getLocalCompressedSourceInner rejects truly long uploads with a clear
+  // message before this ever runs; the scaling here covers the allowed range
+  // with margin on a busy box.)
+  const sourceSeconds = await getVideoDuration(inputPath).catch(() => 0)
+  const timeoutMs = Math.min(45 * 60_000, Math.max(600_000, sourceSeconds * 1_500 + 300_000))
+
+  // scale=trunc(iw/2)*2:… — libx264 with yuv420p REJECTS odd dimensions
+  // ("Error while opening encoder … maybe incorrect parameters such as
+  // bit_rate, rate, width or height"), and odd-sized sources are real (screen
+  // recordings, some app exports). Rounding down to even is visually invisible
+  // and a no-op for normal footage; without it the whole job died at prep.
+  const evenScale = `-vf "scale=trunc(iw/2)*2:trunc(ih/2)*2"`
   try {
-    await run(
-      `ffmpeg -y -i "${inputPath}" ` +
-      `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
-      `-c:a aac -b:a 128k -ar 48000 -movflags +faststart "${tmpPath}"`,
-      600_000,
-    )
+    try {
+      await run(
+        `ffmpeg -y -i "${inputPath}" ${evenScale} ` +
+        `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
+        `-c:a aac -b:a 128k -ar 48000 -movflags +faststart "${tmpPath}"`,
+        timeoutMs,
+      )
+    } catch (e) {
+      const msg = (e as Error).message
+      // Encoder/stream-init failures have a second life: sources with extra
+      // data/subtitle/thumbnail streams or odd audio layouts can break the
+      // default stream mapping. One conservative retry — first video + first
+      // audio stream only, everything else dropped, stereo forced.
+      if (!/opening encoder|initializing output stream|invalid argument|error selecting|matches no streams/i.test(msg)) throw e
+      console.warn(`[motion-renderer] compression failed on default mapping — retrying with conservative stream selection: ${msg.slice(0, 160)}`)
+      await run(
+        `ffmpeg -y -i "${inputPath}" -map 0:v:0 -map 0:a:0? -dn -sn ${evenScale} ` +
+        `-r 30 -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p ` +
+        `-c:a aac -b:a 128k -ar 48000 -ac 2 -movflags +faststart "${tmpPath}"`,
+        timeoutMs,
+      )
+    }
     fs.renameSync(tmpPath, outputPath)
   } finally {
     // No-op after a successful rename; clears the orphan if ffmpeg failed.
@@ -366,6 +397,14 @@ async function compressSourceFile(inputPath: string, outDir: string): Promise<st
 // already at/under 1080p untouched. Run once in prep so the shared clean is
 // render-ready; harmless to run again (a 1080p file is a no-op). Existing 4K
 // jobs get scaled on their next prep or retry.
+// Encode timeouts scale with footage length (the fixed 600s was sized for
+// shorts and killed longer encodes mid-flight, surfacing as cryptic
+// "Conversion failed!" cards). ~1.5x realtime + margin, capped at 45 min.
+async function encodeTimeoutFor(videoPath: string): Promise<number> {
+  const seconds = await getVideoDuration(videoPath).catch(() => 0)
+  return Math.min(45 * 60_000, Math.max(600_000, seconds * 1_500 + 300_000))
+}
+
 async function downscaleInPlace(videoPath: string): Promise<void> {
   const { width, height } = await probeVideoDimensions(videoPath)
   if (Math.min(width, height) <= 1080) return
@@ -374,7 +413,7 @@ async function downscaleInPlace(videoPath: string): Promise<void> {
   console.log(`[shared-audio] downscaling ${width}x${height} -> 1080p once for the whole job (${filter})`)
   await run(
     `ffmpeg -y -i "${videoPath}" -vf ${filter} -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -c:a copy -movflags +faststart "${tmp}"`,
-    600_000,
+    await encodeTimeoutFor(videoPath),
   )
   if (!fs.existsSync(tmp) || fs.statSync(tmp).size < 10_000) {
     try { fs.unlinkSync(tmp) } catch { /* best-effort */ }
@@ -394,7 +433,7 @@ async function stageRenderWorkCopy(compressedPath: string, workPath: string): Pr
   console.log(`[motion-renderer] work copy: downscaling ${width}x${height} source (${filter}) — comp output is 1080p-class`)
   await run(
     `ffmpeg -y -i "${compressedPath}" -vf ${filter} -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -c:a copy -movflags +faststart "${workPath}"`,
-    600_000,
+    await encodeTimeoutFor(compressedPath),
   )
   if (!fs.existsSync(workPath)) throw new Error('Downscaling the render work copy produced no output')
 }
@@ -607,6 +646,23 @@ async function getLocalCompressedSourceInner(
   }
 
   const rawLocalPath = await getSharedSourceFile(jobId, sourceUrl, outDir, onProgress)
+
+  // LENGTH GATE, before any heavy or paid work. The studio is built for short
+  // vertical videos; an accidental hour-long upload would blow through encode
+  // timeouts, burn an Auphonic production + a full transcription, and then be
+  // rejected by the edit engines anyway (Submagic caps at 2h/2GB, and a 1-hour
+  // Remotion comp is ~108k frames). Saying so up front, in plain words, beats
+  // failing cryptically forty minutes in. Tunable without a deploy via
+  // SOURCE_MAX_MINUTES; the default is generous for the product's format.
+  const maxMinutes = Number(process.env.SOURCE_MAX_MINUTES ?? 20)
+  const rawSeconds = await getVideoDuration(rawLocalPath).catch(() => 0)
+  if (Number.isFinite(maxMinutes) && maxMinutes > 0 && rawSeconds > maxMinutes * 60) {
+    throw new Error(
+      `This footage is ${Math.round(rawSeconds / 60)} minutes long — the studio supports up to ${maxMinutes} minutes per video. ` +
+      `Please upload a shorter cut and resubmit.`,
+    )
+  }
+
   await onProgress?.(80, 'Compressing footage')
   const result = await compressSourceFile(rawLocalPath, outDir)
   await onProgress?.(95, 'Compressed footage ready')
@@ -3848,7 +3904,42 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
       await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
     })
   } catch (e) {
-    console.error(`[motion-renderer] source prep failed job=${jobId}:`, (e as Error).message)
+    const raw = (e as Error).message
+    console.error(`[motion-renderer] source prep failed job=${jobId}:`, raw)
+
+    // TRANSIENT prep death (box under pressure, a network flake) requeues the
+    // whole prep silently — one failure here otherwise stamps an error card on
+    // all six variants at once, which is the loudest possible way to surface a
+    // hiccup. Budget rides on the pending variants' auto_retries (max of them),
+    // so it converges like the per-variant self-heal and a human resubmit
+    // starts fresh.
+    try {
+      const { isTransientRenderError } = await import('./error-explain')
+      if (isTransientRenderError(raw)) {
+        const { data: cur } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+        const pending = ((cur?.variants ?? []) as VideoVariant[]).filter(v => v.status === 'pending')
+        const { MAX_AUTO_RETRIES } = await import('./stale-sweep')
+        const used = pending.length ? Math.max(...pending.map(v => v.auto_retries ?? 0)) : MAX_AUTO_RETRIES
+        if (used < MAX_AUTO_RETRIES) {
+          console.warn(`[self-heal] prep for job ${jobId.slice(0, 8)} failed transiently — silent requeue ${used + 1}/${MAX_AUTO_RETRIES}`)
+          await withJobLock(jobId, async () => {
+            const { data: row } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+            const next = ((row?.variants ?? []) as VideoVariant[]).map(v => (
+              v.status === 'pending'
+                ? { ...v, auto_retries: (v.auto_retries ?? 0) + 1, progress: { step: 5, total: 100, label: 'Recovering — restarting preparation', at: new Date().toISOString() } }
+                : v
+            ))
+            await db.from('video_jobs').update({ variants: next }).eq('id', jobId)
+          })
+          const { dispatchPipelineTask } = await import('./sandbox-tasks')
+          await dispatchPipelineTask({ task: 'prepare-source', jobId, sourceUrl })
+          return
+        }
+      }
+    } catch (requeueErr) {
+      console.warn(`[self-heal] prep requeue failed — falling through to the failure cards:`, (requeueErr as Error).message)
+    }
+
     await withJobLock(jobId, async () => {
     const { data: currentJob } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
     const all = (currentJob?.variants ?? []) as VideoVariant[]
@@ -3858,10 +3949,13 @@ export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Pr
     // pipeline fix), and a failure on the second run must never retract work
     // that already succeeded. Same for one that is mid-render on its own
     // machine: it has its own inputs and its own failure path.
+    // The raw reason goes through the explainer: ffmpeg's encoder prose
+    // ("Error initializing output stream 0:0 …") reached client cards
+    // verbatim, six times over, before this.
     const failedVariants = all.map((v) => (
       v.status === 'pending'
         ? { ...v, status: 'failed' as const, progress: null,
-            error: `Could not prepare the footage: ${(e as Error).message}` }
+            error: `Could not prepare the footage: ${explainFailure(e)}` }
         : v
     ))
     const survivors = all.filter(v => v.status === 'ready').length

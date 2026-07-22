@@ -111,6 +111,9 @@ export async function buildSubmagicCutSource(
       `[0:a]aselect='${expr}',asetpts=N/SR/TB[a]" ` +
       `-map "[v]" -map "[a]" -c:v libx264 -preset veryfast -crf 19 ` +
       `-c:a aac -b:a 192k -movflags +faststart "${outPath}"`,
+      // Scales with the footage: the 600s default was sized for shorts and
+      // would kill this re-encode mid-flight on a long (but allowed) upload.
+      Math.min(45 * 60_000, Math.max(600_000, duration * 1_500 + 300_000)),
     )
 
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {

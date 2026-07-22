@@ -92,6 +92,17 @@ export function explainFailure(raw: unknown): string {
     return 'The video tool was cut off mid-job (usually a timeout on a very large file, or the machine running out of memory). Please retry this variant.'
   }
 
+  // ffmpeg encoder/stream-init prose ("Error initializing output stream 0:0 —
+  // Error while opening encoder … maybe incorrect parameters such as bit_rate,
+  // rate, width or height | Conversion failed!") reached every card of a job
+  // verbatim. Usual causes: odd source dimensions or unusual extra streams —
+  // both now handled inside the compressor (even-dimension scale + a
+  // conservative-mapping retry), so reaching this card at all means the file
+  // is genuinely unusual.
+  if (mentions('opening encoder', 'initializing output stream', 'conversion failed')) {
+    return 'The footage could not be converted — something about the file (unusual dimensions, streams, or encoding) surprised the converter. Retry once; if it happens again, re-export the video from your camera roll or editor and upload that.'
+  }
+
   // ── OpenRouter / Gemini (video analysis, cut plan, b-roll, graphics) ──────────
   if (mentions('openrouter', 'gemini')) {
     if (has(402) || mentions('insufficient', 'credit', 'payment required', 'quota', 'balance'))
