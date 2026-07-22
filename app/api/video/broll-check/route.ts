@@ -12,19 +12,87 @@ import { extractDriveFileId, extractDriveFolderId, listDriveFolderVideos } from 
 const MAX_CUSTOM_BROLL = 12
 const VIDEO_EXT = /\.(mp4|mov|m4v|webm|mkv|avi)$/i
 
-// Drive serves large files behind a confirm page, so a plain HEAD can answer
-// text/html for a perfectly good video. Treat only a hard 4xx/5xx as "not
-// accessible"; anything that responds is reachable.
-async function isReachable(url: string): Promise<boolean> {
+// Reachability alone is not enough: a PDF answers 200 exactly like a video,
+// and "Video is accessible ✓" on a PDF was observed in production. So the
+// probe also answers WHAT responded, from the content-type and the file's
+// first bytes — every real container announces itself there (mp4/mov carry an
+// 'ftyp' atom, webm starts with EBML, AVI with RIFF) and so does everything
+// that isn't a video (%PDF, PNG/JPEG magic, zip). Drive's virus-scan
+// interstitial for large files answers text/html for perfectly good videos,
+// so HTML falls back to the filename in the page title; when nothing is
+// recognisable either way the verdict is 'unknown' and the link passes — a
+// false "not a video" on real footage is worse than letting prep's own
+// converter catch an oddball later.
+type DriveProbe = { reachable: boolean; verdict: 'video' | 'not-video' | 'unknown'; kind?: string }
+
+// First bytes of a response WITHOUT trusting Range support: Drive's uc
+// endpoint sometimes ignores Range and streams the whole file, so read
+// stream chunks up to a small cap and cancel.
+async function firstBytes(res: Response, cap = 4096): Promise<Buffer> {
+  const reader = res.body?.getReader()
+  if (!reader) return Buffer.alloc(0)
+  const parts: Uint8Array[] = []
+  let got = 0
+  try {
+    while (got < cap) {
+      const { value, done } = await reader.read()
+      if (done) break
+      parts.push(value)
+      got += value.byteLength
+    }
+  } finally {
+    try { await reader.cancel() } catch { /* already done */ }
+  }
+  return Buffer.concat(parts).subarray(0, cap)
+}
+
+const NON_VIDEO_EXT = /\.(pdf|docx?|xlsx?|pptx?|txt|rtf|png|jpe?g|gif|heic|webp|zip|rar|mp3|wav|m4a|aac)$/i
+
+async function probeDriveFile(url: string): Promise<DriveProbe> {
   try {
     const res = await fetch(url, {
       method: 'GET',
-      headers: { Range: 'bytes=0-64', 'User-Agent': 'Mozilla/5.0 (Macintosh) Chrome/126 Safari/537.36' },
+      headers: { Range: 'bytes=0-4095', 'User-Agent': 'Mozilla/5.0 (Macintosh) Chrome/126 Safari/537.36' },
       signal: AbortSignal.timeout(20_000),
     })
-    return res.ok || res.status === 206
+    if (!res.ok && res.status !== 206) return { reachable: false, verdict: 'unknown' }
+    const ct = (res.headers.get('content-type') ?? '').toLowerCase()
+    const head = await firstBytes(res)
+    const ascii = head.toString('latin1')
+
+    if (ct.startsWith('video/')) return { reachable: true, verdict: 'video' }
+
+    // Definitive non-video answers, by header then by magic bytes.
+    if (ct.includes('application/pdf') || ascii.startsWith('%PDF')) return { reachable: true, verdict: 'not-video', kind: 'a PDF' }
+    if (ct.startsWith('image/') || ascii.startsWith('\x89PNG') || ascii.startsWith('\xFF\xD8\xFF') || ascii.startsWith('GIF8')) {
+      return { reachable: true, verdict: 'not-video', kind: 'an image' }
+    }
+    if (ct.startsWith('audio/') || ascii.startsWith('ID3')) return { reachable: true, verdict: 'not-video', kind: 'an audio file' }
+    if (ct.includes('msword') || ct.includes('officedocument') || ascii.startsWith('PK\x03\x04')) {
+      return { reachable: true, verdict: 'not-video', kind: 'a document' }
+    }
+    if (ct.startsWith('text/plain')) return { reachable: true, verdict: 'not-video', kind: 'a text file' }
+
+    // Video containers by signature: ISO-BMFF atoms (mp4/mov), EBML (webm/
+    // mkv), RIFF AVI. Checked on bytes because Drive often answers
+    // application/octet-stream for real videos.
+    const atom = ascii.slice(4, 8)
+    if (['ftyp', 'moov', 'mdat', 'wide', 'free', 'skip'].includes(atom)) return { reachable: true, verdict: 'video' }
+    if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return { reachable: true, verdict: 'video' }
+    if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'AVI ') return { reachable: true, verdict: 'video' }
+
+    // Drive's interstitial (large files): HTML with the real filename in the
+    // title — judge by its extension when present.
+    if (ct.includes('text/html') || /^\s*<!doctype|^\s*<html/i.test(ascii)) {
+      const title = ascii.match(/<title>([^<]*?)(?:\s+-\s+Google Drive)?<\/title>/i)?.[1] ?? ''
+      if (NON_VIDEO_EXT.test(title)) return { reachable: true, verdict: 'not-video', kind: `a ${title.split('.').pop()?.toLowerCase()} file` }
+      if (VIDEO_EXT.test(title)) return { reachable: true, verdict: 'video' }
+      return { reachable: true, verdict: 'unknown' }
+    }
+
+    return { reachable: true, verdict: 'unknown' }
   } catch {
-    return false
+    return { reachable: false, verdict: 'unknown' }
   }
 }
 
@@ -49,10 +117,17 @@ export async function POST(req: NextRequest) {
     if (!fileId) {
       return NextResponse.json({ ok: false, error: 'That does not look like a Google Drive file link.' }, { status: 400 })
     }
-    if (!(await isReachable(driveDownload(fileId)))) {
+    const probe = await probeDriveFile(driveDownload(fileId))
+    if (!probe.reachable) {
       return NextResponse.json({
         ok: false,
         error: 'That video is not accessible. Set sharing to "Anyone with the link" and try again.',
+      }, { status: 400 })
+    }
+    if (probe.verdict === 'not-video') {
+      return NextResponse.json({
+        ok: false,
+        error: `That link is ${probe.kind ?? 'not a video'} — the footage must be a video file (mp4 or mov). Share the video itself and paste its link.`,
       }, { status: 400 })
     }
     return NextResponse.json({ ok: true, clips: 1 })
@@ -110,23 +185,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ clips: 0, error: 'No usable clips found in what you pasted.' }, { status: 400 })
   }
 
-  // Prove they can actually be fetched — a folder can list files the sharing
-  // settings still block. Checked in parallel so 12 clips stay quick.
-  const reachable = await Promise.all(found.map(f => isReachable(driveDownload(f.id))))
-  const okCount = reachable.filter(Boolean).length
-  if (!okCount) {
+  // Prove they can actually be fetched AND are actually videos — a folder can
+  // list files the sharing settings still block, and a pasted file link can be
+  // anything. Checked in parallel so 12 clips stay quick.
+  const probes = await Promise.all(found.map(f => probeDriveFile(driveDownload(f.id))))
+  const usable = probes.filter(p => p.reachable && p.verdict !== 'not-video').length
+  if (!usable) {
+    const allNonVideo = probes.every(p => p.verdict === 'not-video')
     return NextResponse.json({
       clips: 0,
-      error: 'Those clips are not accessible. Set the folder to "Anyone with the link" and try again.',
+      error: allNonVideo
+        ? 'None of those files are videos — B-roll must be video clips (mp4, mov, m4v...).'
+        : 'Those clips are not accessible. Set the folder to "Anyone with the link" and try again.',
     }, { status: 400 })
   }
 
   return NextResponse.json({
-    clips: okCount,
-    // Honest partial result: some clips are unreachable but the render can
-    // still use the rest, so this is a warning rather than a hard failure.
-    ...(okCount < found.length
-      ? { warning: `${found.length - okCount} of ${found.length} clips are not accessible and will be skipped.` }
+    clips: usable,
+    // Honest partial result: some clips are unreachable/not videos but the
+    // render can still use the rest, so this is a warning rather than a hard
+    // failure.
+    ...(usable < found.length
+      ? { warning: `${found.length - usable} of ${found.length} files are not accessible or not videos and will be skipped.` }
       : {}),
   })
 }

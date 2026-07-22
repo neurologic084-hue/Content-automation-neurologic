@@ -282,6 +282,24 @@ async function getSharedSourceFile(
   if (existing) return existing
 
   const promise = (async () => {
+    // SIZE GATE before the bytes move: the duration cap downstream can only
+    // fire after a full download, but a 5-hour 4K upload is tens of GB — big
+    // enough to fill the container's disk before ffprobe ever sees it. Refuse
+    // up front when the host reports a size. Best-effort by design: Drive
+    // often omits content-length on these links, and the duration gate is
+    // still there behind it.
+    const maxGb = Number(process.env.SOURCE_MAX_GB ?? 8)
+    if (Number.isFinite(maxGb) && maxGb > 0) {
+      const size = await fetch(sourceUrl, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(10_000) })
+        .then(r => Number(r.headers.get('content-length')))
+        .catch(() => NaN)
+      if (Number.isFinite(size) && size > maxGb * 1024 ** 3) {
+        throw new Error(
+          `This footage file is ${(size / 1024 ** 3).toFixed(1)} GB — the studio supports up to ${maxGb} GB per video. ` +
+          `Please export a smaller/shorter cut and resubmit.`,
+        )
+      }
+    }
     const partialPath = path.join(outDir, 'source.download')
     try { if (fs.existsSync(partialPath)) fs.unlinkSync(partialPath) } catch { /* best-effort */ }
     await downloadFile(sourceUrl, partialPath, onProgress)
@@ -2326,6 +2344,16 @@ async function collectCustomBrollCandidates(
         await downloadFile(entry.url, rawPath)
       }
       const sourceDuration = await getVideoDuration(rawPath)
+      // A "B-roll clip" this long is almost certainly the MAIN footage pasted
+      // into the B-roll folder by mistake — and the planner would happily place
+      // her talking head as a cutaway over her own talking head (topical match
+      // is high by construction). B-roll is measured in seconds; skip the clip.
+      const maxClipMinutes = Number(process.env.BROLL_MAX_CLIP_MINUTES ?? 10)
+      if (Number.isFinite(maxClipMinutes) && maxClipMinutes > 0 && sourceDuration > maxClipMinutes * 60) {
+        console.warn(`[motion-renderer] clip ${i} is ${Math.round(sourceDuration / 60)}min long — main-footage territory, not B-roll. Skipping it.`)
+        try { fs.unlinkSync(rawPath) } catch { /* best-effort */ }
+        continue
+      }
       // Stamp the timeline these offsets are measured against, so the fast path
       // and the window cache can prove later that a source of this exact length
       // is the one being cut.

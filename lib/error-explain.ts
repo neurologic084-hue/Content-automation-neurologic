@@ -103,6 +103,14 @@ export function explainFailure(raw: unknown): string {
     return 'The footage could not be converted — something about the file (unusual dimensions, streams, or encoding) surprised the converter. Retry once; if it happens again, re-export the video from your camera roll or editor and upload that.'
   }
 
+  // A file that is not a decodable video at all: corrupt, truncated
+  // mid-upload, or simply not a video (a PDF/image behind a .mp4 name, an HTML
+  // error page saved by a broken Drive export). ffmpeg's phrasing for these
+  // reached a card raw in probing ("Invalid data found when processing input").
+  if (mentions('invalid data found', 'moov atom not found', 'no video stream found', 'does not contain any stream')) {
+    return 'This file does not look like a playable video — it may be corrupt, incomplete, or not a video at all. Re-export or re-download it, then upload again.'
+  }
+
   // ── OpenRouter / Gemini (video analysis, cut plan, b-roll, graphics) ──────────
   if (mentions('openrouter', 'gemini')) {
     if (has(402) || mentions('insufficient', 'credit', 'payment required', 'quota', 'balance'))
