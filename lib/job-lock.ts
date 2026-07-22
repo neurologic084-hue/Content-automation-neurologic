@@ -82,7 +82,14 @@ export async function patchVariant(
 
       const { data: check } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
       const after = (check?.variants as VideoVariant[] | undefined)?.find(v => v.id === variantId)
-      const stuck = after && (Object.keys(patch) as (keyof VideoVariant)[]).every(
+      // Verify ONLY the fields that must not be lost. Comparing every key in the
+      // patch meant a concurrent heartbeat — which by design rewrites `progress`
+      // every few seconds — made a perfectly good status/external_id write look
+      // clobbered, so it retried four times and then abandoned a write that had
+      // actually landed. `progress` is high-frequency and lossy-tolerable (see
+      // the note above); losing a tick is fine, losing a status is not.
+      const VERIFIED: (keyof VideoVariant)[] = ['status', 'download_url', 'external_id']
+      const stuck = after && VERIFIED.filter(k => k in patch).every(
         k => JSON.stringify(after[k] ?? null) === JSON.stringify(patch[k] ?? null),
       )
       if (stuck) return
