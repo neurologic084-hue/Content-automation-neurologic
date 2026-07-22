@@ -3,6 +3,15 @@ const OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 
 export const MODELS = {
   script: 'anthropic/claude-sonnet-4-6',
+  // EDITORIAL decisions the viewer actually sees: where a cut lands, which
+  // clip covers which line, what a caption emphasises. These were on the cheap
+  // tier and it showed — an elevator clip over a line about captions, cuts in
+  // the wrong place. Judgement matters more than latency here, and these calls
+  // are small (a transcript plus a prompt), so the cost delta is modest.
+  planner: 'anthropic/claude-sonnet-4-6',
+  // Mechanical classification with a small fixed answer space (pick a mood,
+  // rank a list, choose a template). Haiku is genuinely sufficient and paying
+  // Sonnet prices for these would be waste, not quality.
   fast: 'anthropic/claude-haiku-4-5',
 } as const
 

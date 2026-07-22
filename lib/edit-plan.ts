@@ -144,7 +144,7 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
   const numbered = words.map((w, i) => `${i}:${w.text}`).join(' ')
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.1,
       max_tokens: 500,
       json: true,
@@ -742,7 +742,7 @@ export async function planViralCaptions(
     .join('\n')
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       // Long clips can carry 50+ pages; the picks array must never truncate.
       max_tokens: 3000,
@@ -861,7 +861,7 @@ export async function planEubankCaptions(
   let applied = 0
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 3000,
       json: true,
@@ -1016,7 +1016,7 @@ export async function planKoeCollageCaptions(
   const motifs: KoeMotif[] = []
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 3000,
       json: true,

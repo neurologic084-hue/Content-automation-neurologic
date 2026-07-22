@@ -79,7 +79,7 @@ export async function planCollageScenes(
   let candidates: Array<Partial<CollageScenePlan> & { subjects?: Array<{ prompt?: string; size?: string }> }> = []
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.3,
       // Five scenes × two subjects each is a lot of JSON — too small a cap
       // truncates the response and only the first scene or two survive parsing.

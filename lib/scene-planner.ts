@@ -75,7 +75,7 @@ export async function planScenes(
     ).join('\n')
 
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.3,
       max_tokens: 500,
       json: true,

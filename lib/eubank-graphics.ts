@@ -104,7 +104,7 @@ export async function planEubankGraphics(
   } = {}
   try {
     const out = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 1200,
       json: true,

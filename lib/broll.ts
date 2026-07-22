@@ -315,7 +315,7 @@ export async function planBrollSlots(
   let candidates: Partial<PlannedSlot>[] = []
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.3,
       max_tokens: 700,
       json: true,
@@ -495,7 +495,7 @@ export async function selectBestClips<T extends { description: string; duration:
   const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 300,
       json: true,
@@ -569,7 +569,7 @@ export async function planCustomBrollSlots(
   let plannerFailed = false
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.3,
       max_tokens: 600,
       json: true,
