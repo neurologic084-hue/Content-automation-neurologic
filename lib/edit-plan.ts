@@ -128,9 +128,15 @@ interface CutParams {
   mergeGap: number    // segments closer than this (after padding) merge back
   minSegment: number  // drop fragments shorter than this
   silenceSplit: number // energy-detected silence inside a segment longer than this gets cut out
+  // A pause AFTER A FULL STOP is rhetoric, not dead air — she lands a point and
+  // lets it sit. Cutting those to the same floor as a mid-sentence hesitation
+  // is what makes an edit feel breathless and jump-cuts it every couple of
+  // seconds. Sentence boundaries get this higher bar instead, so a deliberate
+  // beat survives and only a genuinely long silence there is trimmed.
+  sentenceGapCut: number
 }
-const CUT_NATURAL: CutParams = { gapCut: 0.45, padding: 0.16, mergeGap: 0.30, minSegment: 0.40, silenceSplit: 0.60 }
-const CUT_TIGHT: CutParams = { gapCut: 0.30, padding: 0.09, mergeGap: 0.18, minSegment: 0.35, silenceSplit: 0.42 }
+const CUT_NATURAL: CutParams = { gapCut: 0.45, padding: 0.16, mergeGap: 0.30, minSegment: 0.40, silenceSplit: 0.60, sentenceGapCut: 1.10 }
+const CUT_TIGHT: CutParams = { gapCut: 0.30, padding: 0.09, mergeGap: 0.18, minSegment: 0.35, silenceSplit: 0.42, sentenceGapCut: 0.80 }
 
 // Common pure-filler tokens safe to drop without meaning loss. Covers the
 // transcriber's spelling variants: um/umm/uhm, uh/uhh, ah/ahh, er/erm, hmm/mhm/mm.
@@ -441,12 +447,15 @@ export async function planKeepSegments(
   const kept = words.filter((_, i) => !dropped.has(i))
   if (!kept.length) return [{ start: 0, end: sourceDuration }]
 
-  // Group kept words into segments wherever the gap is small enough.
+  // Group kept words into segments wherever the gap is small enough. A gap that
+  // follows a completed sentence is judged against the gentler sentence bar.
+  const endsSentence = (t: string) => /[.!?…]["')\]]*$/.test(t.trim())
   const segments: KeepSegment[] = []
   let cur: KeepSegment = { start: kept[0].start, end: kept[0].end }
   for (let k = 1; k < kept.length; k++) {
     const w = kept[k]
-    if (w.start - cur.end > P.gapCut) {
+    const limit = endsSentence(kept[k - 1].text) ? P.sentenceGapCut : P.gapCut
+    if (w.start - cur.end > limit) {
       segments.push(cur)
       cur = { start: w.start, end: w.end }
     } else {
