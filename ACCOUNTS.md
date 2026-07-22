@@ -21,6 +21,4 @@ All signed into with **Google** — use "Continue with Google" on each site.
 
 ---
 
-If one runs out of credit, the app says which one and links to top it up. Most
-keep working on a backup — only **OpenRouter** and **Submagic** stop things
-entirely.
+All of them are renewal except openrouter as its pay per usage so that subscription need to be added in when finished

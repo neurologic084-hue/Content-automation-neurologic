@@ -2876,18 +2876,21 @@ async function renderRemotionEdit(
             const targetTotal = brollCoverage !== null
               ? coverageTargetCount(plan.editedDuration, brollCoverage, minGap)
               : Math.max(1, Math.round(plan.editedDuration / (kit.denseMotion ? 3.5 : 9)))
-            // 50/50 AIM, matching the Submagic path. Her clips are planned
-            // first and only where they fit, but when they fill more than half
-            // the cutaways there is nothing left for stock and the video loses
-            // its variety. Trim the surplus (keeping the EARLIEST, where
-            // attention is highest) so stock keeps its half. When fewer of her
-            // clips fit, none are dropped and stock simply fills more — the aim
-            // is balance, never a quota, and a clip is never forced in.
+            // 50/50 AIM. Her clips are planned first and only where they fit,
+            // but when they fill more than half the cutaways there is nothing
+            // left for stock. Trim the surplus — and trim the WEAKEST matches,
+            // not the latest ones: the planner scored how well each placement
+            // actually fits, so the moments it was least sure about are the
+            // right ones to hand to stock. That is what makes 'Smart' a
+            // judgement rather than a running order. Ties fall back to time.
             const half = Math.max(1, Math.round(targetTotal / 2))
             if (broll.length > half) {
-              const dropped = broll.length - half
-              broll = [...broll].sort((a, b) => a.start - b.start).slice(0, half)
-              console.log(`[broll] her clips filled ${broll.length + dropped}/${targetTotal} cutaways — keeping ${half} so stock keeps its half`)
+              const before = broll.length
+              broll = [...broll]
+                .sort((a, b) => (b.fit ?? 3) - (a.fit ?? 3) || a.start - b.start)
+                .slice(0, half)
+                .sort((a, b) => a.start - b.start)
+              console.log(`[broll] her clips fit ${before}/${targetTotal} cutaways — keeping the ${half} best-matching so stock keeps its half`)
             }
 
             const gap = targetTotal - broll.length

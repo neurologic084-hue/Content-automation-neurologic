@@ -47,6 +47,9 @@ export interface BrollItem {
   // The stock query that resolved this item — kept so downstream treatments
   // (carousel extras) can fetch more media for the same moment.
   query?: string
+  // Planner's 1-5 judgement of how well this clip suits the moment it sits on.
+  // Only set for the creator's own clips; absent means "not scored".
+  fit?: number
   // Viral (v5) designed cover: instead of raw footage, the renderer builds an
   // animated editorial poster around this media — warm gradient canvas, the
   // image in a floating mask, and this text as the card's own headline.
@@ -560,7 +563,7 @@ export async function planCustomBrollSlots(
   const timed = editedWords.map(w => `${w.start.toFixed(1)} ${w.text}`).join(' ').slice(0, 6000)
   const clipLines = clips.map((c, i) => `${i}: (${c.duration.toFixed(1)}s) ${c.description}`)
 
-  let candidates: Array<{ start?: number; duration?: number; clip?: number }> = []
+  let candidates: Array<{ start?: number; duration?: number; clip?: number; fit?: number }> = []
   // Did we get a real placement decision back? Only a genuine planner FAILURE
   // (API error, or a response that isn't the expected shape) justifies the
   // force-spread fallback below. A planner that ran fine and chose to place few
@@ -598,6 +601,13 @@ export async function planCustomBrollSlots(
           '  room while she describes calming down. Use these.',
           '- Prefer cutting away during EXPLANATORY passages and holding on her face for the',
           '  hook, emotional beats and the call to action.',
+          '- Rate every placement with "fit" 1-5: 5 = the clip genuinely illustrates',
+          '  what she is saying there; 3 = topically or atmospherically right; 1 = it is',
+          '  merely somewhere to put it. Rate HONESTLY — a low score is useful, and a',
+          '  moment you score 1-2 will be given to stock footage instead, which is the',
+          '  right outcome. Do not inflate scores to keep a clip in.',
+          '- OMIT a clip entirely rather than forcing it: not every clip has a moment,',
+          '  and leaving one out is a correct answer, never a failure.',
           '- Go through the clips IN ORDER and give each one the best moment you can find',
           '  for it. Every clip should get a moment unless there is genuinely nowhere it',
           '  would not confuse the viewer — she uploaded all of them on purpose.',
@@ -608,11 +618,11 @@ export async function planCustomBrollSlots(
           `- Never start before ${HOOK_PROTECT_SECONDS}s: the opening seconds hold on her face, always.`,
           `- Never end within the last ${CTA_PROTECT_SECONDS}s of the video: the call to action is her too.`,
           `- At least ${minGap} seconds of talking-head between cutaways. No overlaps.`,
-          '- Return JSON only: {"items":[{"start":number,"duration":number,"clip":number}]}',
+          '- Return JSON only: {"items":[{"start":number,"duration":number,"clip":number,"fit":number}]}',
         ].join('\n'),
       }],
     })
-    const parsed = parseJsonLoose<{ items?: Array<{ start?: number; duration?: number; clip?: number }> }>(raw)
+    const parsed = parseJsonLoose<{ items?: Array<{ start?: number; duration?: number; clip?: number; fit?: number }> }>(raw)
     if (Array.isArray(parsed.items)) candidates = parsed.items
     else plannerFailed = true   // model didn't answer in the expected shape — treat as a failure, not "nothing fits"
   } catch (e) {
@@ -626,8 +636,14 @@ export async function planCustomBrollSlots(
   const items: BrollItem[] = []
   const uses = new Map<number, number>()
   let lastEnd = 0
+  const MIN_FIT = 3   // below this the model is admitting it is filler
+  const weak = candidates.filter(c => typeof c.fit === 'number' && (c.fit as number) < MIN_FIT).length
+  if (weak) console.log(`[broll] ${weak} of her placement(s) scored below ${MIN_FIT} — leaving those moments to stock`)
   for (const c of candidates
     .filter(c => typeof c.start === 'number' && typeof c.duration === 'number' && typeof c.clip === 'number')
+    // An unscored placement (older cache, model omitted the field) is kept:
+    // absence of a score is not evidence of a bad fit.
+    .filter(c => typeof c.fit !== 'number' || (c.fit as number) >= MIN_FIT)
     .sort((a, b) => (a.start as number) - (b.start as number))) {
     const idx = Math.max(0, Math.min(clips.length - 1, Math.round(c.clip as number)))
     if ((uses.get(idx) ?? 0) >= 2) continue
@@ -647,6 +663,9 @@ export async function planCustomBrollSlots(
       file: clip.file,
       kind: 'video',
       layout: 'cover',
+      // How well the planner judged this moment. Carried so a later 50/50 trim
+      // can drop the weakest matches rather than an arbitrary slice.
+      ...(typeof c.fit === 'number' ? { fit: c.fit } : {}),
       ...(srcOffset > 0 ? { srcOffset } : {}),
       query: clip.description.slice(0, 60),
     })
