@@ -2876,6 +2876,20 @@ async function renderRemotionEdit(
             const targetTotal = brollCoverage !== null
               ? coverageTargetCount(plan.editedDuration, brollCoverage, minGap)
               : Math.max(1, Math.round(plan.editedDuration / (kit.denseMotion ? 3.5 : 9)))
+            // 50/50 AIM, matching the Submagic path. Her clips are planned
+            // first and only where they fit, but when they fill more than half
+            // the cutaways there is nothing left for stock and the video loses
+            // its variety. Trim the surplus (keeping the EARLIEST, where
+            // attention is highest) so stock keeps its half. When fewer of her
+            // clips fit, none are dropped and stock simply fills more — the aim
+            // is balance, never a quota, and a clip is never forced in.
+            const half = Math.max(1, Math.round(targetTotal / 2))
+            if (broll.length > half) {
+              const dropped = broll.length - half
+              broll = [...broll].sort((a, b) => a.start - b.start).slice(0, half)
+              console.log(`[broll] her clips filled ${broll.length + dropped}/${targetTotal} cutaways — keeping ${half} so stock keeps its half`)
+            }
+
             const gap = targetTotal - broll.length
             if (gap > 0) {
               try {

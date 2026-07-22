@@ -206,7 +206,6 @@ export default function ScriptDetailPage() {
           before approving it. */}
       {showPrompter && (
         <Teleprompter
-          scriptId={script.id}
           hook={script.hook}
           body={script.body}
           cta={script.cta}

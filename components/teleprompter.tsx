@@ -2,63 +2,90 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-// Full-screen teleprompter for filming: the script scrolls at a set pace, with
-// an optional read-aloud so she can hear the timing rather than guess it.
+// Filming teleprompter. Built for a PHONE first — that is the device propped up
+// next to the camera, and it is the one with a screen that sleeps, a notch, and
+// no keyboard. Everything here follows from that:
 //
-// The scroll and the audio are deliberately INDEPENDENT. Syncing text to speech
-// needs word-level timings, and a sync that drifts is worse than none — you
-// stop trusting it mid-take. Speed is hers to set; the voice is a reference.
+//   • a wake lock, so the screen does not sleep mid-take
+//   • tap the script itself to start/pause — no hunting for a small button
+//     while standing in frame
+//   • controls sit at the BOTTOM, inside the safe area, within thumb reach
+//   • text size is adjustable, because reading distance is not fixed
+//
+// No read-aloud: this is for reading from, and generated audio was an ongoing
+// bill for something she does not need while filming.
 interface Props {
-  scriptId: string
   hook: string
   body: string
   cta: string
   onClose: () => void
 }
 
-const WPM_MIN = 80
+const WPM_MIN = 70
 const WPM_MAX = 200
 const WPM_DEFAULT = 130   // unhurried spoken-video pace
+const SIZE_MIN = 20
+const SIZE_MAX = 56
 
-export function Teleprompter({ scriptId, hook, body, cta, onClose }: Props) {
+export function Teleprompter({ hook, body, cta, onClose }: Props) {
   const [wpm, setWpm] = useState(WPM_DEFAULT)
+  const [size, setSize] = useState(32)
   const [running, setRunning] = useState(false)
   const [mirrored, setMirrored] = useState(false)
-  const [voice, setVoice] = useState<'female' | 'male'>('female')
-  const [audioUrl, setAudioUrl] = useState<string | null>(null)
-  const [loadingAudio, setLoadingAudio] = useState(false)
-  const [audioError, setAudioError] = useState<string | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const audioRef = useRef<HTMLAudioElement>(null)
 
   const text = [hook, body, cta].filter(Boolean).join('\n\n')
   const words = text.trim().split(/\s+/).length
+  const seconds = Math.round((words / wpm) * 60)
 
-  // Scroll by pixels-per-second derived from words-per-minute: measure the real
-  // rendered height so the pace holds for a long script and a short one alike.
+  // Keep the screen awake while filming. Without this the phone dims and locks
+  // mid-take, which is the single most annoying way for a prompter to fail.
+  // Re-acquired on visibility change because the lock is dropped when the tab
+  // is hidden. Unsupported browsers simply carry on.
+  useEffect(() => {
+    let lock: WakeLockSentinel | null = null
+    let cancelled = false
+    const acquire = async () => {
+      try {
+        if ('wakeLock' in navigator && document.visibilityState === 'visible') {
+          lock = await navigator.wakeLock.request('screen')
+        }
+      } catch { /* denied or unsupported — not worth telling her about */ }
+    }
+    void acquire()
+    const onVis = () => { if (!cancelled && document.visibilityState === 'visible') void acquire() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      cancelled = true
+      document.removeEventListener('visibilitychange', onVis)
+      void lock?.release().catch(() => {})
+    }
+  }, [])
+
+  // Scroll at a pace derived from words-per-minute, measured against the real
+  // rendered height so it holds for a long script and a short one alike.
   useEffect(() => {
     if (!running) return
     const el = scrollRef.current
     if (!el) return
     const totalPx = el.scrollHeight - el.clientHeight
     if (totalPx <= 0) return
-    const seconds = (words / wpm) * 60
-    const pxPerTick = totalPx / seconds / 20   // 20 ticks a second
+    const pxPerMs = totalPx / (seconds * 1000)
     let raf = 0
-    let last = 0
+    let last = performance.now()
     const tick = (t: number) => {
-      if (t - last >= 50) {
-        last = t
-        el.scrollTop += pxPerTick
-        if (el.scrollTop >= totalPx - 1) setRunning(false)
-      }
-      raf = requestAnimationFrame(tick)
+      const dt = t - last
+      last = t
+      el.scrollTop += pxPerMs * dt
+      if (el.scrollTop >= totalPx - 1) setRunning(false)
+      else raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [running, wpm, words])
+  }, [running, seconds])
 
-  // Esc closes; space starts/stops without hunting for the button mid-take.
+  // Desktop convenience; harmless on a phone.
   useEffect(() => {
     function key(e: KeyboardEvent) {
       if (e.key === 'Escape') onClose()
@@ -68,122 +95,116 @@ export function Teleprompter({ scriptId, hook, body, cta, onClose }: Props) {
     return () => window.removeEventListener('keydown', key)
   }, [onClose])
 
-  async function loadVoice() {
-    if (loadingAudio) return
-    setLoadingAudio(true)
-    setAudioError(null)
-    try {
-      const res = await fetch(`/api/scripts/${scriptId}/voiceover`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ voice }),
-      })
-      const d = await res.json()
-      if (!res.ok) throw new Error(d.error ?? 'Could not create the voice reading.')
-      setAudioUrl(d.url)
-      // Give the element a tick to pick up the new src before playing.
-      setTimeout(() => audioRef.current?.play().catch(() => {}), 50)
-    } catch (e) {
-      setAudioError((e as Error).message)
-    } finally {
-      setLoadingAudio(false)
-    }
-  }
-
   function restart() {
     setRunning(false)
     if (scrollRef.current) scrollRef.current.scrollTop = 0
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black text-white flex flex-col">
-      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 flex-shrink-0">
-        <span className="text-[13px] font-semibold">Teleprompter</span>
-        <button onClick={onClose} className="text-[13px] text-white/60 hover:text-white px-3 py-1.5">
-          Close (Esc)
+    <div
+      className="fixed inset-0 z-50 bg-black text-white flex flex-col overscroll-none"
+      style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
+      {/* Minimal top bar — every pixel here is script she cannot read. */}
+      <div className="flex items-center justify-between px-4 py-2 flex-shrink-0">
+        <button
+          onClick={() => setShowSettings(s => !s)}
+          className="w-11 h-11 -ml-1 flex items-center justify-center text-white/60 active:text-white"
+          aria-label="Settings"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9V12a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+        <span className="text-[12px] text-white/40 tabular-nums">{seconds}s · {wpm} wpm</span>
+        <button
+          onClick={onClose}
+          className="w-11 h-11 -mr-1 flex items-center justify-center text-white/60 active:text-white"
+          aria-label="Close"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
         </button>
       </div>
 
-      {/* The reading line — a fixed marker so her eyeline stays put. */}
+      {/* THE SCRIPT. Tapping anywhere on it starts/pauses — the whole point on a
+          phone, where she is an arm's length away and cannot aim for a button. */}
       <div className="relative flex-1 overflow-hidden">
-        <div className="absolute left-0 right-0 top-1/3 h-px bg-[#FF4F17]/40 z-10 pointer-events-none" />
+        <div className="absolute left-0 right-0 top-[30%] h-px bg-[#FF4F17]/50 z-10 pointer-events-none" />
         <div
           ref={scrollRef}
-          className="h-full overflow-y-auto px-6 sm:px-16 scroll-smooth"
-          style={{ transform: mirrored ? 'scaleX(-1)' : undefined }}
+          onClick={() => setRunning(r => !r)}
+          className="h-full overflow-y-auto px-5 sm:px-16 overscroll-none"
+          style={{ transform: mirrored ? 'scaleX(-1)' : undefined, WebkitOverflowScrolling: 'touch' }}
         >
-          {/* Padding so the first line starts at the marker and the last can reach it. */}
-          <div style={{ paddingTop: '33vh', paddingBottom: '66vh' }}>
-            <p className="text-[26px] sm:text-[38px] leading-[1.5] font-semibold whitespace-pre-wrap text-center">
+          <div style={{ paddingTop: '30vh', paddingBottom: '70vh' }}>
+            <p
+              className="font-semibold whitespace-pre-wrap text-center select-none"
+              style={{ fontSize: `${size}px`, lineHeight: 1.45 }}
+            >
               {text}
             </p>
           </div>
         </div>
+
+        {/* Only shown while paused, so it never covers the script mid-take. */}
+        {!running && (
+          <div className="absolute inset-x-0 bottom-4 flex justify-center pointer-events-none">
+            <span className="text-[12px] text-white/40 bg-black/60 rounded-full px-3 py-1.5">
+              Tap the script to start
+            </span>
+          </div>
+        )}
       </div>
 
-      <div className="border-t border-white/10 px-5 py-4 space-y-3 flex-shrink-0">
-        <div className="flex items-center gap-3 flex-wrap">
-          <button
-            onClick={() => setRunning(r => !r)}
-            className="px-5 py-2.5 rounded-xl bg-[#FF4F17] text-white text-[13px] font-semibold min-w-[104px]"
-          >
-            {running ? 'Pause' : 'Start'}
-          </button>
-          <button onClick={restart} className="px-4 py-2.5 rounded-xl border border-white/20 text-[13px]">
-            Restart
-          </button>
+      {/* Settings drawer — closed by default so the script owns the screen. */}
+      {showSettings && (
+        <div className="px-5 pb-3 space-y-3 flex-shrink-0 border-t border-white/10 pt-3">
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-white/50 w-11">Speed</span>
+            <input
+              type="range" min={WPM_MIN} max={WPM_MAX} step={5} value={wpm}
+              onChange={e => setWpm(Number(e.target.value))}
+              className="flex-1 h-8 accent-[#FF4F17]"
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-white/50 w-11">Size</span>
+            <input
+              type="range" min={SIZE_MIN} max={SIZE_MAX} step={2} value={size}
+              onChange={e => setSize(Number(e.target.value))}
+              className="flex-1 h-8 accent-[#FF4F17]"
+            />
+          </div>
           <button
             onClick={() => setMirrored(m => !m)}
-            className={`px-4 py-2.5 rounded-xl border text-[13px] ${mirrored ? 'border-[#FF4F17] text-[#FF4F17]' : 'border-white/20'}`}
-            title="For a teleprompter mirror rig"
+            className={`w-full py-2.5 rounded-xl border text-[13px] ${mirrored ? 'border-[#FF4F17] text-[#FF4F17]' : 'border-white/20 text-white/70'}`}
           >
-            Mirror
+            Mirror {mirrored ? 'on' : 'off'}
           </button>
-          <span className="text-[11px] text-white/40">Space = start/pause</span>
         </div>
+      )}
 
-        <div className="flex items-center gap-3">
-          <span className="text-[11px] text-white/50 w-16">Speed</span>
-          <input
-            type="range" min={WPM_MIN} max={WPM_MAX} step={5} value={wpm}
-            onChange={e => setWpm(Number(e.target.value))}
-            className="flex-1 accent-[#FF4F17]"
-          />
-          <span className="text-[11px] text-white/70 w-24 text-right tabular-nums">
-            {wpm} wpm · {Math.round((words / wpm) * 60)}s
-          </span>
-        </div>
-
-        {/* Read-aloud. Generated only on press — it costs ElevenLabs characters. */}
-        <div className="flex items-center gap-3 flex-wrap">
-          <span className="text-[11px] text-white/50 w-16">Voice</span>
-          <div className="flex gap-1.5">
-            {(['female', 'male'] as const).map(v => (
-              <button
-                key={v}
-                onClick={() => { setVoice(v); setAudioUrl(null) }}
-                className={`px-3 py-1.5 rounded-lg text-[12px] border capitalize ${
-                  voice === v ? 'border-[#FF4F17] text-[#FF4F17]' : 'border-white/20 text-white/70'
-                }`}
-              >
-                {v}
-              </button>
-            ))}
-          </div>
-          {audioUrl ? (
-            <audio ref={audioRef} src={audioUrl} controls className="h-9 flex-1 min-w-[220px]" />
-          ) : (
-            <button
-              onClick={loadVoice}
-              disabled={loadingAudio}
-              className="px-4 py-2 rounded-xl border border-white/20 text-[12px] disabled:opacity-50"
-            >
-              {loadingAudio ? 'Creating the read…' : 'Hear it read aloud'}
-            </button>
-          )}
-        </div>
-        {audioError && <p className="text-[12px] text-[#FCA5A5]">{audioError}</p>}
+      {/* Thumb-reach controls. 56px tall: comfortably tappable while standing
+          back from a propped-up phone. */}
+      <div className="flex items-stretch gap-2 px-4 pb-3 pt-2 flex-shrink-0">
+        <button
+          onClick={restart}
+          className="w-16 rounded-2xl border border-white/20 text-white/70 active:bg-white/10 flex items-center justify-center"
+          aria-label="Restart"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" />
+          </svg>
+        </button>
+        <button
+          onClick={() => setRunning(r => !r)}
+          className="flex-1 h-14 rounded-2xl bg-[#FF4F17] text-white text-[15px] font-semibold active:opacity-90"
+        >
+          {running ? 'Pause' : 'Start'}
+        </button>
       </div>
     </div>
   )
