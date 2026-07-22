@@ -65,20 +65,33 @@ export function Teleprompter({ hook, body, cta, onClose }: Props) {
 
   // Scroll at a pace derived from words-per-minute, measured against the real
   // rendered height so it holds for a long script and a short one alike.
+  //
+  // The position is accumulated in a NUMBER and assigned absolutely, never
+  // `scrollTop += step`. A readable pace is well under a pixel per frame (a 45s
+  // script is ~0.5px), and the browser rounds scrollTop to whole pixels — so
+  // the fraction was rounded away every frame and the script never moved at
+  // all. Keeping the true position in JS makes sub-pixel speeds work.
   useEffect(() => {
     if (!running) return
     const el = scrollRef.current
     if (!el) return
-    const totalPx = el.scrollHeight - el.clientHeight
-    if (totalPx <= 0) return
-    const pxPerMs = totalPx / (seconds * 1000)
+
     let raf = 0
     let last = performance.now()
+    let pos = el.scrollTop
+
     const tick = (t: number) => {
-      const dt = t - last
+      // Re-measure each frame: the height is not final on the first frame after
+      // a font or text-size change, and a stale total made the pace wrong.
+      const totalPx = el.scrollHeight - el.clientHeight
+      if (totalPx <= 0) { raf = requestAnimationFrame(tick); return }
+
+      const dt = Math.min(t - last, 100)   // ignore a long gap after a tab switch
       last = t
-      el.scrollTop += pxPerMs * dt
-      if (el.scrollTop >= totalPx - 1) setRunning(false)
+      pos += (totalPx / (seconds * 1000)) * dt
+      el.scrollTop = pos
+
+      if (pos >= totalPx - 1) setRunning(false)
       else raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
