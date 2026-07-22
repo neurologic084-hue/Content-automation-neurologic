@@ -28,9 +28,9 @@ import {
 } from './video-pipeline'
 import { VARIANT_SPECS, resolveSubmagicSettings } from './variant-specs'
 import { normalizeBrollSetting, normalizeBrollSource, submagicBrollKnobs } from './broll'
-import { explainFailure } from './error-explain'
+import { explainFailure, isTransientRenderError, isSubmagicHourlyCap } from './error-explain'
 import { patchVariant } from './job-lock'
-import { STALE_MS } from './stale-sweep'
+import { STALE_MS, autoRequeueVariant } from './stale-sweep'
 import type { ContentProfile } from './video-analysis'
 import type { MusicMode, VideoVariant } from './video-pipeline'
 
@@ -80,8 +80,18 @@ async function pollSubmagicUntilDone(
     }
 
     // Submagic itself reported a hard failure (not a transient poll blip —
-    // pollSubmagicJob already absorbs those as 'processing'). Surface its REAL
-    // reason on the card rather than a generic one.
+    // pollSubmagicJob already absorbs those as 'processing'). A TRANSIENT
+    // reason (its fetcher failed to pull our file, an hourly window) self-heals
+    // silently: fresh submission, card stays 'processing'. Only a real error —
+    // or a transient one that survived the whole self-heal budget — reaches
+    // the card, with Submagic's REAL reason rather than a generic one.
+    if (isTransientRenderError(result.error ?? '')) {
+      const { data: row } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+      const v = ((row?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
+      if (v && await autoRequeueVariant(db, jobId, v, `Submagic reported: ${String(result.error).slice(0, 120)}`, {
+        delayMs: isSubmagicHourlyCap(result.error) ? 50 * 60_000 : 2 * 60_000,
+      })) return
+    }
     await patchVariant(
       db,
       jobId,
@@ -498,7 +508,22 @@ export async function startSubmagicVariantTask(jobId: string, variantId: string,
       clearInterval(beat)
     }
   } catch (e) {
-    console.error(`[submagic-start] ${jobId}:${variantId} failed:`, (e as Error).message)
+    const raw = (e as Error).message ?? String(e)
+    console.error(`[submagic-start] ${jobId}:${variantId} failed:`, raw)
+    // A transient submission failure (rate/hourly window, an upstream fetch
+    // flake) self-heals: requeue silently via retry_at and keep the card on
+    // 'processing'. The watchdog sweep fires the queued retry — this task can
+    // die with the process and the schedule survives it. Only a failure that
+    // outlives the budget writes the honest card below.
+    try {
+      if (isTransientRenderError(raw)) {
+        const { data: row } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+        const v = ((row?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
+        if (v && await autoRequeueVariant(db, jobId, v, `submission failed: ${raw.slice(0, 120)}`, {
+          delayMs: isSubmagicHourlyCap(raw) ? 50 * 60_000 : 2 * 60_000,
+        })) return
+      }
+    } catch { /* fall through to the honest card */ }
     await patchVariant(db, jobId, variantId, { status: 'failed', error: explainFailure(e), progress: null })
   }
 }

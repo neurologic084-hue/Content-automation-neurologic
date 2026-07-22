@@ -13,6 +13,42 @@
 // Unknown errors fall through to a trimmed version of the original, so nothing is
 // ever hidden — we only ever REPLACE a message when we're confident what it means.
 
+// True when a failure is worth a SILENT automatic requeue rather than a card:
+// nothing about THIS video caused it — a box under momentary pressure, an
+// upstream fetch that flaked, a rate/hourly window. The classifier is the gate
+// for lib/stale-sweep.ts autoRequeueVariant, so keep it conservative: a string
+// added here means "retrying without telling anyone is the right response".
+// Real product errors (validation, bad links, empty accounts, broken keys)
+// must never match — silently retrying those just delays the honest card.
+export function isTransientRenderError(raw: unknown): boolean {
+  const low = (raw instanceof Error ? raw.message : String(raw ?? '')).toLowerCase()
+  if (!low) return false
+  // An empty account is not transient, whatever else the message says.
+  if (CREDIT_SIGNS.some(s => low.includes(s))) return false
+  return [
+    // machine pressure (the compositor/OOM family)
+    'resource temporarily unavailable', 'eagain', 'cannot allocate', 'out of memory', 'enomem', 'compositor error',
+    // network flakes
+    'econnreset', 'etimedout', 'socket hang up', 'fetch failed', 'bad record mac', 'network error',
+    // upstream fetch/download blips (incl. Submagic failing to pull our file —
+    // both at submit ("provided video url") and mid-render ("stalled in
+    // download phase", the chunk renderer waiting on a throttled asset))
+    'could not download the provided video url', 'download failed: http', 'could not download the footage',
+    'stalled in download',
+    // rate / hourly windows
+    'rate limit', 'too many requests', 'hourly', 'upload limit',
+    // killed mid-work
+    'timed out', 'server restarted',
+  ].some(s => low.includes(s))
+}
+
+// Submagic's per-plan hourly upload window: retrying in seconds only burns
+// budget — the requeue must wait for the window to reset.
+export function isSubmagicHourlyCap(raw: unknown): boolean {
+  const low = (raw instanceof Error ? raw.message : String(raw ?? '')).toLowerCase()
+  return low.includes('upload limit') || (low.includes('hourly') && low.includes('limit'))
+}
+
 export function explainFailure(raw: unknown): string {
   const msg = (raw instanceof Error ? raw.message : String(raw ?? '')).trim()
   if (!msg) return 'The render failed. Please retry this variant.'
@@ -68,7 +104,15 @@ export function explainFailure(raw: unknown): string {
   }
 
   // ── Submagic (v1-v3 captions/styling) ────────────────────────────────────────
-  if (mentions('submagic')) {
+  // Submagic's own failureReason strings don't contain the word "submagic", so
+  // its DISTINCTIVE phrases are matched too — otherwise they fell through to
+  // the raw-text trim and upstream API prose landed on client cards verbatim
+  // (observed: the hourly-limit and could-not-download reasons, 2026-07-22).
+  if (mentions('submagic', 'provided video url', 'hourly video upload', 'hourly upload limit')) {
+    if (mentions('upload limit', 'hourly'))
+      return "The editing engine's hourly upload window stayed full through several automatic retries. Wait a bit, then retry this version — nothing is lost."
+    if (mentions('provided video url', 'could not download'))
+      return 'The editing engine could not fetch the footage even after automatic retries — usually temporary hosting congestion. Retry this version in a few minutes.'
     // Deliberately NARROW. This used to match the bare word 'limit', which
     // appears in plenty of unrelated Submagic errors ("rate limit", "limit of
     // 100 items", a field-length complaint) — so ordinary failures were
@@ -121,6 +165,15 @@ export function explainFailure(raw: unknown): string {
   }
   if (mentions('github') && mentions('dispatch', 'actions'))
     return 'Could not reach the render host (GitHub). Retry; if it persists, check GITHUB_DISPATCH_TOKEN.'
+
+  // ── Render machine under momentary pressure (compositor / OOM family) ────────
+  // "Could not extract frame from compositor Error: Compositor error: Resource
+  // temporarily unavailable | [http://localhost:3000/proxy?src=…" reached a
+  // client card verbatim. It means the box was briefly overloaded — the
+  // in-process requeue and the sweep's self-heal normally absorb it, so by the
+  // time this maps to a card the retries are spent.
+  if (mentions('compositor', 'resource temporarily unavailable', 'cannot allocate', 'enomem'))
+    return 'The render machine was overloaded for a moment and had to stop this one. It recovers on its own — please retry this variant.'
 
   // ── Storage (R2) ─────────────────────────────────────────────────────────────
   if (mentions('could not upload', 'r2', 'bad record mac') || (mentions('storage') && mentions('fail')))

@@ -34,9 +34,73 @@ export const NO_HEARTBEAT_MS = 15 * 60 * 1000
 // bootstrap). A real render emits its first progress within a minute or two.
 export const NEVER_STARTED_MS = 12 * 60 * 1000
 
-// Fails every definitively-dead processing variant on one job. Returns how many
-// were swept (0 = nothing to do). Callers that hold a stale row should re-read
-// the job after a non-zero return.
+// ── Silent self-heal ─────────────────────────────────────────────────────────
+// A transient death (server restart mid-render, an upstream download flake, a
+// rate/hourly window) is not the client's problem and must not become their
+// error card. Instead of failing, requeue the task with the card still
+// 'processing' — up to this many times per variant. A HUMAN retry starts a
+// fresh budget (the start route resets auto_retries), so a person is never
+// locked out by exhausted automatic attempts.
+export const MAX_AUTO_RETRIES = 2
+
+// Same-process dedupe for firing a due retry_at (see the scheduler pass in
+// sweepStaleVariants): sweeps run concurrently from the watchdog and every
+// status poll, usually with stale snapshots of the variants array.
+const RETRY_DISPATCH_DEDUPE_MS = 10 * 60 * 1000
+const retryDispatchedAt = new Map<string, number>()
+
+/** Requeues one processing variant's task silently. Returns true when the
+ *  requeue was taken (caller must NOT fail the variant), false when the budget
+ *  is spent (caller proceeds to the honest failure card).
+ *  `delayMs` schedules the requeue via variant.retry_at instead of dispatching
+ *  now — for windows that need real waiting (Submagic's hourly upload cap).
+ *  The watchdog sweep (every 5 min) is the scheduler that fires those. */
+export async function autoRequeueVariant(
+  db: SupabaseClient,
+  jobId: string,
+  v: VideoVariant,
+  reason: string,
+  opts: { delayMs?: number } = {},
+): Promise<boolean> {
+  const used = v.auto_retries ?? 0
+  if (used >= MAX_AUTO_RETRIES) return false
+  const isSubmagic = v.tool === 'submagic'
+  const delayMs = opts.delayMs ?? 0
+  console.warn(`[self-heal] ${jobId}:${v.id}: ${reason} — silent requeue ${used + 1}/${MAX_AUTO_RETRIES}${delayMs ? ` in ~${Math.round(delayMs / 60000)}m` : ''}`)
+  try {
+    await patchVariant(db, jobId, v.id, {
+      status: 'processing',
+      auto_retries: used + 1,
+      // A dead Submagic project must not be reused; the fresh submission gets
+      // its own id. Clearing it also lets the start task's idempotency guard
+      // pass the resubmission through.
+      external_id: null,
+      error: null,
+      retry_at: delayMs ? new Date(Date.now() + delayMs).toISOString() : null,
+      progress: {
+        step: 1,
+        total: 4,
+        label: delayMs ? 'The editing engine is busy — retrying automatically' : 'Recovering — restarting this render',
+        at: new Date().toISOString(),
+      },
+    })
+    if (!delayMs) {
+      // Dynamic import for the same init-cycle reason as the rescue below.
+      const { dispatchPipelineTask } = await import('./sandbox-tasks')
+      await dispatchPipelineTask(isSubmagic
+        ? { task: 'start-submagic', jobId, variantId: v.id }
+        : { task: 'render-variant', jobId, variantId: v.id })
+    }
+    return true
+  } catch (e) {
+    console.warn(`[self-heal] requeue for ${jobId}:${v.id} failed — falling through to the failure card:`, (e as Error).message)
+    return false
+  }
+}
+
+// Fails every definitively-dead processing variant on one job — after giving
+// each its silent requeues. Returns how many were touched (0 = nothing to do).
+// Callers that hold a stale row should re-read the job after a non-zero return.
 export async function sweepStaleVariants(
   db: SupabaseClient,
   jobId: string,
@@ -46,8 +110,53 @@ export async function sweepStaleVariants(
   const now = Date.now()
   const jobAge = jobCreatedAt ? now - new Date(jobCreatedAt).getTime() : 0
 
+  // Deliberately-waiting variants first (retry_at set by a delayed requeue —
+  // e.g. parked on Submagic's hourly window). They are not dead, they are
+  // scheduled: fire the ones that are due, keep the rest visibly alive so the
+  // liveness check below can never sweep a variant that is just waiting.
+  let touched = 0
+  for (const v of variants ?? []) {
+    if (v.status !== 'processing' || !v.retry_at) continue
+    touched++
+    if (now >= new Date(v.retry_at).getTime()) {
+      // This sweep runs from several callers (the watchdog, every status GET),
+      // often with a stale variants snapshot — without the dedupe two sweeps
+      // racing past a due retry_at would BOTH dispatch, and a doubled Submagic
+      // submission is a doubled bill. numReplicas is pinned to 1, so a
+      // process-local window is a real guard, not a hopeful one.
+      const key = `${jobId}:${v.id}`
+      if (now - (retryDispatchedAt.get(key) ?? 0) < RETRY_DISPATCH_DEDUPE_MS) continue
+      retryDispatchedAt.set(key, now)
+      console.log(`[self-heal] ${jobId}:${v.id} wait is over — dispatching the queued retry`)
+      try {
+        await patchVariant(db, jobId, v.id, {
+          retry_at: null,
+          progress: { step: 1, total: 4, label: 'Recovering — restarting this render', at: new Date().toISOString() },
+        })
+        const { dispatchPipelineTask } = await import('./sandbox-tasks')
+        await dispatchPipelineTask(v.tool === 'submagic'
+          ? { task: 'start-submagic', jobId, variantId: v.id }
+          : { task: 'render-variant', jobId, variantId: v.id })
+      } catch (e) {
+        retryDispatchedAt.delete(key) // let the next sweep re-attempt
+        console.warn(`[self-heal] queued retry dispatch failed for ${jobId}:${v.id} (next sweep re-attempts):`, (e as Error).message)
+      }
+    } else {
+      // Tick the heartbeat so the wait reads as alive — but only every few
+      // minutes: the status route sweeps on every poll, and an unthrottled
+      // tick would write the row every few seconds for the whole wait.
+      const lastBeat = v.progress?.at ? new Date(v.progress.at).getTime() : 0
+      if (now - lastBeat > 4 * 60 * 1000) {
+        await patchVariant(db, jobId, v.id, {
+          progress: { ...(v.progress ?? { step: 1, total: 4, label: 'The editing engine is busy — retrying automatically' }), at: new Date().toISOString() },
+        }).catch(() => { /* keep-alive only */ })
+      }
+    }
+  }
+
   const stale = (variants ?? []).filter(v => {
     if (v.status !== 'processing') return false
+    if (v.retry_at) return false // scheduled wait, handled above
     if (!v.processing_started_at) {
       // Legacy rows predating the start stamp can't be aged per-variant; fall
       // back to job age so they don't dodge the sweep forever.
@@ -99,15 +208,19 @@ export async function sweepStaleVariants(
       } catch { /* poll failed — treat as dead, exactly as before */ }
     }
     const neverStarted = !v.progress
-    console.warn(
-      `[stale-sweep] variant ${jobId}:${v.id} ${
-        neverStarted
-          ? `never reported progress in ${NEVER_STARTED_MS / 60000}m`
-          : v.progress?.at
-            ? `silent for over ${NO_HEARTBEAT_MS / 60000}m (last: "${v.progress.label}")`
-            : `no heartbeat and processing past ${STALE_MS / 60000}m`
-      } — marking failed`,
-    )
+    const deathReason = neverStarted
+      ? `never reported progress in ${NEVER_STARTED_MS / 60000}m`
+      : v.progress?.at
+        ? `silent for over ${NO_HEARTBEAT_MS / 60000}m (last: "${v.progress.label}")`
+        : `no heartbeat and processing past ${STALE_MS / 60000}m`
+
+    // A quiet death is almost always transient (the server restarted, the box
+    // was overloaded) — the retry button would work, so press it ourselves.
+    // The card stays 'processing'; only a variant that dies repeatedly gets
+    // the honest failure below.
+    if (await autoRequeueVariant(db, jobId, v, deathReason)) continue
+
+    console.warn(`[stale-sweep] variant ${jobId}:${v.id} ${deathReason} — marking failed (self-heal budget spent)`)
     // patchVariant alerts ops on every status:'failed' write, so swept
     // variants notify Slack without extra plumbing here.
     await patchVariant(db, jobId, v.id, {
@@ -116,8 +229,9 @@ export async function sweepStaleVariants(
         ? 'This render never started — the machine that was supposed to pick it up never came up. Please retry it.'
         : 'This render stopped part-way through and went quiet, usually because the server restarted while it was working. Nothing is lost — press retry and it will pick up from the work already done.',
       progress: null,
+      retry_at: null,
     }, { completeWhenAllDone: true })
   }
 
-  return stale.length
+  return stale.length + touched
 }

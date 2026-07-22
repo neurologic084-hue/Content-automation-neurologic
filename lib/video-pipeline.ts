@@ -109,6 +109,18 @@ export interface VideoVariant extends VideoVariantDef {
   // reaches ready/failed. Lets the status route detect a variant whose worker
   // VM was killed before it could write its own failure (a silent forever-spin).
   processing_started_at?: string | null
+  // Silent self-heal bookkeeping (lib/stale-sweep.ts autoRequeueVariant): how
+  // many automatic requeues this variant has consumed. Transient failures —
+  // a server restart mid-render, an upstream download blip, a rate/hourly
+  // limit — requeue silently with the card still 'processing' instead of
+  // showing an error; only a failure that survives the budget reaches the
+  // client. Reset to 0 by a HUMAN retry (the start route), so a person always
+  // gets a fresh budget.
+  auto_retries?: number
+  // When set, the variant is deliberately WAITING (e.g. for Submagic's hourly
+  // upload window) and must not be liveness-swept; the watchdog sweep
+  // re-dispatches it once this ISO timestamp passes.
+  retry_at?: string | null
 }
 
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [

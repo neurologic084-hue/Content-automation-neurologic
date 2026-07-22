@@ -4,10 +4,10 @@ import { pollSubmagicJob, VARIANT_DEFINITIONS } from '@/lib/video-pipeline'
 import type { VideoVariant } from '@/lib/video-pipeline'
 import { releaseJobSource } from '@/lib/motion-renderer'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
-import { explainFailure } from '@/lib/error-explain'
+import { explainFailure, isTransientRenderError, isSubmagicHourlyCap } from '@/lib/error-explain'
 import { rendersDir } from '@/lib/paths'
 import { patchVariant } from '@/lib/job-lock'
-import { sweepStaleVariants } from '@/lib/stale-sweep'
+import { sweepStaleVariants, autoRequeueVariant } from '@/lib/stale-sweep'
 import fs from 'fs'
 import path from 'path'
 
@@ -223,10 +223,28 @@ export async function GET(
           )
         }
       } else if (poll.status === 'failed') {
-        target.status = 'failed'
-        target.error = explainFailure(poll.error)
-        target.progress = null
-        variantsChanged = true
+        // Transient reason → silent self-heal: fresh submission, card stays
+        // 'processing'. Mirror the helper's write into the local copy so the
+        // bulk update below persists the SAME state instead of clobbering it
+        // with this stale snapshot.
+        let healed = false
+        if (isTransientRenderError(poll.error ?? '')) {
+          healed = await autoRequeueVariant(supabase, jobId, target, `Submagic reported: ${String(poll.error).slice(0, 120)}`, {
+            delayMs: isSubmagicHourlyCap(poll.error) ? 50 * 60 * 1000 : 2 * 60 * 1000,
+          })
+          if (healed) {
+            const { data: fresh } = await supabase.from('video_jobs').select('variants').eq('id', jobId).single()
+            const fv = ((fresh?.variants ?? []) as VideoVariant[]).find((x) => x.id === target.id)
+            if (fv) Object.assign(target, fv)
+            variantsChanged = true
+          }
+        }
+        if (!healed) {
+          target.status = 'failed'
+          target.error = explainFailure(poll.error)
+          target.progress = null
+          variantsChanged = true
+        }
       }
     }
   }
