@@ -221,8 +221,9 @@ export async function sweepStaleVariants(
     if (await autoRequeueVariant(db, jobId, v, deathReason)) continue
 
     console.warn(`[stale-sweep] variant ${jobId}:${v.id} ${deathReason} — marking failed (self-heal budget spent)`)
-    // patchVariant alerts ops on every status:'failed' write, so swept
-    // variants notify Slack without extra plumbing here.
+    // NOTE: no ops alerting exists yet (an earlier comment here claimed Slack
+    // alerts fire on failed writes — it never did). Failures are visible in
+    // logs and on the card only; wiring a real alert is on the ops wishlist.
     await patchVariant(db, jobId, v.id, {
       status: 'failed',
       error: neverStarted

@@ -106,9 +106,9 @@ export function explainFailure(raw: unknown): string {
   // ── OpenRouter / Gemini (video analysis, cut plan, b-roll, graphics) ──────────
   if (mentions('openrouter', 'gemini')) {
     if (has(402) || mentions('insufficient', 'credit', 'payment required', 'quota', 'balance'))
-      return 'AI service (OpenRouter) is out of credits. Add credits at openrouter.ai, then retry.'
+      return 'The AI that plans your edit has run out of credits. Let your editor know — once topped up, press retry and it picks up where it stopped. (OpenRouter)'
     if (has(401) || has(403) || mentions('invalid api key', 'no auth', 'unauthorized'))
-      return 'AI service key (OpenRouter) is invalid or missing. Check OPENROUTER_API_KEY.'
+      return "The AI planner's account connection stopped working, so nothing can render until it is fixed. This one is for your editor — nothing to do from your side. (OpenRouter API key)"
     if (has(429) || mentions('rate limit', 'rate-limit', 'too many requests'))
       return 'AI service (OpenRouter) is rate-limited right now. Wait a minute, then retry.'
     return 'AI service (OpenRouter) had an error. Retry; if it persists, check your OpenRouter account.'
@@ -131,9 +131,9 @@ export function explainFailure(raw: unknown): string {
     // billing page for no reason. Only claim a plan/usage problem when the
     // message actually says so.
     if (has(402) || mentions('upgrade your plan', 'plan limit', 'usage limit', 'requires a higher plan', 'exceeded your plan', 'out of credits', 'insufficient credits'))
-      return 'Your Submagic plan or usage limit has been reached, so this edit could not be made. Check your Submagic account, then retry this version.'
+      return "The caption engine's plan has hit its limit, so this version could not be made. Nothing is lost — let your editor know, and once the plan is topped up press retry. (Submagic plan limit)"
     if (has(401) || has(403) || mentions('unauthorized', 'api key', 'api-key', 'invalid key'))
-      return 'Submagic key is invalid. Check SUBMAGIC_API_KEY.'
+      return "The caption engine's account connection stopped working, so these versions cannot render until it is fixed. This one is for your editor. (Submagic API key)"
     if (has(429) || mentions('rate limit', 'too many requests'))
       return 'Submagic is rate-limited right now. Wait a minute, then retry.'
     // Unknown Submagic failure: say what we actually know rather than
@@ -149,9 +149,9 @@ export function explainFailure(raw: unknown): string {
     // time. The body carries quota_exceeded / "credits remaining"; trust that
     // over the status code.
     if (mentions('quota', 'credits remaining', 'exceeds your quota', 'quota_exceeded'))
-      return 'ElevenLabs is out of credits (transcription). Top up at elevenlabs.io, then retry.'
+      return 'The transcription service has run out of credits. Let your editor know — the backup usually covers it, so retry this version. (ElevenLabs)'
     if (has(401) || has(403) || mentions('invalid api key', 'unauthorized', 'missing_permissions'))
-      return 'ElevenLabs key is invalid or lacks permissions. Check ELEVENLABS_API_KEY.'
+      return "The transcription service's account connection stopped working. This one is for your editor — retry after it is fixed. (ElevenLabs API key)"
     if (has(429) || mentions('rate limit', 'too many requests', 'concurrent'))
       return 'ElevenLabs is rate-limited (too many renders at once). Wait a moment, then retry.'
     if (mentions('limit', 'exceeded'))
@@ -164,7 +164,7 @@ export function explainFailure(raw: unknown): string {
   // Auphonic embeds HTML links in its messages, which looked like gibberish.
   if (mentions('auphonic')) {
     if (has(401) || has(403) || mentions('unauthorized', 'invalid token'))
-      return 'Auphonic key is invalid. Check AUPHONIC_API_TOKEN.'
+      return "The audio cleaner's account connection stopped working — your video continues on the backup cleaner. Worth mentioning to your editor. (Auphonic API key)"
     return 'Auphonic (backup audio cleanup) failed — the render continues on the ElevenLabs fallback.'
   }
 
@@ -220,24 +220,24 @@ const CREDIT_SIGNS = [
 function outOfCredits(low: string): string | null {
   if (!CREDIT_SIGNS.some(s => low.includes(s))) return null
   if (low.includes('auphonic'))
-    return 'Auphonic has run out of credits, so it could not clean up the audio. This did not stop your video — the backup cleaner handled it instead, though it removes less background noise. Topping up restores the better one.'
+    return 'The audio cleaner has run out of credits. This did not stop your video — the backup cleaner handled it instead, though it removes less background noise. A top-up restores the better one; worth mentioning to your editor. (Auphonic)'
   if (low.includes('elevenlabs') || low.includes('eleven labs') || low.includes('scribe')) {
     // Same account, two very different jobs — say which one stopped, because
     // the consequences differ: sound effects self-synthesise and the render is
     // fine, transcription falls back to Whisper.
     if (low.includes('sound-generation') || low.includes('sound effect'))
-      return 'ElevenLabs has run out of credits, so it could not generate sound effects. This did not stop your video — the sound effects were built locally instead, which sounds simpler but works fine. Topping up restores the richer library.'
-    return 'ElevenLabs has run out of credits, so it could not transcribe your footage. This did not stop your video — the backup transcriber handled it instead. Topping up restores the more accurate one.'
+      return 'The sound-effects service has run out of credits. This did not stop your video — the effects were built locally instead, which sounds a little simpler but works fine. A top-up restores the richer library; worth mentioning to your editor. (ElevenLabs)'
+    return 'The transcription service has run out of credits. This did not stop your video — the backup transcriber handled it instead. A top-up restores the more accurate one; worth mentioning to your editor. (ElevenLabs)'
   }
   if (low.includes('openrouter') || low.includes('gemini') || low.includes('whisper'))
-    return 'The AI service has run out of credits. This one has no backup left, so the video could not be finished — it plans the cuts, picks the B-roll and writes the captions. Add credits and retry, and it will pick up from where it stopped.'
+    return 'The AI that plans your edit has run out of credits — it decides the cuts, the B-roll and the captions, and it has no backup. Your footage is safe; let your editor know, and once the account is topped up press retry — it picks up right where it stopped. (OpenRouter)'
   if (low.includes('submagic'))
-    return 'Submagic plan or usage limit reached. Check your Submagic plan, then retry.'
+    return 'The caption engine\'s plan has hit its limit, so this version could not be made. Nothing is lost — let your editor know, and once the plan is topped up press retry. (Submagic plan limit)'
   if (low.includes('pexels'))
-    return 'Pexels hourly quota reached (stock B-roll). It resets on the hour — retry then.'
+    return 'The stock-footage library has hit its hourly limit. It resets on the hour — retry this version then. (Pexels)'
   if (low.includes('vercel') || low.includes('sandbox'))
-    return 'Render host (Vercel) hit a billing/usage limit. Raise the spend cap, then retry.'
-  return 'A service ran out of credits. Check your provider accounts (OpenRouter, ElevenLabs, Auphonic, Submagic), then retry.'
+    return 'The rendering service hit its usage limit, so this version could not start. Let your editor know — once the cap is raised, press retry. (Vercel)'
+  return 'One of the editing services has run out of credits, so this step could not finish. Nothing is lost — let your editor know, and after a top-up press retry to pick up where it stopped.'
 }
 
 function trim(msg: string): string {
