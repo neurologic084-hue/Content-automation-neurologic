@@ -1191,6 +1191,25 @@ const TABS_PER_RENDER = Number(process.env.RENDER_TABS) || 4
 // lower (~24GB). Sizing renders off the host would spawn dozens of Chrome
 // instances into a 24GB cap and OOM-kill the lot. Read the cgroup limits the
 // kernel actually enforces; fall back to os values only when unreadable.
+// Memory actually in use right now, inside the container. os.freemem() reports
+// the HOST's free memory (384GB here) which is meaningless for a 22GB
+// container, so read the cgroup instead. null when unreadable.
+function containerUsedGb(): number | null {
+  for (const f of ['/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory/memory.usage_in_bytes']) {
+    try {
+      const bytes = Number(fs.readFileSync(f, 'utf8').trim())
+      if (Number.isFinite(bytes) && bytes > 0) return bytes / 1024 ** 3
+    } catch { /* not this cgroup version */ }
+  }
+  return null
+}
+
+/** Headroom left in the container, or null when it cannot be measured. */
+export function containerFreeGb(): number | null {
+  const used = containerUsedGb()
+  return used === null ? null : Math.max(0, containerMemoryGb() - used)
+}
+
 export function containerMemoryGb(): number {
   const host = os.totalmem() / 1024 ** 3
   for (const f of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
@@ -1277,7 +1296,14 @@ export function renderConcurrency(): number {
   const cores = containerCores()
   const gb = containerMemoryGb()
   const byCpu = cores - 2               // leave room for ffmpeg + compositor
-  const byMem = Math.floor(gb / 2.5)    // ~2.5GB of headroom per tab
+  // Reserve memory for everything that ISN'T a Chrome tab before dividing what
+  // is left among tabs: the ffmpeg encode, the Remotion compositor, and the web
+  // server itself all live in this container. Dividing TOTAL memory by the
+  // per-tab budget planned 8 tabs on a 22GB box — ~20GB of tabs with ~2GB left
+  // for everything else — and the box tipped over mid-render (job 17e0b879 lost
+  // v5 and v6 that way). Budget from what is actually spare.
+  const RESERVED_GB = 6
+  const byMem = Math.floor(Math.max(1, gb - RESERVED_GB) / 2.5)
   // The ceiling scales with the machine so a big Railway instance is actually
   // used: 6 tabs was tuned on 4-core CI runners, and pinning a 16-core box to
   // it leaves most of the paid machine idle. Memory stays the binding guard —
@@ -2092,6 +2118,30 @@ async function withRenderSlot<T>(jobId: string, variantId: string, fn: () => Pro
     beat.unref?.()
   }
   await acquireRenderSlot()
+
+  // Holding a slot is not the same as having room to use it. The slot count is
+  // arithmetic done at startup; this checks the box as it ACTUALLY is right
+  // now. A render that starts into a nearly-full container is the one that dies
+  // with "resource temporarily unavailable" — and retrying it immediately just
+  // repeats that. Waiting a minute for the render ahead to finish costs
+  // nothing; failing does. Skips entirely where the cgroup is unreadable.
+  const NEED_FREE_GB = 4
+  const WAIT_LIMIT_MS = 10 * 60_000
+  const waitedFrom = Date.now()
+  while (Date.now() - waitedFrom < WAIT_LIMIT_MS) {
+    const free = containerFreeGb()
+    if (free === null || free >= NEED_FREE_GB) break
+    if (!beat) {
+      await setVariantProgress(jobId, variantId, 5, 100, 'Waiting for memory to free up').catch(() => {})
+      beat = setInterval(() => {
+        void setVariantProgress(jobId, variantId, 5, 100, 'Waiting for memory to free up').catch(() => {})
+      }, 60_000)
+      beat.unref?.()
+    }
+    console.log(`[motion-renderer] ${variantId} holding: only ${free.toFixed(1)}GB free, need ${NEED_FREE_GB}GB`)
+    await new Promise(r => setTimeout(r, 20_000))
+  }
+
   if (beat) clearInterval(beat)
   try {
     return await fn()
@@ -3474,10 +3524,10 @@ export async function runSingleVariant(
     const msg = (e as Error).message || ''
     const transient = /resource temporarily unavailable|eagain|cannot allocate|out of memory|oom|enomem|compositor error|econnreset|socket hang up|spawn|timed out/i.test(msg)
     const attempt = (opts.__resourceRetry ?? 0)
-    if (transient && attempt < 2) {
-      console.warn(`[motion-renderer] transient overload on ${variantId} (attempt ${attempt + 1}/2): ${msg.slice(0, 120)} — backing off and requeueing`)
+    if (transient && attempt < 4) {
+      console.warn(`[motion-renderer] transient overload on ${variantId} (attempt ${attempt + 1}/4): ${msg.slice(0, 120)} — backing off and requeueing`)
       await setVariantProgress(jobId, variantId, 5, 100, 'Waiting for a free render slot').catch(() => {})
-      await new Promise(r => setTimeout(r, 15_000 * (attempt + 1)))
+      await new Promise(r => setTimeout(r, 20_000 * (attempt + 1) * (attempt + 1)))
       active.delete(key)
       if (timeoutId) clearTimeout(timeoutId)
       return runSingleVariant(jobId, variantId, sourceUrl, { ...opts, __resourceRetry: attempt + 1 })

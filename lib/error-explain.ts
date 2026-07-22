@@ -198,7 +198,7 @@ export function explainFailure(raw: unknown): string {
   // in-process requeue and the sweep's self-heal normally absorb it, so by the
   // time this maps to a card the retries are spent.
   if (mentions('compositor', 'resource temporarily unavailable', 'cannot allocate', 'enomem'))
-    return 'The render machine was overloaded for a moment and had to stop this one. It recovers on its own — please retry this variant.'
+    return 'This one ran out of room while several videos were rendering at once. It already waited and tried again a few times. Press retry and it will pick up from the work already done.'
 
   // ── Storage (R2) ─────────────────────────────────────────────────────────────
   if (mentions('could not upload', 'r2', 'bad record mac') || (mentions('storage') && mentions('fail')))

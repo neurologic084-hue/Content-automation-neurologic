@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import type { Script } from '@/lib/types'
 import { PulseLoader, PulseOverlay } from '@/components/pulse-loader'
+import { Teleprompter } from '@/components/teleprompter'
 
 const LANE_LABEL: Record<string, string> = {
   adhd_parents: 'ADHD Parents',
@@ -35,6 +36,7 @@ export default function ScriptDetailPage() {
   const [revisionError, setRevisionError] = useState('')
   const [copyLabel, setCopyLabel] = useState('Copy script')
   const [showApprovedModal, setShowApprovedModal] = useState(false)
+  const [showPrompter, setShowPrompter] = useState(false)
   const [editing, setEditing] = useState(false)
   const [editHook, setEditHook] = useState('')
   const [editBody, setEditBody] = useState('')
@@ -199,6 +201,19 @@ export default function ScriptDetailPage() {
 
   return (
     <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">
+      {/* Filming aid: scrolls the script at a set pace, with an optional
+          read-aloud. Available on any script, since she may want to rehearse
+          before approving it. */}
+      {showPrompter && (
+        <Teleprompter
+          scriptId={script.id}
+          hook={script.hook}
+          body={script.body}
+          cta={script.cta}
+          onClose={() => setShowPrompter(false)}
+        />
+      )}
+
       {/* Training overlay — shown briefly after approving */}
       {training && (
         <PulseOverlay
@@ -361,6 +376,19 @@ export default function ScriptDetailPage() {
 
       {/* Script   numbered beats, no dividers */}
       <div className="animate-fadeInUp bg-white border border-[#E4E4E0] rounded-2xl mb-5 px-4 sm:px-6 py-4 sm:py-5 space-y-5 sm:space-y-6" style={{ animationDelay: '120ms' }}>
+
+        {/* Filming aid. Sits at the top of the script itself, because that is
+            where she is standing when she needs it. */}
+        <button
+          onClick={() => setShowPrompter(true)}
+          className="w-full py-2.5 rounded-xl border border-[#E4E4E0] text-[13px] font-semibold text-[#18181B] hover:bg-[#FAFAF9] transition-colors flex items-center justify-center gap-2"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="4" width="20" height="14" rx="2" />
+            <path d="M6 9h12M6 13h8" />
+          </svg>
+          Read it on camera
+        </button>
 
         {/* 1   Hook */}
         <div className="animate-fadeInUp flex items-start gap-3 sm:gap-4" style={{ animationDelay: '160ms' }}>
