@@ -90,6 +90,7 @@ async function pollSubmagicUntilDone(
       const v = ((row?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
       if (v && await autoRequeueVariant(db, jobId, v, `Submagic reported: ${String(result.error).slice(0, 120)}`, {
         delayMs: isSubmagicHourlyCap(result.error) ? 50 * 60_000 : 2 * 60_000,
+        freePark: isSubmagicHourlyCap(result.error),
       })) return
     }
     await patchVariant(
@@ -521,6 +522,7 @@ export async function startSubmagicVariantTask(jobId: string, variantId: string,
         const v = ((row?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
         if (v && await autoRequeueVariant(db, jobId, v, `submission failed: ${raw.slice(0, 120)}`, {
           delayMs: isSubmagicHourlyCap(raw) ? 50 * 60_000 : 2 * 60_000,
+          freePark: isSubmagicHourlyCap(raw),
         })) return
       }
     } catch { /* fall through to the honest card */ }

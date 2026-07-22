@@ -43,6 +43,14 @@ export const NEVER_STARTED_MS = 12 * 60 * 1000
 // locked out by exhausted automatic attempts.
 export const MAX_AUTO_RETRIES = 2
 
+// Waiting out a known WINDOW (Submagic's hourly upload cap) is not a retry —
+// nothing was spent and nothing can be made worse by waiting — so parks get
+// their own, larger budget instead of consuming MAX_AUTO_RETRIES. Sized for a
+// genuinely saturated day: 6 parks ≈ 5+ hours of patient resubmission before
+// the honest card. Without this, a 100-video burst exhausted the tail's two
+// retries on parking alone while the window was still full.
+export const MAX_FREE_PARKS = 6
+
 // Same-process dedupe for firing a due retry_at (see the scheduler pass in
 // sweepStaleVariants): sweeps run concurrently from the watchdog and every
 // status poll, usually with stale snapshots of the variants array.
@@ -60,17 +68,20 @@ export async function autoRequeueVariant(
   jobId: string,
   v: VideoVariant,
   reason: string,
-  opts: { delayMs?: number } = {},
+  opts: { delayMs?: number; freePark?: boolean } = {},
 ): Promise<boolean> {
-  const used = v.auto_retries ?? 0
-  if (used >= MAX_AUTO_RETRIES) return false
+  // freePark (a scheduled wait on a known window, e.g. the hourly upload cap)
+  // draws on its own budget — see MAX_FREE_PARKS above.
+  const used = opts.freePark ? (v.park_count ?? 0) : (v.auto_retries ?? 0)
+  const budget = opts.freePark ? MAX_FREE_PARKS : MAX_AUTO_RETRIES
+  if (used >= budget) return false
   const isSubmagic = v.tool === 'submagic'
   const delayMs = opts.delayMs ?? 0
-  console.warn(`[self-heal] ${jobId}:${v.id}: ${reason} — silent requeue ${used + 1}/${MAX_AUTO_RETRIES}${delayMs ? ` in ~${Math.round(delayMs / 60000)}m` : ''}`)
+  console.warn(`[self-heal] ${jobId}:${v.id}: ${reason} — ${opts.freePark ? 'park' : 'silent requeue'} ${used + 1}/${budget}${delayMs ? ` in ~${Math.round(delayMs / 60000)}m` : ''}`)
   try {
     await patchVariant(db, jobId, v.id, {
       status: 'processing',
-      auto_retries: used + 1,
+      ...(opts.freePark ? { park_count: used + 1 } : { auto_retries: used + 1 }),
       // A dead Submagic project must not be reused; the fresh submission gets
       // its own id. Clearing it also lets the start task's idempotency guard
       // pass the resubmission through.

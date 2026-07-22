@@ -121,6 +121,10 @@ export interface VideoVariant extends VideoVariantDef {
   // upload window) and must not be liveness-swept; the watchdog sweep
   // re-dispatches it once this ISO timestamp passes.
   retry_at?: string | null
+  // How many scheduled waits (parks) on a known window this variant has taken —
+  // budgeted separately from auto_retries (lib/stale-sweep.ts MAX_FREE_PARKS):
+  // waiting spends nothing, so it gets a larger allowance.
+  park_count?: number
 }
 
 export const VARIANT_DEFINITIONS: VideoVariantDef[] = [

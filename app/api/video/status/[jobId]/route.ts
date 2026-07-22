@@ -231,6 +231,7 @@ export async function GET(
         if (isTransientRenderError(poll.error ?? '')) {
           healed = await autoRequeueVariant(supabase, jobId, target, `Submagic reported: ${String(poll.error).slice(0, 120)}`, {
             delayMs: isSubmagicHourlyCap(poll.error) ? 50 * 60 * 1000 : 2 * 60 * 1000,
+            freePark: isSubmagicHourlyCap(poll.error),
           })
           if (healed) {
             const { data: fresh } = await supabase.from('video_jobs').select('variants').eq('id', jobId).single()

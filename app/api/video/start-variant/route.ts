@@ -132,7 +132,7 @@ export async function POST(req: NextRequest) {
       supabase,
       jobId,
       variantId,
-      { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, auto_retries: 0, retry_at: null },
+      { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, auto_retries: 0, retry_at: null, park_count: 0 },
       { jobStatus: 'processing' },
     )
 
@@ -201,7 +201,7 @@ export async function POST(req: NextRequest) {
       supabase,
       jobId,
       variantId,
-      { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, auto_retries: 0, retry_at: null, progress: { step: 1, total: 4, label: 'Sending your footage' } },
+      { status: 'processing', external_id: null, preview_url: null, download_url: null, error: null, auto_retries: 0, retry_at: null, park_count: 0, progress: { step: 1, total: 4, label: 'Sending your footage' } },
       { jobStatus: 'processing' },
     )
 

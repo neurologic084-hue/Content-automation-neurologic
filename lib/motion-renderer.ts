@@ -765,6 +765,25 @@ export async function getSubmagicSourceUrl(jobId: string, rawSourceUrl: string):
 export async function releaseJobSource(jobId: string): Promise<void> {
   submagicSourceCache.delete(jobId)
   await deleteStorageKey(`${jobId}/source-compressed.mp4`)
+  // Local working files too: each prepped job parks ~0.5-1GB of intermediates
+  // (raw download, compressed, cleaned, cut copies) on the container's disk,
+  // and at batch scale (~17 jobs = 10-17GB) disk becomes the wall before
+  // memory does. Everything durable already lives in R2, and every consumer
+  // self-heals from R2 on a fresh disk — deleting these is the same situation
+  // as a restart, which the pipeline already survives. Finished variant files
+  // are deliberately NOT touched: a render whose R2 upload failed serves its
+  // video from this directory.
+  try {
+    const dir = rendersDir(jobId)
+    if (!fs.existsSync(dir)) return
+    const WORKING = /^(source\.(mp4|download)|source-compressed.*\.mp4|source-clean\.mp4|source-cut[^/]*\.mp4|analysis-sample\.mp4|[^/]*\.part)$/
+    for (const f of fs.readdirSync(dir)) {
+      if (WORKING.test(f)) {
+        try { fs.unlinkSync(path.join(dir, f)) } catch { /* best-effort */ }
+      }
+    }
+    console.log(`[motion-renderer] cleared working files for completed job ${jobId.slice(0, 8)}`)
+  } catch { /* best-effort — a restart wipes the disk anyway */ }
 }
 
 const contentProfileCache = (g.__olyContentProfiles ??= new Map<string, Promise<ContentProfile>>())
@@ -1234,15 +1253,18 @@ export function renderSlots(): number {
   const forced = Number(process.env.RENDER_SLOTS)
   if (Number.isFinite(forced) && forced >= 1) return Math.floor(forced)
 
-  const cores = Math.max(1, os.cpus().length)
-  const gb = os.totalmem() / 1024 ** 3
+  // CONTAINER numbers, not host: os.cpus()/os.totalmem() inside a container
+  // report the underlying Railway machine (48 cores, host RAM), and sizing
+  // slots off those admitted up to 11 concurrent renders x ~7GB against a
+  // ~22GB cgroup — the exact oversubscription the admission queue exists to
+  // prevent. containerCores/containerMemoryGb read the cgroup limits the
+  // kernel actually enforces (and fall back to host figures outside one).
+  const cores = containerCores()
+  const gb = containerMemoryGb()
   // Budget per concurrent render, with tabs already shrinking as slots grow:
-  // ~3 cores (Chrome + compositor + the ffmpeg encode) and ~6GB. Memory is the
-  // one that actually kills — an OOM-reaped render loses the work, whereas
-  // being short on cores only makes it slower.
-  // Budget per concurrent render: ~4 cores (its Chrome tabs + the compositor +
-  // an ffmpeg encode) and ~7GB. Memory is the one that actually kills — an
-  // OOM-reaped render loses the work; short cores only make it slower.
+  // ~4 cores (its Chrome tabs + the compositor + an ffmpeg encode) and ~7GB.
+  // Memory is the one that actually kills — an OOM-reaped render loses the
+  // work; short cores only make it slower.
   const byCpu = Math.floor((cores - 1) / 4)
   const byMem = Math.floor(gb / 7)
   // No arbitrary ceiling any more: on a big box this is meant to go wide. The
@@ -3409,12 +3431,18 @@ export async function runSingleVariant(
   // the same safety timeout in case transcription, Remotion, or FFmpeg ever hangs.
   const isTestOnly = opts.captionTestOnly || opts.motionGraphicsTestOnly
   const TIMEOUT_MS = isTestOnly ? 5 * 60 * 1000 : 30 * 60 * 1000
-  const timeoutId = setTimeout(() => {
-    console.error(`[motion-renderer] variant ${variantId} timed out`)
-    markVariant(jobId, variantId, 'failed', null, 'Render timed out').catch(() => {})
-  }, TIMEOUT_MS)
+  // Armed when the render actually STARTS (inside its admission slot), not at
+  // task entry. Armed early, the timer counted queue time: under a big burst
+  // the tail of the FIFO waits hours for a slot, and every queued variant past
+  // the first waves was falsely failed "Render timed out" while doing exactly
+  // what it was told — waiting its turn.
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
 
   const launch = async () => {
+    timeoutId = setTimeout(() => {
+      console.error(`[motion-renderer] variant ${variantId} timed out`)
+      markVariant(jobId, variantId, 'failed', null, 'Render timed out').catch(() => {})
+    }, TIMEOUT_MS)
     if (opts.captionTestOnly) {
       await renderCaptionTestOnly(jobId, variantId, sourceUrl, outDir, opts.moodTag, opts.scriptFormat)
       return
@@ -3451,13 +3479,13 @@ export async function runSingleVariant(
       await setVariantProgress(jobId, variantId, 5, 100, 'Waiting for a free render slot').catch(() => {})
       await new Promise(r => setTimeout(r, 15_000 * (attempt + 1)))
       active.delete(key)
-      clearTimeout(timeoutId)
+      if (timeoutId) clearTimeout(timeoutId)
       return runSingleVariant(jobId, variantId, sourceUrl, { ...opts, __resourceRetry: attempt + 1 })
     }
     console.error('[motion-renderer] runSingleVariant fatal:', e)
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message || 'The render failed to start. Please retry this variant.').catch(() => {})
   } finally {
-    clearTimeout(timeoutId)
+    if (timeoutId) clearTimeout(timeoutId)
     active.delete(key)
   }
 }
@@ -3873,9 +3901,61 @@ export async function refreshPrecutForRetry(jobId: string, sourceUrl: string): P
   }
 }
 
+// ── Prep queue ───────────────────────────────────────────────────────────────
+// Source prep is the one heavy stage with no capacity gate: five jobs
+// submitted together used to run five concurrent ffmpeg encodes + Auphonic +
+// transcriptions on one box, and the resulting memory pressure is a likely
+// parent of the "went quiet" restarts. Renders already queue on cgroup-sized
+// slots (withRenderSlot); this is the same idea for prep. Excess jobs wait
+// with a truthful card ("Waiting in line…"), pending variants are never
+// swept (the sweep only ages 'processing'), and the queue is FIFO. Pinned on
+// globalThis so a dev-server hot reload cannot fork the gate.
+const PREP_CONCURRENCY = Math.max(1, Number(process.env.PREP_CONCURRENCY ?? 2))
+const gPrepGate = (globalThis as unknown as {
+  __olyPrepGate?: { active: number; queue: Array<() => void> }
+}).__olyPrepGate ??= { active: 0, queue: [] }
+
+async function acquirePrepSlot(): Promise<boolean> {
+  if (gPrepGate.active < PREP_CONCURRENCY) {
+    gPrepGate.active++
+    return false // ran immediately, never queued
+  }
+  await new Promise<void>(resolve => gPrepGate.queue.push(resolve))
+  gPrepGate.active++
+  return true
+}
+function releasePrepSlot(): void {
+  gPrepGate.active = Math.max(0, gPrepGate.active - 1)
+  gPrepGate.queue.shift()?.()
+}
+
 export async function prepareJobSourceTask(jobId: string, sourceUrl: string): Promise<void> {
   const db = supabaseAdmin()
 
+  // Queue BEFORE any work. When the gate is full, say so on the cards — a
+  // client watching "Waiting in line — other videos are being prepared" trusts
+  // the wait; one watching a frozen bar does not.
+  if (gPrepGate.active >= PREP_CONCURRENCY) {
+    await withJobLock(jobId, async () => {
+      const { data: row } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+      const waiting = ((row?.variants ?? []) as VideoVariant[]).map(v => (
+        v.status === 'pending'
+          ? { ...v, progress: { step: 2, total: 100, label: 'Waiting in line — other videos are being prepared', at: new Date().toISOString() } }
+          : v
+      ))
+      await db.from('video_jobs').update({ variants: waiting }).eq('id', jobId)
+    }).catch(() => { /* cosmetic only */ })
+  }
+  const waited = await acquirePrepSlot()
+  if (waited) console.log(`[prep-queue] job ${jobId.slice(0, 8)} waited for a prep slot — starting now`)
+  try {
+    await prepareJobSourceTaskInner(jobId, sourceUrl, db)
+  } finally {
+    releasePrepSlot()
+  }
+}
+
+async function prepareJobSourceTaskInner(jobId: string, sourceUrl: string, db: ReturnType<typeof supabaseAdmin>): Promise<void> {
   let lastProgressWrite = 0
   const writePrepProgress = async (percent: number, label: string) => {
     const now = Date.now()
