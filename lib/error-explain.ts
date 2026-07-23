@@ -35,6 +35,12 @@ export function isTransientRenderError(raw: unknown): boolean {
     // download phase", the chunk renderer waiting on a throttled asset))
     'could not download the provided video url', 'download failed: http', 'could not download the footage',
     'stalled in download',
+    // Submagic's own words when ITS server fails to save the source it just
+    // pulled from our storage — verbatim: "Failed to store the downloaded
+    // file. Please try again." Their message literally advises a retry, but it
+    // was being treated as permanent, so the creator got a dead card for a
+    // blip on their side. (Observed on project 19526414, 2026-07-22.)
+    'failed to store the downloaded file',
     // rate / hourly windows
     'rate limit', 'too many requests', 'hourly', 'upload limit',
     // killed mid-work
@@ -192,7 +198,7 @@ export function explainFailure(raw: unknown): string {
   // in-process requeue and the sweep's self-heal normally absorb it, so by the
   // time this maps to a card the retries are spent.
   if (mentions('compositor', 'resource temporarily unavailable', 'cannot allocate', 'enomem'))
-    return 'The render machine was overloaded for a moment and had to stop this one. It recovers on its own — please retry this variant.'
+    return 'This one ran out of room while several videos were rendering at once. It already waited and tried again a few times. Press retry and it will pick up from the work already done.'
 
   // ── Storage (R2) ─────────────────────────────────────────────────────────────
   if (mentions('could not upload', 'r2', 'bad record mac') || (mentions('storage') && mentions('fail')))

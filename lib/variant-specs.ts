@@ -77,14 +77,14 @@ export const VARIANT_SPECS: Record<string, VariantSpec> = {
     // Caption pool swapped (was Umi/Gstaad/Malta/Nema) after "the captions
     // cover her face" on v1. The API exposes no caption-position control, so
     // the template IS the only lever over how the text sits — and the owner's
-    // call was to keep the zooms and change the font. Jack leads by the
+    // call was to keep the zooms and change the font. Iman leads by the
     // owner's latest pick (they also tried "Kelly 3", which does not exist on the
     // account — Kelly 2 is the only Kelly). Kelly 2/Iman/Ali stay as the clean
     // backups, validated against the account's template list at submit time
     // like every pool. If the band still bothers her, the one
     // remaining lever is a custom theme made in the Submagic dashboard
     // (userThemeId) — captions can be dragged anywhere there.
-    templatePool: ['Jack', 'Kelly 2', 'Iman', 'Ali'],
+    templatePool: ['Iman', 'Jack', 'Kelly 2', 'Ali'],
     locked: { magicZooms: true, hookTitle: false, basePace: 'extra-fast' },
     adaptive: { brollCeiling: { none: 46, some: 48, rich: 49 } },
     useMusic: true,

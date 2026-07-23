@@ -144,7 +144,7 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
   const numbered = words.map((w, i) => `${i}:${w.text}`).join(' ')
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.1,
       max_tokens: 500,
       json: true,
@@ -260,6 +260,60 @@ export function findStutterDrops(words: WordTimestamp[], dropped: ReadonlySet<nu
     out.push(i)
   }
   return out
+}
+
+// Self-corrections: she starts a phrase, gets a word wrong, and immediately
+// restarts it correctly — "for higher, for high achievers". The abandoned
+// attempt ships today because it falls between the two existing detectors:
+// findStutterDrops needs the words IDENTICAL ("higher" is not "high"), and the
+// phrase-retake pass needs three words to call something a sentence. A
+// two-word correction is invisible to both.
+//
+// The signal is narrow on purpose, because cutting real speech is far worse
+// than leaving a stumble in. All of these must hold:
+//
+//   1. A word REPEATS within two positions   ("for" ... "for")
+//   2. The words that FOLLOW each repeat are near-misses of each other, one a
+//      prefix of the other  ("higher" / "high") — this is what distinguishes a
+//      correction from ordinary repetition. In "for you and for me" the
+//      following words share nothing, so it is left alone.
+//   3. The abandoned span is at most two words.
+//
+// Everything from the first anchor up to the second is dropped, keeping the
+// take she actually meant. Exported for tests/cut-plan.test.ts.
+export function findSelfCorrectionDrops(words: WordTimestamp[], dropped: ReadonlySet<number>): number[] {
+  const survivors = words.map((_, i) => i).filter(i => !dropped.has(i))
+  const out = new Set<number>()
+  const at = (k: number) => (survivors[k] === undefined ? '' : normWord(words[survivors[k]].text))
+
+  // One is a prefix of the other, and they are not the same word. "high" vs
+  // "higher" qualifies; "high" vs "hide", or "you" vs "me", do not.
+  const nearMiss = (a: string, b: string) => {
+    if (!a || !b || a === b) return false
+    const [short, long] = a.length <= b.length ? [a, b] : [b, a]
+    return short.length >= 3 && long.startsWith(short) && long.length - short.length <= 4
+  }
+
+  for (let k = 0; k < survivors.length; k++) {
+    // How far ahead the restart begins. Beyond three words this stops being a
+    // stumble and starts being ordinary sentence structure.
+    for (let step = 1; step <= 3; step++) {
+      if (survivors[k + step] === undefined) continue
+      // Walk the words the two attempts have in common ("this is" ... "this is"),
+      // then judge the FIRST word where they diverge.
+      let m = 0
+      while (m < step && at(k + m) && at(k + m) === at(k + step + m)) m++
+      if (m === 0) continue                       // nothing repeated — not a restart
+      if (!nearMiss(at(k + m), at(k + step + m))) continue
+      for (let d = k; d < k + step; d++) out.add(survivors[d])
+      // Skip past what was just consumed. Without this the SAME correction is
+      // found again one word in ("this is import…" then "is import…") and each
+      // pass eats another word of the take she actually meant.
+      k += step - 1
+      break
+    }
+  }
+  return [...out].sort((a, b) => a - b)
 }
 
 // Phrase-level retakes: she delivers a sentence, doesn't like it, and says the
@@ -437,6 +491,13 @@ export async function planKeepSegments(
   }
 
   for (const i of findStutterDrops(words, dropped)) dropped.add(i)
+  // Two-word self-corrections ("for higher, for high achievers") — invisible to
+  // both detectors above, and they ship the wrong word in the finished video.
+  const corrections = findSelfCorrectionDrops(words, dropped)
+  if (corrections.length) {
+    console.log(`[edit-plan] self-corrections: cutting ${corrections.length} word(s) — "${corrections.map(i => words[i].text).join(' ')}"`)
+    for (const i of corrections) dropped.add(i)
+  }
 
   const kept = words.filter((_, i) => !dropped.has(i))
   if (!kept.length) return [{ start: 0, end: sourceDuration }]
@@ -742,7 +803,7 @@ export async function planViralCaptions(
     .join('\n')
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       // Long clips can carry 50+ pages; the picks array must never truncate.
       max_tokens: 3000,
@@ -861,7 +922,7 @@ export async function planEubankCaptions(
   let applied = 0
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 3000,
       json: true,
@@ -1016,7 +1077,7 @@ export async function planKoeCollageCaptions(
   const motifs: KoeMotif[] = []
   try {
     const raw = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 3000,
       json: true,

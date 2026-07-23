@@ -64,7 +64,7 @@ export async function planKoeGraphics(
   } = {}
   try {
     const out = await chatCompletion({
-      model: MODELS.fast,
+      model: MODELS.planner,
       temperature: 0.2,
       max_tokens: 700,
       json: true,

@@ -311,11 +311,17 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
         }
       }
 
-      // Stock knobs, mode-aware. 'both' genuinely mixes: her placed clips go
-      // in as items and magicBrolls stays ON, with its percentage scaled DOWN
-      // by the share of the timeline her clips already cover — so the mix
-      // adapts to how well her folder fits this script instead of a fixed
-      // 50/50. 'custom' turns stock off entirely.
+      // Stock knobs, mode-aware. 'both' aims for a BALANCED mix — roughly as
+      // much stock as her own footage — rather than treating stock as leftover
+      // space. Subtracting her coverage from a fixed total meant the better her
+      // folder fit, the less variety the video got: 8 clips covering 27% left
+      // only 19% stock. Matching instead keeps both sources present.
+      //
+      // Balance is the AIM, never a quota. Her clips are placed first, only
+      // where the planner judged they fit (nothing is forced), and this simply
+      // asks stock to match whatever that came to. If only two of her clips
+      // suited the script, stock matches two — it does not pad her side to
+      // reach a target. 'custom' turns stock off entirely.
       let magicBrolls = brollKnobs.magicBrolls
       let magicBrollsPercentage = brollKnobs.magicBrollsPercentage
       if (customItems.length) {
@@ -323,18 +329,39 @@ async function submitVariant(db: SupabaseClient, jobId: string, variantId: strin
           magicBrolls = false
           magicBrollsPercentage = undefined
         } else {
-          const customSeconds = customItems.reduce((s, i) => s + (i.endTime - i.startTime), 0)
-          const coveredPct = planCutSeconds ? Math.round((customSeconds / planCutSeconds) * 100) : 0
-          const remaining = Math.max(0, (magicBrollsPercentage ?? 16) - coveredPct)
-          // Below ~4% Submagic would be placing one token clip at best — at
-          // that point her clips have covered what the video wanted.
+          const target = magicBrollsPercentage ?? 16
+          const half = Math.round(target / 2)
+          const pctOf = (secs: number) => (planCutSeconds ? Math.round((secs / planCutSeconds) * 100) : 0)
+
+          // When her clips fit MORE than half the video's B-roll budget, trim
+          // the surplus so stock keeps its half — that is the 50/50. Trimming
+          // takes from the END of the timeline, keeping the earliest placements
+          // (the opening minutes carry the most attention).
+          let covered = pctOf(customItems.reduce((s, i) => s + (i.endTime - i.startTime), 0))
+          if (covered > half && customItems.length > 1) {
+            const kept: typeof customItems = []
+            let secs = 0
+            for (const it of customItems) {
+              const next = secs + (it.endTime - it.startTime)
+              if (kept.length && pctOf(next) > half) break
+              kept.push(it); secs = next
+            }
+            console.log(`[submagic-start] ${variantId}: her clips filled ${covered}% of a ${target}% budget — keeping ${kept.length}/${customItems.length} so stock keeps its half`)
+            customItems = kept
+            covered = pctOf(secs)
+          }
+
+          // Stock takes whatever the budget still wants. When few of her clips
+          // suited the script this is most of it — the video stays full without
+          // ever forcing a clip that did not belong.
+          const remaining = Math.max(0, target - covered)
           if (!magicBrolls || remaining < 4) {
             magicBrolls = false
             magicBrollsPercentage = undefined
           } else {
             magicBrollsPercentage = Math.min(remaining, 49)
           }
-          console.log(`[submagic-start] ${variantId}: 'both' mix — ${customItems.length} of her clip(s) covering ~${coveredPct}%, stock ${magicBrolls ? `${magicBrollsPercentage}%` : 'off'}`)
+          console.log(`[submagic-start] ${variantId}: 'both' mix — ${customItems.length} of her clip(s) at ~${covered}%, stock ${magicBrolls ? `${magicBrollsPercentage}%` : 'off'} (budget ${target}%)`)
         }
       }
 

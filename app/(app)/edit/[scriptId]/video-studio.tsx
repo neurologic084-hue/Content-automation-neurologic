@@ -578,7 +578,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     }}
                   >
                     <span className="block text-xs font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
-                    <span className="block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
+                    <span className="hidden min-[380px]:block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
                   </button>
                 )
               })}
@@ -606,7 +606,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     }}
                   >
                     <span className="block text-xs font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
-                    <span className="block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
+                    <span className="hidden min-[380px]:block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
                   </button>
                 )
               })}
@@ -633,7 +633,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
                     }}
                   >
                     <span className="block text-xs font-semibold" style={{ color: active ? '#FF4F17' : '#18181B' }}>{opt.label}</span>
-                    <span className="block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
+                    <span className="hidden min-[380px]:block text-[10px] text-[#A1A1AA] mt-0.5 leading-tight">{opt.hint}</span>
                   </button>
                 )
               })}

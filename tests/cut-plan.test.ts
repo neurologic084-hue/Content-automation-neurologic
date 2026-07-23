@@ -18,7 +18,7 @@
 //
 // No network, no API keys, no spend — pure functions over synthetic transcripts.
 
-import { isRestartedBy, findStutterDrops, findRepeatedTakes } from '../lib/edit-plan'
+import { isRestartedBy, findStutterDrops, findRepeatedTakes, findSelfCorrectionDrops } from '../lib/edit-plan'
 import type { WordTimestamp } from '../lib/caption-renderer'
 
 // Build word timings from a sentence; timings are irrelevant to isRestartedBy
@@ -253,6 +253,40 @@ for (const c of REPEATS) {
   if (!ok) console.log(`      expected ${show(c.expect)}`)
 }
 
-const total = CASES.length + STUTTER.length + REPEATS.length
+
+// ── findSelfCorrectionDrops ──────────────────────────────────────────────────
+// Reported from a rendered video: "for higher, for high achievers" — she got
+// the word wrong and restarted, and the abandoned attempt shipped. It fell
+// between the two detectors above: findStutterDrops needs the words IDENTICAL
+// ("higher" is not "high") and findRepeatedTakes needs three words to call
+// something a sentence. The keep cases matter more than the cut cases here —
+// leaving a stumble in is far better than eating real speech.
+let CORRECTIONS = 0
+console.log('\n── findSelfCorrectionDrops (word-level restarts) ────────────────')
+{
+  const SELF_CORRECTION_CASES: Array<{ text: string; cut: string }> = [
+    { text: 'for higher, for high achievers',        cut: 'for higher,' },
+    { text: 'this is import, this is important work', cut: 'this is import,' },
+    { text: 'the nerv, the nervous system',          cut: 'the nerv,' },
+    // Ordinary speech that merely repeats a word — must survive untouched.
+    { text: 'for you and for me',                    cut: '' },
+    { text: 'the high road and the higher ground',   cut: '' },
+    { text: 'she works harder and harder every day', cut: '' },
+    { text: 'it is not about work it is about rest', cut: '' },
+    { text: 'more and more people feel this',        cut: '' },
+    { text: 'a little bit at a time',                cut: '' },
+  ]
+  for (const { text, cut } of SELF_CORRECTION_CASES) {
+    const words = w(text)
+    const got = findSelfCorrectionDrops(words, new Set()).map(i => words[i].text).join(' ')
+    const ok = got === cut
+    if (!ok) failed++
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${cut ? 'cuts' : 'keeps '} "${text}"`)
+    console.log(`      -> ${got || '(nothing)'}${ok ? '' : `   EXPECTED ${cut || '(nothing)'}`}`)
+  }
+  CORRECTIONS = SELF_CORRECTION_CASES.length
+}
+
+const total = CASES.length + STUTTER.length + REPEATS.length + CORRECTIONS
 console.log(`\n${total - failed}/${total} passed`)
 if (failed) process.exit(1)
