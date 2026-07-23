@@ -3482,6 +3482,26 @@ export async function runSingleVariant(
       if (timeoutId) clearTimeout(timeoutId)
       return runSingleVariant(jobId, variantId, sourceUrl, { ...opts, __resourceRetry: attempt + 1 })
     }
+    // In-process retries exhausted (or the failure arrived outside them). One
+    // LAST pass through the shared self-heal layer before the card: a short
+    // scheduled requeue (the watchdog fires it in ~2min) lets the box finish
+    // whatever starved this render — observed twice in production on the
+    // burst's final variants (v5 2026-07-23 01:03, v6 04:16), where a plain
+    // retry minutes later succeeds because the siblings are done. Same budget
+    // as every other silent requeue; a real render error is not transient and
+    // still writes the card immediately.
+    try {
+      const { isTransientRenderError } = await import('./error-explain')
+      if (isTransientRenderError(msg)) {
+        const db = supabaseAdmin()
+        const { data: row } = await db.from('video_jobs').select('variants').eq('id', jobId).single()
+        const v = ((row?.variants ?? []) as VideoVariant[]).find(x => x.id === variantId)
+        const { autoRequeueVariant } = await import('./stale-sweep')
+        if (v && await autoRequeueVariant(db, jobId, v, `render failed transiently: ${msg.slice(0, 100)}`, { delayMs: 2 * 60_000 })) {
+          return
+        }
+      }
+    } catch { /* fall through to the honest card */ }
     console.error('[motion-renderer] runSingleVariant fatal:', e)
     await markVariant(jobId, variantId, 'failed', null, (e as Error).message || 'The render failed to start. Please retry this variant.').catch(() => {})
   } finally {
