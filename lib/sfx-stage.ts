@@ -96,8 +96,9 @@ export async function stageSfxCues(
   for (const key of new Set(assigned.map(a => `${a.slot.cat}:${a.slot.take}`))) {
     const [cat, takeStr] = key.split(':')
     const take = Number(takeStr)
+    let src: string | null = null
     try {
-      const src = await getSfx(cat as SfxCategory, take)
+      src = await getSfx(cat as SfxCategory, take)
       if (!src) continue
       const rel = `${publicPrefix}/sfx-${cat}${take > 0 ? `-t${take}` : ''}.mp3`
       fs.mkdirSync(path.dirname(path.join(remotionPublicDir, rel)), { recursive: true })
@@ -111,6 +112,14 @@ export async function stageSfxCues(
       console.log(`[sfx-stage] ${key}: ${rmsDb.toFixed(1)} dB RMS -> trim ${gainDb.toFixed(1)} dB (×${(10 ** (gainDb / 20)).toFixed(2)})`)
     } catch (e) {
       console.warn(`[sfx-stage] "${key}" unavailable, that moment stays silent:`, (e as Error).message)
+      // A cache file that failed to decode here would fail identically on
+      // every future render of this container — the exists-check in getSfx
+      // would keep returning it. Purge it so the NEXT render re-fetches or
+      // regenerates (and republishes, healing a poisoned shared-library copy).
+      if (src && fs.existsSync(src)) {
+        console.warn(`[sfx-stage] purging corrupt cache entry ${path.basename(src)} — next render regenerates it`)
+        try { fs.unlinkSync(src) } catch { /* best-effort */ }
+      }
     }
   }
 

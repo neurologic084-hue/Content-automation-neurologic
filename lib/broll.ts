@@ -570,11 +570,28 @@ export async function planCustomBrollSlots(
   // or no cutaways is a judgment we respect — forcing in clips that don't match
   // reads as AI slop and breaks the "never AI-looking" bar.
   let plannerFailed = false
+  // What the model actually said, kept for the failure log below — "no JSON
+  // object found" alone is undebuggable; the response head says WHY (prose,
+  // refusal, empty, truncation).
+  let lastRaw = ''
+  // Two attempts before conceding: a non-JSON answer or a dropped connection is
+  // a per-call fluke, and the fallback it would trigger is the content-blind
+  // even spread — the one placement style the "never AI-looking" bar exists to
+  // avoid. One retry converts most of those flukes into a real decision.
+  for (let attempt = 1; attempt <= 2; attempt++) {
   try {
     const raw = await chatCompletion({
       model: MODELS.planner,
       temperature: 0.3,
-      max_tokens: 600,
+      // Sonnet narrates its reasoning ("**Clip 0**: atmospheric — good over the
+      // intro…") before the JSON, where Haiku answered with JSON alone — and at
+      // the old 600-token cap the narration consumed the whole budget and the
+      // JSON never arrived. That failed EVERY call (12 clips of prose > 600
+      // tokens), so every custom-B-roll render since the Sonnet switch fell
+      // back to the even spread. The prompt now forbids the preamble, and the
+      // budget has room for the answer even if a stray one slips through
+      // (parseJsonLoose already skips leading prose).
+      max_tokens: 2000,
       json: true,
       messages: [{
         role: 'user',
@@ -618,16 +635,29 @@ export async function planCustomBrollSlots(
           `- Never start before ${HOOK_PROTECT_SECONDS}s: the opening seconds hold on her face, always.`,
           `- Never end within the last ${CTA_PROTECT_SECONDS}s of the video: the call to action is her too.`,
           `- At least ${minGap} seconds of talking-head between cutaways. No overlaps.`,
+          '- Do all reasoning silently. Your ENTIRE response must be the JSON object — no',
+          '  preamble, no per-clip walkthrough, no markdown, nothing before the opening brace.',
           '- Return JSON only: {"items":[{"start":number,"duration":number,"clip":number,"fit":number}]}',
         ].join('\n'),
       }],
     })
+    lastRaw = raw
     const parsed = parseJsonLoose<{ items?: Array<{ start?: number; duration?: number; clip?: number; fit?: number }> }>(raw)
-    if (Array.isArray(parsed.items)) candidates = parsed.items
-    else plannerFailed = true   // model didn't answer in the expected shape — treat as a failure, not "nothing fits"
+    if (Array.isArray(parsed.items)) {
+      candidates = parsed.items
+      plannerFailed = false
+      break
+    }
+    // Model didn't answer in the expected shape — a failure, not "nothing fits".
+    throw new Error('response had no items array')
   } catch (e) {
-    console.warn('[broll] custom-clip planning failed:', (e as Error).message)
     plannerFailed = true
+    console.warn(
+      `[broll] custom-clip planning failed (attempt ${attempt}/2): ${(e as Error).message}` +
+      (lastRaw ? ` — response head: ${JSON.stringify(lastRaw.slice(0, 200))}` : ' — no response text (transport error)'),
+    )
+    lastRaw = ''
+  }
   }
 
   // Enforce the rules in code (the model proposes, the code disposes). How MANY

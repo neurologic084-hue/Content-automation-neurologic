@@ -105,6 +105,22 @@ function execP(cmd: string, opts: { maxBuffer?: number; encoding?: 'buffer' } = 
   })
 }
 
+// A cached SFX must be PLAYABLE audio, not merely bytes of plausible size. The
+// old guards checked size only (> 500 bytes), so an interrupted upload or an
+// error-page body cached as ui-pop.v3.t2.mp3 passed every check — and because
+// R2 is the source of truth, the poisoned object re-infected the tmp cache of
+// every container after every deploy, silencing that cue on every render,
+// forever. A full decode is the test ffmpeg itself applies at staging time,
+// and these files are ~1s long, so it costs nothing.
+async function isPlayableAudio(filePath: string): Promise<boolean> {
+  try {
+    await execP(`ffmpeg -v error -i "${filePath}" -f null -`)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // Peak-normalize a freshly generated SFX to -3 dBFS. This equalizes PEAKS, not
 // perceived loudness: measured across the cached library, files sitting at an
 // identical -3 dBFS peak spanned 25 dB of mean level. Perceived loudness is
@@ -187,8 +203,17 @@ async function generateSfx(def: SfxDef, take = 0): Promise<string> {
         if (buf.length > 500) {
           fs.mkdirSync(CACHE_DIR, { recursive: true })
           fs.writeFileSync(cachePath, buf)
-          console.log(`[sound-effects] "${def.name}" reused from the shared library (no generation)`)
-          return cachePath
+          // A shared-library object can itself be corrupt (interrupted upload,
+          // error body stored as .mp3 — observed on ui-pop.v3.t2). Accepting it
+          // here is what made the corruption permanent: regenerating below also
+          // REPUBLISHES, replacing the poisoned object for every future
+          // container.
+          if (await isPlayableAudio(cachePath)) {
+            console.log(`[sound-effects] "${def.name}" reused from the shared library (no generation)`)
+            return cachePath
+          }
+          console.warn(`[sound-effects] shared library copy of "${remoteName}" is not playable audio — regenerating and replacing it`)
+          try { fs.unlinkSync(cachePath) } catch { /* best-effort */ }
         }
       }
     } catch { /* not cached yet — generate below */ }
@@ -232,6 +257,15 @@ async function generateSfx(def: SfxDef, take = 0): Promise<string> {
   const buf = Buffer.from(await res.arrayBuffer())
   fs.mkdirSync(CACHE_DIR, { recursive: true })
   fs.writeFileSync(cachePath, buf)
+  // A 200 whose body is not decodable audio must never enter the cache — and
+  // absolutely never be published, or every future container inherits it.
+  if (!(await isPlayableAudio(cachePath))) {
+    console.warn(`[sound-effects] ElevenLabs returned unplayable bytes for "${def.name}" — synthesising locally instead`)
+    try { fs.unlinkSync(cachePath) } catch { /* best-effort */ }
+    const out = await synthesiseSfx(def, cachePath)
+    await publish()
+    return out
+  }
   await normalizeSfx(cachePath)
   await publish()
   console.log(`[sound-effects] cached "${def.name}" -> ${cachePath}`)

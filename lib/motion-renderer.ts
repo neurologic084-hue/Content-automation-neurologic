@@ -2357,6 +2357,18 @@ async function collectCustomBrollCandidates(
   jobId: string,
   entries: { url: string; description?: string | null; sourceSeconds?: number; windows?: { offset: number; seconds: number; description: string }[] }[],
   cacheDir: string,
+  // Disambiguates every working file this caller creates (the variant id for
+  // renders, a fixed tag for the prep tasks). These filenames used to be
+  // job-scoped only, and that raced: renderRemotionEdit deletes its staged
+  // files in its finally, so the first variant to finish deleted clips its
+  // siblings were still rendering — the compositor then 404'd on
+  // custom-<job>-<clip>-w<n> mid-render. The comment that used to sit here
+  // called the race "safe in prod because each variant renders in its own
+  // isolated filesystem (Vercel sandbox)"; since the 2026-07-20 Railway
+  // migration all variants share ONE container fs, so the unsupported inline
+  // case became the only case. Reproduced 2026-07-15 via
+  // scripts/edge-test-parallel; observed in production 2026-07-23.
+  scope: string,
 ): Promise<ClipCandidate[]> {
   fs.mkdirSync(cacheDir, { recursive: true })
   const candidates: ClipCandidate[] = []
@@ -2364,18 +2376,7 @@ async function collectCustomBrollCandidates(
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]
     try {
-      // KNOWN LIMITATION (inline mode only): this filename is job-scoped, not
-      // variant-scoped, and renderRemotionEdit deletes these files in its finally
-      // (see the `staged` cleanup). In prod each variant renders in its own
-      // isolated filesystem (Vercel sandbox / GitHub Actions), so v4/v5/v6 never
-      // touch the same files — safe. But when dispatchPipelineTask runs inline
-      // (local dev / a self-hosted long-lived server), all three variants share
-      // one fs: they race on these paths and the first to finish deletes clips the
-      // others are still rendering, so a variant can silently ship with fewer or
-      // zero custom cutaways. Reproduced 2026-07-15 via scripts/edge-test-parallel.
-      // Not fixed on purpose (prod is isolated); variant-scope this name if inline
-      // parallel rendering ever becomes a supported path.
-      const rawPath = path.join(cacheDir, `custom-${jobId.slice(0, 8)}-${i}.raw.mp4`)
+      const rawPath = path.join(cacheDir, `custom-${scope}-${jobId.slice(0, 8)}-${i}.raw.mp4`)
 
       // FAST PATH: source prep already worked out this clip's windows and what
       // each one shows. Reuse them — no download, no ffmpeg sample, no Gemini —
@@ -2498,12 +2499,18 @@ async function stageChosenWindows(
   // too, or a losing clip's full-length file stays in remotion/public where
   // the render server can serve it and the bundler can copy it.
   allCandidates: ClipCandidate[] = chosen,
+  // Same scope as collectCustomBrollCandidates: each variant stages its OWN
+  // copies, so its finally-cleanup can only ever delete its own files. The
+  // cross-variant sharing that made the job-scoped name attractive still
+  // happens — through the R2 window cache below, which is keyed by source +
+  // window and immune to local deletion.
+  scope = '',
 ): Promise<CustomClip[]> {
   const clips: CustomClip[] = []
   for (let n = 0; n < chosen.length; n++) {
     const c = chosen[n]
     try {
-      const fileName = `custom-${jobId.slice(0, 8)}-${c.entryIndex}-w${n}.mp4`
+      const fileName = `custom-${scope ? `${scope}-` : ''}${jobId.slice(0, 8)}-${c.entryIndex}-w${n}.mp4`
       const outPath = path.join(cacheDir, fileName)
       // SHARED CACHE: this exact window of this exact clip may already have been
       // cut by an earlier variant or an earlier JOB using the same folder. One
@@ -2546,13 +2553,18 @@ async function stageChosenWindows(
         // -ss before -i seeks fast; normalize to h264/yuv420p 30fps with audio
         // stripped so OffthreadVideo is safe regardless of what the phone
         // produced (HEVC, odd rotation).
-        // Cut to a private path and rename in. This filename is keyed by job +
-        // clip + window, NOT by variant, so all six variants of a job target
-        // the same file — and the unplayable-file guard above would otherwise
-        // delete one that another variant is still writing.
+        // Cut to a private path and rename in — atomic, so a concurrent reader
+        // sees either nothing or a finished file. (The filename itself is
+        // scope-keyed per variant now; the atomic write stays because a killed
+        // render must never leave a half-written file that a retry trusts.)
         const cutTmp = `${outPath}.${process.pid}-${n}.part`
+        // -f mp4 is required: ffmpeg infers the container from the output
+        // extension, and ".part" isn't one — without it EVERY cache-miss cut
+        // failed ("Unable to find a suitable output format") from the moment
+        // the atomic .part write was introduced, masked by the R2 cache
+        // serving previously-cut windows.
         await run(
-          `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart "${cutTmp}"`,
+          `ffmpeg -y -ss ${c.offset.toFixed(2)} -i "${c.rawPath}" -t ${c.duration.toFixed(2)} -r 30 -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p -an -movflags +faststart -f mp4 "${cutTmp}"`,
           300_000,
         )
         fs.renameSync(cutTmp, outPath)
@@ -2829,9 +2841,9 @@ async function renderRemotionEdit(
           // entirely. Every candidate window is described first, ranked against
           // THIS script, and only the winners are cut to full resolution, so the
           // renderer never decodes footage that can't reach the screen.
-          const candidates = await collectCustomBrollCandidates(jobId, opts.customBroll!, cacheDir)
+          const candidates = await collectCustomBrollCandidates(jobId, opts.customBroll!, cacheDir, variantId)
           const chosen = await selectBestClips(candidates, plan.editedWords)
-          const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates)
+          const clips = await stageChosenWindows(chosen, jobId, cacheDir, 'edit-cache', candidates, variantId)
           for (const c of clips) staged.push(path.join(REMOTION_DIR, 'public', c.file))
           // A clip that survived curation but died in staging (unplayable cut,
           // dead download) is a silent loss: she supplied it and it never
@@ -3612,7 +3624,7 @@ async function analyzeCustomBrollForJob(jobId: string): Promise<void> {
   const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
   // Persists entry.windows onto the job and publishes each clip's analysis to
   // broll-cache/shared/ itself, so there is nothing to write back here.
-  const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir)
+  const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir, 'analyze')
 
   // The full-length downloads only existed to sample windows out of, and
   // nothing else in this task consumes them. Staging normally clears them; on
@@ -3850,7 +3862,7 @@ async function prepareSubmagicBrollForJobInner(jobId: string, opts: { force?: bo
   }
 
   const cacheDir = path.join(REMOTION_DIR, 'public', 'edit-cache')
-  const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir)
+  const candidates = await collectCustomBrollCandidates(jobId, entries, cacheDir, 'prep')
   try {
     if (!candidates.length) {
       console.warn('[submagic-broll] no usable clip windows — v1-v3 keep stock B-roll')
