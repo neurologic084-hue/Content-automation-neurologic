@@ -136,12 +136,39 @@ const CUT_TIGHT: CutParams = { gapCut: 0.30, padding: 0.09, mergeGap: 0.18, minS
 // transcriber's spelling variants: um/umm/uhm, uh/uhh, ah/ahh, er/erm, hmm/mhm/mm.
 const FILLER_RE = /^(u+h*m+|u+h+|erm*|hm+|mhm+|mm+|a+h+)[.,!?…]*$/i
 
-// LLM pass: mark word ranges that are retakes/false starts. Silence cutting is
-// NOT delegated to the model — that's deterministic. The model only judges
-// semantic duplication, and its output is clamped hard.
-async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number, number]>> {
-  if (words.length < 12) return []
-  const numbered = words.map((w, i) => `${i}:${w.text}`).join(' ')
+// The LLM pass reads the WHOLE transcript, in windows. The old single call
+// sliced the prompt at 8,000 characters, so anything past roughly two minutes
+// of speech got no LLM coverage at all — only the deterministic detectors saw
+// it. Windows are word-indexed GLOBALLY (the numbering the model sees is the
+// numbering we validate against) and overlap so a retake straddling a boundary
+// is visible whole to at least one window. A typical short fits one window,
+// where behaviour is identical to the old single call.
+const RETAKE_WINDOW_WORDS = 500
+const RETAKE_WINDOW_OVERLAP = 40
+
+// Pure so the boundary math is testable: [start, end) word-index windows that
+// together cover every word. Exported for tests/cut-plan.test.ts.
+export function buildRetakeWindows(wordCount: number): Array<[number, number]> {
+  if (wordCount <= RETAKE_WINDOW_WORDS) return [[0, wordCount]]
+  const windows: Array<[number, number]> = []
+  let start = 0
+  for (;;) {
+    const end = Math.min(wordCount, start + RETAKE_WINDOW_WORDS)
+    windows.push([start, end])
+    if (end === wordCount) return windows
+    start = end - RETAKE_WINDOW_OVERLAP
+  }
+}
+
+// One window's model call. Ranges come back in GLOBAL indices because the
+// numbering in the prompt is global. Failures return [] so one bad window
+// never takes down the others.
+async function detectRetakeRangesInWindow(
+  words: WordTimestamp[],
+  from: number,
+  to: number,
+): Promise<Array<[number, number]>> {
+  const numbered = words.slice(from, to).map((w, i) => `${from + i}:${w.text}`).join(' ')
   try {
     const raw = await chatCompletion({
       model: MODELS.planner,
@@ -157,7 +184,7 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
           'attempt for removal — always keep the final take. Do NOT mark normal repetition used',
           'for emphasis. If unsure, mark nothing.',
           '',
-          numbered.slice(0, 8000),
+          numbered,
           '',
           'Return JSON only: {"drop":[[startIndex,endIndex],...]} (inclusive ranges). Empty array if none.',
         ].join('\n'),
@@ -166,11 +193,10 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
     const parsed = parseJsonLoose<{ drop?: unknown }>(raw)
     const ranges = Array.isArray(parsed.drop) ? parsed.drop : []
     const valid: Array<[number, number]> = []
-    let dropped = 0
     for (const r of ranges) {
       if (!Array.isArray(r) || r.length !== 2) continue
       const [a, b] = r as [number, number]
-      if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b >= words.length || b < a) continue
+      if (!Number.isInteger(a) || !Number.isInteger(b) || a < from || b >= to || b < a) continue
       // The semantic precondition the prompt states but the model does not
       // reliably obey: an abandoned attempt is a near-duplicate of the words
       // that IMMEDIATELY FOLLOW it. Observed failure — "You should hear some
@@ -178,29 +204,68 @@ async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number
       // "You should," (5/5 runs), which is a new sentence, not a false start;
       // its own instruction says to keep the final take. Rejecting the single
       // offending range, not the whole pass, keeps the genuine retakes.
+      // Validation runs against the FULL word list, so a restart that begins
+      // past the window's edge still counts.
       if (!isRestartedBy(words, a, b)) {
         console.warn(`[edit-plan] rejecting retake range [${a}-${b}] "${words.slice(a, b + 1).map(w => w.text).join(' ')}" — not restarted by the words that follow`)
         continue
       }
-      dropped += b - a + 1
       valid.push([a, b])
-    }
-    // Guardrail: a retake pass that wants >30% of the words gone is hallucinating.
-    if (dropped > words.length * 0.3) {
-      console.warn('[edit-plan] retake detection wanted too much removed — ignoring it')
-      return []
     }
     return valid
   } catch (e) {
-    console.warn('[edit-plan] retake detection failed, keeping all takes:', (e as Error).message)
+    console.warn(`[edit-plan] retake detection failed on words ${from}-${to}, keeping those takes:`, (e as Error).message)
     return []
   }
+}
+
+// LLM pass: mark word ranges that are retakes/false starts. Silence cutting is
+// NOT delegated to the model — that's deterministic. The model only judges
+// semantic duplication, and its output is clamped hard.
+async function detectRetakeRanges(words: WordTimestamp[]): Promise<Array<[number, number]>> {
+  if (words.length < 12) return []
+  const windows = buildRetakeWindows(words.length)
+  const perWindow = await Promise.all(
+    windows.map(([from, to]) => detectRetakeRangesInWindow(words, from, to)),
+  )
+  // Overlapping windows can both report the same retake; merge intervals so
+  // the guardrail counts each word once.
+  const merged: Array<[number, number]> = []
+  for (const [a, b] of perWindow.flat().sort((x, y) => x[0] - y[0] || x[1] - y[1])) {
+    const last = merged[merged.length - 1]
+    if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b)
+    else merged.push([a, b])
+  }
+  // Guardrail: a retake pass that wants >30% of the words gone is hallucinating.
+  const dropped = merged.reduce((n, [a, b]) => n + (b - a + 1), 0)
+  if (dropped > words.length * 0.3) {
+    console.warn('[edit-plan] retake detection wanted too much removed — ignoring it')
+    return []
+  }
+  return merged
+}
+
+// One word is a prefix of the other, and they are not the same word. "high" vs
+// "higher" qualifies; "high" vs "hide", or "you" vs "me", do not. This prefix
+// relationship is what separates a flubbed word from ordinary repetition —
+// findSelfCorrectionDrops detects with it, isRestartedBy validates with it.
+const nearMissWord = (a: string, b: string) => {
+  if (!a || !b || a === b) return false
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a]
+  return short.length >= 3 && long.startsWith(short) && long.length - short.length <= 4
 }
 
 // True when the span [a,b] looks like an abandoned attempt at the speech that
 // follows it: its content words reappear, in order, near the top of the words
 // after b. Deliberately lenient on the tail (a false start is usually cut off
 // mid-phrase) and strict on the head (a restart repeats how the phrase BEGAN).
+//
+// A flubbed word counts as reappearing when its replacement is a near-miss of
+// it ("higher" restated as "high"). Without that, this validator rejected the
+// model's CORRECT flags on short corrections: "for higher," restarted as "for
+// high achievers" matched only 1 of 2 words (50% < 60%), because a flub by
+// definition never returns verbatim — the guardrail against bad LLM answers
+// was also discarding its right ones.
 // Exported for the regression test in tests/cut-plan.test.ts.
 export function isRestartedBy(words: WordTimestamp[], a: number, b: number): boolean {
   const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9']/g, '')
@@ -215,15 +280,24 @@ export function isRestartedBy(words: WordTimestamp[], a: number, b: number): boo
     .map(w => norm(w.text)).filter(t => t && !isNoise(t))
   if (!after.length) return false // nothing follows: it is the final take, keep it
 
-  // The restart must reuse the span's FIRST content word early on.
+  // The restart must reuse the span's FIRST content word early on. The anchor
+  // stays EXACT — a restart repeats how the phrase began, and loosening the
+  // head is what would let echo-sentences slip through.
   const anchor = after.indexOf(span[0])
   if (anchor === -1 || anchor > 2) return false
 
-  // …and a majority of the span's content words must reappear in order from there.
+  // …and a majority of the span's content words must reappear in order from
+  // there — exactly, or as the near-miss correction of a flub.
+  const findFrom = (t: string, from: number) => {
+    for (let k = from; k < after.length; k++) {
+      if (after[k] === t || nearMissWord(after[k], t)) return k
+    }
+    return -1
+  }
   let matched = 0
   let cursor = anchor
   for (const t of span) {
-    const at = after.indexOf(t, cursor)
+    const at = findFrom(t, cursor)
     if (at !== -1) { matched++; cursor = at + 1 }
   }
   return matched / span.length >= 0.6
@@ -286,14 +360,6 @@ export function findSelfCorrectionDrops(words: WordTimestamp[], dropped: Readonl
   const out = new Set<number>()
   const at = (k: number) => (survivors[k] === undefined ? '' : normWord(words[survivors[k]].text))
 
-  // One is a prefix of the other, and they are not the same word. "high" vs
-  // "higher" qualifies; "high" vs "hide", or "you" vs "me", do not.
-  const nearMiss = (a: string, b: string) => {
-    if (!a || !b || a === b) return false
-    const [short, long] = a.length <= b.length ? [a, b] : [b, a]
-    return short.length >= 3 && long.startsWith(short) && long.length - short.length <= 4
-  }
-
   for (let k = 0; k < survivors.length; k++) {
     // How far ahead the restart begins. Beyond three words this stops being a
     // stumble and starts being ordinary sentence structure.
@@ -304,7 +370,7 @@ export function findSelfCorrectionDrops(words: WordTimestamp[], dropped: Readonl
       let m = 0
       while (m < step && at(k + m) && at(k + m) === at(k + step + m)) m++
       if (m === 0) continue                       // nothing repeated — not a restart
-      if (!nearMiss(at(k + m), at(k + step + m))) continue
+      if (!nearMissWord(at(k + m), at(k + step + m))) continue
       for (let d = k; d < k + step; d++) out.add(survivors[d])
       // Skip past what was just consumed. Without this the SAME correction is
       // found again one word in ("this is import…" then "is import…") and each
@@ -447,6 +513,101 @@ export function findRepeatedTakes(words: WordTimestamp[], dropped: ReadonlySet<n
   return [...drops].sort((x, y) => x - y)
 }
 
+// Final editor's read: one pass over the transcript that SURVIVED every
+// detector above, read start to finish the way a human editor watches the
+// finished cut. Every other detector sees a local window (2-14 words); this is
+// the only reader of the whole video, and it exists to catch the mistake shape
+// nobody predicted — the reason "for higher, for high achievers" shipped was
+// that each narrow detector had a blind spot exactly its width.
+//
+// It can only ADD drops, never restore them, and only through the same
+// machinery that gates the first LLM pass: every flagged span must touch only
+// surviving words, must pass isRestartedBy against the surviving transcript,
+// is capped at sentence scale, and the whole pass is discarded if it wants
+// more than 10% of the remaining words gone. A failed call returns [] — the
+// cut ships as the deterministic passes left it.
+async function reviewFinalCut(
+  words: WordTimestamp[],
+  dropped: ReadonlySet<number>,
+): Promise<number[]> {
+  const survivors = words.map((_, i) => i).filter(i => !dropped.has(i))
+  if (survivors.length < 12) return []
+  const survWords = survivors.map(i => words[i])
+  const pos = new Map(survivors.map((i, k) => [i, k]))  // original index → survivor position
+
+  // The model reads what the viewer will hear, numbered by ORIGINAL index so
+  // its answers validate directly. Cuts appear as compact [cut: …] markers —
+  // seeing what was already removed stops it re-flagging the survivors around
+  // a healed seam as duplicates.
+  const parts: string[] = []
+  for (let i = 0; i < words.length; i++) {
+    if (!dropped.has(i)) { parts.push(`${i}:${words[i].text}`); continue }
+    let j = i
+    while (j + 1 < words.length && dropped.has(j + 1)) j++
+    const cutText = words.slice(i, j + 1).map(w => w.text).join(' ')
+    parts.push(`[cut: ${cutText.length > 40 ? cutText.slice(0, 40) + '…' : cutText}]`)
+    i = j
+  }
+  try {
+    const raw = await chatCompletion({
+      model: MODELS.planner,
+      temperature: 0.1,
+      max_tokens: 800,
+      json: true,
+      messages: [{
+        role: 'user',
+        content: [
+          'You are the FINAL review pass on an edited talking-head transcript. Earlier passes',
+          'already removed retakes and fillers — those removals appear as [cut: …] markers.',
+          'The numbered "index:word" tokens are exactly what the viewer will hear.',
+          'Read it start to finish like an editor watching the finished video. Flag any span',
+          'that STILL reads as a mistake: an abandoned false start, a flubbed word immediately',
+          'restated, or a duplicated phrase that slipped through. Mark the EARLIER attempt',
+          'only — the final take always stays.',
+          'Do NOT flag deliberate rhetorical repetition or emphasis (parallel structure,',
+          '"not X, it is Y" contrasts, anaphora) — that is style, not error.',
+          'Most edited transcripts are already clean: an empty list is the expected answer.',
+          'If unsure, flag nothing.',
+          '',
+          parts.join(' '),
+          '',
+          'Return JSON only: {"drop":[[startIndex,endIndex],...]} (inclusive ranges). Empty array if none.',
+        ].join('\n'),
+      }],
+    })
+    const parsed = parseJsonLoose<{ drop?: unknown }>(raw)
+    const ranges = Array.isArray(parsed.drop) ? parsed.drop : []
+    const extra: number[] = []
+    for (const r of ranges) {
+      if (!Array.isArray(r) || r.length !== 2) continue
+      const [a, b] = r as [number, number]
+      if (!Number.isInteger(a) || !Number.isInteger(b) || b < a) continue
+      const ka = pos.get(a)
+      const kb = pos.get(b)
+      // Both ends must be SURVIVING words — a range touching an existing cut
+      // means the model misread the numbering.
+      if (ka === undefined || kb === undefined) continue
+      if (kb - ka + 1 > RETAKE_MAX_SPAN) continue  // sentence scale, nothing bigger
+      // Same hard gate as the first pass, but against the transcript the
+      // viewer hears: the flagged span must be restarted by what follows it.
+      if (!isRestartedBy(survWords, ka, kb)) {
+        console.warn(`[edit-plan] review: rejecting span [${a}-${b}] "${survWords.slice(ka, kb + 1).map(w => w.text).join(' ')}" — not restarted by what follows`)
+        continue
+      }
+      for (let k = ka; k <= kb; k++) extra.push(survivors[k])
+    }
+    // A review that wants a tenth of the surviving video gone is not reviewing.
+    if (extra.length > survivors.length * 0.1) {
+      console.warn(`[edit-plan] review pass wanted ${extra.length}/${survivors.length} surviving words gone — ignoring it`)
+      return []
+    }
+    return extra
+  } catch (e) {
+    console.warn('[edit-plan] review pass failed, shipping the cut as-is:', (e as Error).message)
+    return []
+  }
+}
+
 export interface CutOptions {
   tight?: boolean
   // Energy-detected silence intervals in SOURCE time (ffmpeg silencedetect on
@@ -454,6 +615,35 @@ export interface CutOptions {
   // can't: Scribe word timings often stretch across real pauses, so gap-based
   // cutting alone leaves dead air the words claim to cover.
   silences?: Array<[number, number]>
+}
+
+// Token sanitation: Scribe sometimes stretches a word's end across the pause
+// that follows it (observed: a 3.7s "fact,", and a final "bio." carrying 1.1s
+// of trailing silence). Two clamps, in order:
+//   1. An energy-detected silence that begins inside the word's span and
+//      swallows the rest of it marks where the word actually ended — clamp to
+//      the silence start. This is the precise signal.
+//   2. Any span still longer than 1.2s clamps to 0.9s — the blunt fallback
+//      for when no silence interval was detected there.
+// Exported because the CUT decides with sanitized timings, so everything that
+// interprets the cut (remapToEditedTimeline, the harness) must read the same
+// timings — judging with clamped words and remapping with raw ones is what
+// silently dropped a final "bio." from the captions while the audio kept it.
+export function sanitizeWordTimings(
+  rawWords: WordTimestamp[],
+  silences?: Array<[number, number]>,
+): WordTimestamp[] {
+  return rawWords.map(w => {
+    let end = w.end
+    if (silences) {
+      for (const [s, e] of silences) {
+        // Starts inside the word, swallows its tail: the word ended at s.
+        if (s > w.start + 0.05 && s < end && e >= w.end - 0.05) { end = s; break }
+      }
+    }
+    if (end - w.start > 1.2) end = w.start + 0.9
+    return end === w.end ? w : { ...w, end }
+  })
 }
 
 export async function planKeepSegments(
@@ -464,12 +654,7 @@ export async function planKeepSegments(
   if (!rawWords.length) return [{ start: 0, end: sourceDuration }]
   const P = opts.tight ? CUT_TIGHT : CUT_NATURAL
 
-  // Token sanitation: Scribe sometimes stretches a word's end across a long
-  // pause that follows it (observed: a 3.7s "fact,"), which hides the pause
-  // from gap detection entirely. Clamp absurd spans so the real gap shows.
-  const words = rawWords.map(w =>
-    w.end - w.start > 1.2 ? { ...w, end: w.start + 0.9 } : w
-  )
+  const words = sanitizeWordTimings(rawWords, opts.silences)
 
   const dropRanges = await detectRetakeRanges(words)
   const dropped = new Set<number>()
@@ -497,6 +682,14 @@ export async function planKeepSegments(
   if (corrections.length) {
     console.log(`[edit-plan] self-corrections: cutting ${corrections.length} word(s) — "${corrections.map(i => words[i].text).join(' ')}"`)
     for (const i of corrections) dropped.add(i)
+  }
+
+  // Last: the editor's read over what survived, whole-video context. Hard-gated
+  // (isRestartedBy + caps) and drops-only, so at worst it changes nothing.
+  const reviewDrops = await reviewFinalCut(words, dropped)
+  if (reviewDrops.length) {
+    console.log(`[edit-plan] editor's read: cutting ${reviewDrops.length} word(s) — "${reviewDrops.map(i => words[i].text).join(' ')}"`)
+    for (const i of reviewDrops) dropped.add(i)
   }
 
   const kept = words.filter((_, i) => !dropped.has(i))
@@ -1315,7 +1508,11 @@ export async function buildEditPlan(
   })
   // Punchy (viral) pace: split long takes so the framing can jump every ~3s.
   if (opts.pace === 'punchy') segments = splitSegmentsForPunch(segments, variation)
-  const editedWords = remapToEditedTimeline(words, segments)
+  // Remap with the SAME sanitized timings the cut was judged with. Raw words
+  // here dropped the final word of a CTA from the captions: Scribe stretched
+  // "bio." across 1.1s of trailing silence, the raw midpoint landed inside the
+  // carved silence, and the caption ended at "my" while the audio said "bio".
+  const editedWords = remapToEditedTimeline(sanitizeWordTimings(words, opts.silences), segments)
   const pages = buildCaptionPages(editedWords, profile, variation, opts.maxPageWords ?? 4, opts.caseStyle ?? 'title')
   const plans = planZooms(segments, editedWords, profile, variation)
   const editedDuration = plans.reduce((a, s) => a + s.duration, 0)

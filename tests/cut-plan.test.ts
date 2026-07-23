@@ -18,7 +18,7 @@
 //
 // No network, no API keys, no spend — pure functions over synthetic transcripts.
 
-import { isRestartedBy, findStutterDrops, findRepeatedTakes, findSelfCorrectionDrops } from '../lib/edit-plan'
+import { isRestartedBy, findStutterDrops, findRepeatedTakes, findSelfCorrectionDrops, buildRetakeWindows, sanitizeWordTimings, planKeepSegments, remapToEditedTimeline } from '../lib/edit-plan'
 import type { WordTimestamp } from '../lib/caption-renderer'
 
 // Build word timings from a sentence; timings are irrelevant to isRestartedBy
@@ -92,6 +92,30 @@ const CASES: Case[] = [
     name: 'emphasis repetition across a full clause is not a restart',
     words: w('This matters a lot because your audience can tell when you rush the delivery'),
     span: [0, 3],            // "This matters a lot"
+    expect: false,
+  },
+  {
+    // THE VALIDATOR HOLE. A flubbed word never returns verbatim, so "for
+    // higher," restarted as "for high achievers" matched 1 of 2 words (50% <
+    // 60%) and the validator rejected the model's CORRECT flag. Near-miss
+    // words ("higher"/"high") now count as reappearing.
+    name: 'flubbed word restated as its near-miss IS a restart',
+    words: w('for higher, for high achievers need structure daily'),
+    span: [0, 1],            // "for higher,"
+    expect: true,
+  },
+  {
+    name: 'mid-span flub restated with the corrected word still validates',
+    words: w('this is import this is important work every day'),
+    span: [0, 2],            // "this is import"
+    expect: true,
+  },
+  {
+    // Near-miss matching must never loosen the HEAD: the anchor word has to
+    // reappear exactly, so an echo of a merely similar word stays untouched.
+    name: 'near-miss anchor is not enough — echo of a similar word is not a restart',
+    words: w('Keep working. Work is what matters most here'),
+    span: [1, 1],            // "working."
     expect: false,
   },
 ]
@@ -287,6 +311,96 @@ console.log('\n── findSelfCorrectionDrops (word-level restarts) ────
   CORRECTIONS = SELF_CORRECTION_CASES.length
 }
 
-const total = CASES.length + STUTTER.length + REPEATS.length + CORRECTIONS
-console.log(`\n${total - failed}/${total} passed`)
-if (failed) process.exit(1)
+// ── buildRetakeWindows ───────────────────────────────────────────────────────
+// The LLM retake pass used to slice its prompt at 8,000 characters, leaving
+// everything past ~2 minutes of speech with no LLM coverage. It now reads the
+// whole transcript in overlapping windows; this pins the boundary math —
+// every word covered, windows overlap so a retake straddling a boundary is
+// seen whole by at least one window, and a short transcript stays one call.
+let WINDOWS = 0
+console.log('\n── buildRetakeWindows (full-transcript coverage) ────────────────')
+{
+  const check = (name: string, ok: boolean, detail: string) => {
+    if (!ok) failed++
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`)
+    console.log(`      ${detail}`)
+    WINDOWS++
+  }
+
+  const short = buildRetakeWindows(300)
+  check('a short transcript stays a single window',
+    short.length === 1 && short[0][0] === 0 && short[0][1] === 300,
+    `300 words -> ${JSON.stringify(short)}`)
+
+  const long = buildRetakeWindows(1200)
+  const coversAll = long[0][0] === 0 && long[long.length - 1][1] === 1200 &&
+    long.every(([a, b], i) => i === 0 || a < long[i - 1][1])
+  check('a long transcript is fully covered, first word to last',
+    coversAll, `1200 words -> ${JSON.stringify(long)}`)
+
+  // A retake spans up to ~14 words plus its restart; the overlap must be wide
+  // enough that one straddling a boundary is whole inside SOME window.
+  const overlapOk = long.every(([a], i) => i === 0 || long[i - 1][1] - a >= 30)
+  check('adjacent windows overlap enough to see a straddling retake whole',
+    overlapOk, `overlaps: ${long.slice(1).map(([a], i) => long[i][1] - a).join(', ')}`)
+}
+
+// ── sanitizeWordTimings + tail integrity ─────────────────────────────────────
+// Found by the cut harness on a real client clip: Scribe stretched the final
+// "bio." across 1.1s of trailing silence (122.58-123.98, silence from 122.89).
+// The cut was judged with clamped timings but the caption remap read RAW ones,
+// so the word's raw midpoint landed inside the carved silence and the last
+// word of the CTA vanished from the captions while the audio kept it.
+let TAIL = 0
+console.log('\n── sanitizeWordTimings (stretched tokens, tail integrity) ───────')
+// Async block (planKeepSegments is async even when it makes no LLM calls);
+// the tally waits for it. tsx compiles this file as CJS, so no top-level await.
+;(async () => {
+  const check = (name: string, ok: boolean, detail: string) => {
+    if (!ok) failed++
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`)
+    console.log(`      ${detail}`)
+    TAIL++
+  }
+
+  // Silence beginning inside the word and swallowing its tail clamps the word
+  // to the silence start — the precise signal.
+  const stretched = sanitizeWordTimings(
+    timed('my@9.4-9.6', 'bio.@10.0-11.4'),
+    [[10.3, 13.0]],
+  )
+  check('silence swallowing a word tail clamps the word to the silence start',
+    Math.abs(stretched[1].end - 10.3) < 0.001,
+    `"bio." 10.0-11.4 with silence from 10.3 -> end ${stretched[1].end.toFixed(2)}`)
+
+  // No silence detected there: the blunt 1.2s -> 0.9s fallback still applies.
+  const blunt = sanitizeWordTimings(timed('fact,@5.0-8.7'))
+  check('a stretched token with no silence data falls back to the 0.9s clamp',
+    Math.abs(blunt[0].end - 5.9) < 0.001,
+    `"fact," 5.0-8.7 -> end ${blunt[0].end.toFixed(2)}`)
+
+  // Normal words pass through untouched (same object, no copy).
+  const normal = sanitizeWordTimings(timed('link@1.0-1.3', 'in@1.35-1.45'), [[2.0, 3.0]])
+  check('normal words are untouched',
+    normal[0].end === 1.3 && normal[1].end === 1.45,
+    'no clamp applied')
+
+  // THE OBSERVED BUG, end to end: cut then remap. Under 12 words, so
+  // planKeepSegments makes no LLM calls — this is fully deterministic. The
+  // final word must survive into the edited words (= the captions).
+  const cta = timed(
+    'book@7.0-7.2', 'a@7.25-7.3', 'call@7.35-7.6', 'through@7.65-7.9',
+    'the@7.95-8.0', 'link@8.05-8.3', 'in@8.35-8.4', 'my@8.45-8.6', 'bio.@8.7-10.1',
+  )
+  const silences: Array<[number, number]> = [[9.0, 12.0]]
+  const segs = await planKeepSegments(cta, 12.0, { silences })
+  const edited = remapToEditedTimeline(sanitizeWordTimings(cta, silences), segs)
+  const lastWord = edited[edited.length - 1]?.text
+  check('the final word of a CTA survives the trailing-silence carve into the captions',
+    lastWord === 'bio.',
+    `edited words end with "${lastWord}" (segments ${segs.map(s => `${s.start.toFixed(2)}-${s.end.toFixed(2)}`).join(', ')})`)
+
+  const total = CASES.length + STUTTER.length + REPEATS.length + CORRECTIONS + WINDOWS + TAIL
+  console.log(`\n${total - failed}/${total} passed`)
+  if (failed) process.exit(1)
+})().catch(e => { console.error(e); process.exit(1) })
