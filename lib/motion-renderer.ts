@@ -1234,6 +1234,9 @@ export function containerMemoryGb(): number {
 // concurrent renders reach it well before they reach the memory limit. Sizing
 // only by memory is exactly how the box got planned for 11 renders and
 // crashed. null when unreadable/unlimited.
+// NOT wired into renderSlots() yet — that needs a measured per-render thread
+// count on Railway, not a guess. Kept so the limit is one call away.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function containerPidLimit(): number | null {
   try {
     const raw = fs.readFileSync('/sys/fs/cgroup/pids.max', 'utf8').trim()
@@ -2621,7 +2624,6 @@ async function renderRemotionEdit(
     const outputPath = path.join(outDir, `${variantId}.mp4`)
 
     await setVariantProgress(jobId, variantId, 1, STEPS, 'Preparing footage')
-    const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
     const workPath = path.join(outDir, `${variantId}_isolated.mp4`)
     staged.push(workPath)
     const profile = await ensureContentProfile(jobId, sourceUrl)
@@ -2655,6 +2657,11 @@ async function renderRemotionEdit(
       // Auphonic/ElevenLabs chain itself. Never let that be silent.
       await setVariantProgress(jobId, variantId, 2, STEPS, 'Cleaning audio')
       console.warn(`[motion-renderer] no shared clean for job ${jobId.slice(0, 8)} — ${variantId} is cleaning its own audio (extra paid call)`)
+      // Only this fallback needs the compressed source. Fetching it up front
+      // re-downloaded and re-encoded the whole source from Drive for any v4–v6
+      // started after the job completed (releaseJobSource had deleted it) —
+      // only to throw it away when the shared clean was used.
+      const compressedPath = await getLocalCompressedSource(jobId, sourceUrl, outDir)
       await stageRenderWorkCopy(compressedPath, workPath)
       await cleanAudioInPlace(workPath)
     }
@@ -2724,7 +2731,7 @@ async function renderRemotionEdit(
     // Eubank (v4): semantic tone accents (green/red/gold), punch pages, and
     // face-aware position/alignment runs — see lib/V4-EUBANK-PLAN.md.
     if (kit.captionStyle === 'eubank') {
-      await planEubankCaptions(plan.pages, profile, kit.variation)
+      await planEubankCaptions(plan.pages, profile)
     }
     // Julie and Glow reuse the same LLM accent picker, mapped onto plain word
     // flags: the reference accents a keyword on nearly every page, far denser

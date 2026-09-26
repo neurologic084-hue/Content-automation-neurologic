@@ -55,7 +55,7 @@ export default function NewIdeaPage() {
   const [ownBody, setOwnBody] = useState('')
   const [ownCta, setOwnCta] = useState('')
   const [ownMood, setOwnMood] = useState('')
-  const [ownLane, setOwnLane] = useState<AudienceLane | null>(null)
+  const [ownLane] = useState<AudienceLane | null>(null)
   const [ownSaving, setOwnSaving] = useState(false)
   const [ownError, setOwnError] = useState('')
   const [visibleSteps, setVisibleSteps] = useState(0)
@@ -113,9 +113,16 @@ export default function NewIdeaPage() {
     return () => clearTimeout(failOpen)
   }, [])
 
+  // Restart the progress list whenever generation begins — adjusted during
+  // render so the old count never paints; the effect only arms the timers.
+  const [prevStep, setPrevStep] = useState(step)
+  if (step !== prevStep) {
+    setPrevStep(step)
+    if (step === 'generating') setVisibleSteps(0)
+  }
+
   useEffect(() => {
     if (step === 'generating') {
-      setVisibleSteps(0)
       stepTimers.current.forEach(clearTimeout)
       stepTimers.current = GENERATING_STEPS.map((s, i) =>
         setTimeout(() => setVisibleSteps(i + 1), s.delay)
@@ -383,7 +390,7 @@ export default function NewIdeaPage() {
           {tab === 'write' && (
             <div className="bg-white border border-[#E4E4E0] rounded-2xl p-6">
               <label className="block text-sm font-medium text-[#18181B] mb-2">
-                What's the idea?
+                What&apos;s the idea?
               </label>
               <textarea
                 value={idea}
@@ -709,7 +716,7 @@ export default function NewIdeaPage() {
               </button>
               {pendingIdeaItem.format === 'lead_magnet' && (
                 <p className="text-[11px] text-[#FF4F17] bg-[#FFF3EF] px-2.5 py-1.5 rounded-lg mb-3 font-medium">
-                  Lead Magnet   CTA will be "Comment [WORD] below and I'll send it to you"
+                  Lead Magnet   CTA will be &ldquo;Comment [WORD] below and I&apos;ll send it to you&rdquo;
                 </p>
               )}
               <p className="text-[11px] font-bold text-[#FF4F17] uppercase tracking-widest mb-1.5">Selected idea</p>

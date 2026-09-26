@@ -1,13 +1,15 @@
 'use client'
 
 import { useState } from 'react'
-import { TOUR_KEY, TourModal } from './tour-modal'
+import { TourModal } from './tour-modal'
 
 export function TourTriggerButton() {
   const [open, setOpen] = useState(false)
 
+  // forceOpen shows the tour regardless of the seen flag, so the flag is left
+  // alone — clearing it would let the dashboard's first-visit tour reappear
+  // on top of this one.
   function handleClick() {
-    try { localStorage.removeItem(TOUR_KEY) } catch {}
     setOpen(true)
   }
 

@@ -57,6 +57,17 @@ export const MAX_FREE_PARKS = 6
 const RETRY_DISPATCH_DEDUPE_MS = 10 * 60 * 1000
 const retryDispatchedAt = new Map<string, number>()
 
+// A Submagic render goes quiet locally once handed off, so it looks stale to
+// every sweep — and the status route sweeps on EVERY 4s poll. Remember a
+// "still rendering" answer for a minute so that is one Submagic call per
+// variant per minute, not fifteen (and not outside SUBMAGIC_POLL_GAP_MS).
+const SUBMAGIC_ALIVE_CACHE_MS = 60 * 1000
+const submagicAliveUntil = new Map<string, number>()
+// When Submagic can't be reached at all (network error/timeout), keep treating
+// the render as alive — requeueing would resubmit a render that may still be
+// running, i.e. pay twice — but not forever.
+const SUBMAGIC_UNREACHABLE_GIVE_UP_MS = 3 * 60 * 60 * 1000
+
 /** Requeues one processing variant's task silently. Returns true when the
  *  requeue was taken (caller must NOT fail the variant), false when the budget
  *  is spent (caller proceeds to the honest failure card).
@@ -200,10 +211,13 @@ export async function sweepStaleVariants(
     //                failing it here would kill a live, paid render.
     //   failed/gone→ fall through and fail it with a real reason.
     if (v.external_id) {
+      const aliveKey = `${jobId}:${v.id}:${v.external_id}`
+      if (now < (submagicAliveUntil.get(aliveKey) ?? 0)) continue
       try {
         const { pollSubmagicJob } = await import('./video-pipeline')
         const res = await pollSubmagicJob(v.external_id)
         if (res.status === 'processing') {
+          submagicAliveUntil.set(aliveKey, now + SUBMAGIC_ALIVE_CACHE_MS)
           console.log(`[stale-sweep] ${jobId}:${v.id} quiet locally but Submagic still rendering it — leaving alone`)
           continue
         }
@@ -216,7 +230,17 @@ export async function sweepStaleVariants(
           await dispatchPipelineTask({ task: 'finalize-submagic', jobId, variantId: v.id, downloadUrl: res.downloadUrl })
           continue
         }
-      } catch { /* poll failed — treat as dead, exactly as before */ }
+      } catch (e) {
+        // pollSubmagicJob only throws when Submagic is unreachable (HTTP errors
+        // already come back as 'processing'), which says nothing about the
+        // render itself. Check again next minute rather than requeue it.
+        const startedAt = v.processing_started_at ? new Date(v.processing_started_at).getTime() : 0
+        if (startedAt && now - startedAt < SUBMAGIC_UNREACHABLE_GIVE_UP_MS) {
+          submagicAliveUntil.set(aliveKey, now + SUBMAGIC_ALIVE_CACHE_MS)
+          console.warn(`[stale-sweep] ${jobId}:${v.id} could not reach Submagic (${(e as Error).message}) — checking again shortly`)
+          continue
+        }
+      }
     }
     const neverStarted = !v.progress
     const deathReason = neverStarted

@@ -112,6 +112,106 @@ interface CalendarCell {
   isPast: boolean
 }
 
+type AccountsResult = { accounts: BlatoAccount[] } | { error: string }
+
+async function fetchAccounts(): Promise<AccountsResult> {
+  try {
+    const res = await fetch('/api/publish/accounts')
+    const data = await res.json()
+    if (!res.ok) return { error: data.error ?? 'Failed to load accounts.' }
+    return {
+      accounts: (data.accounts as BlatoAccount[]).filter(a => ALLOWED_PLATFORMS.has(a.platform.toLowerCase())),
+    }
+  } catch {
+    return { error: 'Could not reach Blotato.' }
+  }
+}
+
+type PublishData = { jobs: VideoJobRow[]; publishedRows: PublishedRow[]; keys: Set<string> }
+
+async function fetchPublishData(): Promise<PublishData> {
+  const supabase = createClient()
+  // Only the active profile's videos are publishable from here
+  const { data: activeBrand } = await supabase
+    .from('brand_settings')
+    .select('profile_slot')
+    .eq('is_active', true)
+    .limit(1)
+    .maybeSingle()
+  const slot = activeBrand?.profile_slot ?? 1
+  const [jobsRes, publishedRes] = await Promise.all([
+    // Include still-processing jobs too — a job counts as publishable as
+    // soon as its SELECTED variant is ready, even while sibling variants
+    // are still rendering. Filtering to status=complete hid exactly the
+    // job the user just clicked "Publish this" on.
+    supabase
+      .from('video_jobs')
+      .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
+      .in('status', ['complete', 'processing'])
+      .eq('profile_slot', slot)
+      .not('selected_variant', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(30),
+    supabase
+      .from('publish_jobs')
+      .select('id, video_job_id, variant_id, caption, status, published_at, scheduled_at, platform_posts, scripts(hook)')
+      .in('status', ['published', 'partial', 'scheduled'])
+      .eq('profile_slot', slot)
+      .order('published_at', { ascending: false, nullsFirst: false })
+      .limit(50),
+  ])
+
+  const publishedRows = (publishedRes.data ?? []).map((row: Record<string, unknown>) => ({
+    ...row,
+    script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
+  })) as PublishedRow[]
+
+  // Published/scheduled is tracked PER VARIANT — publishing our-v2 must
+  // not hide our-v3 from the list. Old rows without a variant_id count
+  // against the job's selected variant (the only thing publishable then).
+  const keys = new Set<string>()
+  const jobLevelPublished = new Set<string>()
+  for (const p of publishedRows) {
+    if (!p.video_job_id) continue
+    if (p.variant_id) keys.add(`${p.video_job_id}:${p.variant_id}`)
+    else jobLevelPublished.add(p.video_job_id)
+  }
+  for (const row of (jobsRes.data ?? []) as Record<string, unknown>[]) {
+    if (jobLevelPublished.has(row.id as string)) keys.add(`${row.id}:${row.selected_variant}`)
+  }
+
+  // A job stays listed as long as it has ANY ready variant — including
+  // fully-published jobs, so re-publishing stays possible (with a warning;
+  // the green checks on the chips show what already went out).
+  const hasReadyVariant = (row: Record<string, unknown>): boolean => {
+    const variants = (row.variants ?? []) as VideoVariant[]
+    return variants.some(v => v.status === 'ready' && !!v.download_url)
+  }
+
+  const jobs = (jobsRes.data ?? [])
+    .filter((row: Record<string, unknown>) => hasReadyVariant(row))
+    .map((row: Record<string, unknown>) => ({
+      ...row,
+      script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
+    })) as VideoJobRow[]
+  return { jobs, publishedRows, keys }
+}
+
+function calendarKey(month: Date): string {
+  return `${month.getFullYear()}-${month.getMonth()}`
+}
+
+// Wall-clock time for render-time checks ("is this schedule in the past?"),
+// refreshed each minute so a page left open doesn't go stale.
+function useMinuteClock(): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+  return now
+}
+
 function buildCalendarGrid(month: Date): CalendarCell[] {
   const year = month.getFullYear()
   const m = month.getMonth()
@@ -412,9 +512,11 @@ function PublishForm() {
     return d
   })
   const [scheduledPlatformsByDay, setScheduledPlatformsByDay] = useState<Record<string, Set<string>>>({})
-  const [loadingCalendar, setLoadingCalendar] = useState(false)
+  // Which month's schedule is loaded; loading = the shown month isn't it yet.
+  const [calendarLoadedKey, setCalendarLoadedKey] = useState<string | null>(null)
   const [selectedDate, setSelectedDate] = useState('')  // YYYY-MM-DD
   const [selectedTime, setSelectedTime] = useState('09:00')
+  const now = useMinuteClock()
 
   // Submit
   const [submitting, setSubmitting] = useState(false)
@@ -426,105 +528,39 @@ function PublishForm() {
 
   // ── Loaders ─────────────────────────────────────────────────────────────────
 
-  const loadAccounts = useCallback(async () => {
-    setLoadingAccounts(true)
-    setAccountsError(null)
-    try {
-      const res = await fetch('/api/publish/accounts')
-      const data = await res.json()
-      if (!res.ok) { setAccountsError(data.error ?? 'Failed to load accounts.'); return }
-      const filtered = (data.accounts as BlatoAccount[]).filter(
-        a => ALLOWED_PLATFORMS.has(a.platform.toLowerCase())
-      )
-      setAccounts(filtered)
-      setSelectedIds(new Set(filtered.map(a => a.id)))
-    } catch {
-      setAccountsError('Could not reach Blotato.')
-    } finally {
-      setLoadingAccounts(false)
+  // ── Loaders ─────────────────────────────────────────────────────────────────
+  // Fetching lives in module-level fetchers; state is applied in .then, so the
+  // mount effect never sets state synchronously. A caller that REloads shows
+  // the spinner itself.
+
+  const applyAccounts = useCallback((r: AccountsResult) => {
+    if ('error' in r) setAccountsError(r.error)
+    else {
+      setAccounts(r.accounts)
+      setSelectedIds(new Set(r.accounts.map(a => a.id)))
     }
+    setLoadingAccounts(false)
   }, [])
 
-  const loadJobs = useCallback(async () => {
-    setLoadingJobs(true)
-    try {
-      const supabase = createClient()
-      // Only the active profile's videos are publishable from here
-      const { data: activeBrand } = await supabase
-        .from('brand_settings')
-        .select('profile_slot')
-        .eq('is_active', true)
-        .limit(1)
-        .maybeSingle()
-      const slot = activeBrand?.profile_slot ?? 1
-      const [jobsRes, publishedRes] = await Promise.all([
-        // Include still-processing jobs too — a job counts as publishable as
-        // soon as its SELECTED variant is ready, even while sibling variants
-        // are still rendering. Filtering to status=complete hid exactly the
-        // job the user just clicked "Publish this" on.
-        supabase
-          .from('video_jobs')
-          .select('id, script_id, selected_variant, variants, created_at, scripts(hook, body, cta)')
-          .in('status', ['complete', 'processing'])
-          .eq('profile_slot', slot)
-          .not('selected_variant', 'is', null)
-          .order('created_at', { ascending: false })
-          .limit(30),
-        supabase
-          .from('publish_jobs')
-          .select('id, video_job_id, variant_id, caption, status, published_at, scheduled_at, platform_posts, scripts(hook)')
-          .in('status', ['published', 'partial', 'scheduled'])
-          .eq('profile_slot', slot)
-          .order('published_at', { ascending: false, nullsFirst: false })
-          .limit(50),
-      ])
-
-      const publishedRows = (publishedRes.data ?? []).map((row: Record<string, unknown>) => ({
-        ...row,
-        script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
-      })) as PublishedRow[]
-      setPublishedList(publishedRows)
-
-      // Published/scheduled is tracked PER VARIANT — publishing our-v2 must
-      // not hide our-v3 from the list. Old rows without a variant_id count
-      // against the job's selected variant (the only thing publishable then).
-      const keys = new Set<string>()
-      const jobLevelPublished = new Set<string>()
-      for (const p of publishedRows) {
-        if (!p.video_job_id) continue
-        if (p.variant_id) keys.add(`${p.video_job_id}:${p.variant_id}`)
-        else jobLevelPublished.add(p.video_job_id)
-      }
-      for (const row of (jobsRes.data ?? []) as Record<string, unknown>[]) {
-        if (jobLevelPublished.has(row.id as string)) keys.add(`${row.id}:${row.selected_variant}`)
-      }
-      setPublishedKeys(keys)
-
-      // A job stays listed as long as it has ANY ready variant — including
-      // fully-published jobs, so re-publishing stays possible (with a warning;
-      // the green checks on the chips show what already went out).
-      const hasReadyVariant = (row: Record<string, unknown>): boolean => {
-        const variants = (row.variants ?? []) as VideoVariant[]
-        return variants.some(v => v.status === 'ready' && !!v.download_url)
-      }
-
-      setJobs(
-        (jobsRes.data ?? [])
-          .filter((row: Record<string, unknown>) => hasReadyVariant(row))
-          .map((row: Record<string, unknown>) => ({
-            ...row,
-            script: Array.isArray(row.scripts) ? row.scripts[0] : row.scripts,
-          })) as VideoJobRow[]
-      )
-    } finally {
-      setLoadingJobs(false)
-    }
+  const applyPublishData = useCallback((d: PublishData) => {
+    setPublishedList(d.publishedRows)
+    setPublishedKeys(d.keys)
+    setJobs(d.jobs)
+    setLoadingJobs(false)
   }, [])
+
+  const loadJobs = useCallback(() => fetchPublishData().then(applyPublishData, e => {
+    console.error('[publish] loading jobs failed:', e)
+    setLoadingJobs(false)
+  }), [applyPublishData])
 
   useEffect(() => {
-    loadAccounts()
-    loadJobs()
-  }, [loadAccounts, loadJobs])
+    fetchAccounts().then(applyAccounts)
+    fetchPublishData().then(applyPublishData, e => {
+      console.error('[publish] loading jobs failed:', e)
+      setLoadingJobs(false)
+    })
+  }, [applyAccounts, applyPublishData])
 
   // Auto-select the job from ?jobId param once the list is ready.
   // When ?variantId is also present use that specific variant's current
@@ -567,28 +603,14 @@ function PublishForm() {
         setJobs(prev => prev.some(j => j.id === row.id) ? prev : [row, ...prev])
         applyJob(row)
       })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramJobId, paramVariantId, loadingJobs, jobs])
-
-  // Auto-generate captions once the param job is selected and accounts are ready.
-  // Uses accounts.length + loadingAccounts as deps (both state, defined above);
-  // canGenerate is checked inside the callback after all derived values are computed.
-  useEffect(() => {
-    if (!paramJobId || autoGenFired.current) return
-    if (selectedJobId !== paramJobId) return
-    if (loadingAccounts || accounts.length === 0) return
-    if (!canGenerate) return
-    autoGenFired.current = true
-    generateCaptions()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedJobId, accounts.length, loadingAccounts])
 
   // Fetch which platforms are already scheduled on each day in the visible month.
   // Blocking is per-platform: Facebook today doesn't block Instagram today, only another Facebook.
   useEffect(() => {
     if (scheduleMode !== 'later') return
     let cancelled = false
-    setLoadingCalendar(true)
+    const key = calendarKey(calendarMonth)
     const supabase = createClient()
     const monthStart = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1)
     const monthEnd = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0, 23, 59, 59)
@@ -608,12 +630,14 @@ function PublishForm() {
           for (const p of posts) byDay[day].add(p.platform.toLowerCase())
         }
         setScheduledPlatformsByDay(byDay)
-        setLoadingCalendar(false)
+        setCalendarLoadedKey(key)
       })
     return () => { cancelled = true }
   }, [scheduleMode, calendarMonth])
 
   // ── Derived ─────────────────────────────────────────────────────────────────
+
+  const loadingCalendar = scheduleMode === 'later' && calendarLoadedKey !== calendarKey(calendarMonth)
 
   const selectedJob = jobs.find(j => j.id === selectedJobId) ?? null
   const selectedVariant = selectedJob
@@ -629,7 +653,7 @@ function PublishForm() {
   const scheduledAt = selectedDate && selectedTime ? `${selectedDate}T${selectedTime}` : ''
   // The calendar only blocks days before today   picking today still needs a time-of-day check,
   // otherwise a past time (e.g. 9am when it's already 3pm) silently submits a past schedule.
-  const scheduledInPast = scheduledAt !== '' && new Date(scheduledAt).getTime() <= Date.now()
+  const scheduledInPast = scheduledAt !== '' && new Date(scheduledAt).getTime() <= now
 
   // Blocking is per-platform: a day is "taken" only for the platforms already
   // scheduled there. Facebook today doesn't block scheduling Instagram today too.
@@ -639,12 +663,19 @@ function PublishForm() {
 
   // Re-publish warning: the picked variant already went out (or is scheduled).
   // Allowed — reposting can be deliberate — but never silent.
-  const pickedAlreadyPublished = !!(selectedJob && pickedVariantId &&
-    publishedKeys.has(`${selectedJob.id}:${pickedVariantId}`))
-  const pickedPublishedRecord = pickedAlreadyPublished
-    ? publishedList.find(p => p.video_job_id === selectedJob!.id &&
-        (p.variant_id === pickedVariantId || (!p.variant_id && pickedVariantId === selectedJob!.selected_variant)))
-    : undefined
+  const pickedPublishedRecords = selectedJob && pickedVariantId && publishedKeys.has(`${selectedJob.id}:${pickedVariantId}`)
+    ? publishedList.filter(p => p.video_job_id === selectedJob.id &&
+        (p.variant_id === pickedVariantId || (!p.variant_id && pickedVariantId === selectedJob.selected_variant)))
+    : []
+  const pickedPublishedRecord = pickedPublishedRecords[0]
+  // Only platforms that actually went out count — a 'partial' row also lists
+  // the platforms that FAILED, and naming those as "already published" told
+  // her Facebook had posted when it never had.
+  const alreadyOutPlatforms = new Set(pickedPublishedRecords.flatMap(r =>
+    (r.platform_posts ?? []).filter(pp => pp.status === 'published' || pp.status === 'scheduled').map(pp => pp.platform.toLowerCase())))
+  // Warn only when this publish would actually repeat a post somewhere.
+  const repostPlatforms = [...new Set(selectedAccounts.map(a => a.platform.toLowerCase()))].filter(pl => alreadyOutPlatforms.has(pl))
+  const pickedAlreadyPublished = repostPlatforms.length > 0
 
   const hasScript = !!(selectedJob?.script?.hook)
   const canGenerate = hasScript && selectedPlatforms.length > 0
@@ -741,10 +772,27 @@ function PublishForm() {
     }
   }
 
+  // Auto-generate captions once the param job is selected and accounts are ready.
+  // Sits below canGenerate/generateCaptions so it never reads them before they
+  // are declared; deps stay the trigger set (state), not the derived values.
+  useEffect(() => {
+    if (!paramJobId || autoGenFired.current) return
+    if (selectedJobId !== paramJobId) return
+    if (loadingAccounts || accounts.length === 0) return
+    if (!canGenerate) return
+    autoGenFired.current = true
+    // Fires once per page load (ref-guarded) to start a visible action; the
+    // synchronous update is its spinner appearing, which is the point.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    generateCaptions()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJobId, accounts.length, loadingAccounts])
+
   function toggleAccount(id: string) {
     setSelectedIds(prev => {
       const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
       return next
     })
   }
@@ -777,6 +825,7 @@ function PublishForm() {
     setResult(data)
     // Refresh the per-variant published markers and the Published section so
     // the just-posted variant shows its badge immediately.
+    setLoadingJobs(true)
     void loadJobs()
   }
 
@@ -859,7 +908,7 @@ function PublishForm() {
           ) : accountsError && !noKey ? (
             <div className="flex items-center justify-between">
               <p className="text-xs text-[#EF4444]">{accountsError}</p>
-              <button type="button" onClick={loadAccounts} className="text-xs text-[#FF4F17] underline">Retry</button>
+              <button type="button" onClick={() => { setLoadingAccounts(true); setAccountsError(null); void fetchAccounts().then(applyAccounts) }} className="text-xs text-[#FF4F17] underline">Retry</button>
             </div>
           ) : accounts.length === 0 && !accountsError ? (
             <p className="text-xs text-[#A1A1AA]">
@@ -1366,9 +1415,7 @@ function PublishForm() {
               {pickedPublishedRecord?.published_at || pickedPublishedRecord?.scheduled_at
                 ? ` on ${new Date((pickedPublishedRecord.published_at ?? pickedPublishedRecord.scheduled_at)!).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
                 : ''}
-              {(pickedPublishedRecord?.platform_posts ?? []).length
-                ? ` to ${pickedPublishedRecord!.platform_posts.map(pp => pp.platform).join(', ')}`
-                : ''}
+              {` to ${repostPlatforms.join(', ')}`}
               . Publishing again will post the same video another time — fine if that&apos;s the plan, just make sure it is.
             </p>
           </div>

@@ -19,7 +19,7 @@ const TABS = [
   {
     href: '/ideas/new',
     label: 'New',
-    icon: (_active: boolean) => (
+    icon: () => (
       <div className="w-10 h-10 rounded-full bg-[#FF4F17] flex items-center justify-center -mt-5 shadow-lg">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 5v14M5 12h14" />

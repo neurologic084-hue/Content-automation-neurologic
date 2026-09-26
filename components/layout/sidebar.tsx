@@ -72,8 +72,6 @@ const NAV = [
   },
 ]
 
-const COMING_NAV: typeof NAV = []
-
 export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
   const pathname = usePathname()
   const router = useRouter()
@@ -87,6 +85,9 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
   const [pipeline, setPipeline] = useState<{ ideas: number; review: number; studio: number; published: number } | null>(null)
 
   useEffect(() => {
+    // The sidebar is display:none below md, but stays mounted — skip its eight
+    // queries on phones, where nothing it loads is visible.
+    if (!window.matchMedia('(min-width: 768px)').matches) return
     let cancelled = false
     async function load() {
       const supabase = createClient()

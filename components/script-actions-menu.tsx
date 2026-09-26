@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { ConfirmModal } from '@/components/confirm-modal'
+import { useIsClient } from '@/components/use-is-client'
 
 interface Folder {
   id: string
@@ -31,7 +32,7 @@ interface MenuPos {
 const MENU_MAX_HEIGHT = 380
 
 export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId, hasEdit = false }: Props) {
-  const [mounted, setMounted] = useState(false)
+  const mounted = useIsClient()
   const [menuOpen, setMenuOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null)
   const [showDelete, setShowDelete] = useState(false)
@@ -46,7 +47,6 @@ export function ScriptActionsMenu({ scriptId, ideaId, currentFolderId, hasEdit =
   const [error, setError] = useState<string | null>(null)
   const router = useRouter()
 
-  useEffect(() => { setMounted(true) }, [])
 
   const closeMenu = useCallback(() => {
     setMenuOpen(false)

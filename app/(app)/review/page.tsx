@@ -33,19 +33,28 @@ function formatDate(iso: string) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
+type ReviewCardScript = {
+  id: string
+  hook: string
+  mood_tag: string | null
+  created_at: string
+  script_format?: string | null
+  idea?: { confirmed_lane?: string | null; raw_idea?: string | null } | { confirmed_lane?: string | null; raw_idea?: string | null }[] | null
+}
+
 function ScriptCard({
   script,
   delay,
   compact = false,
 }: {
-  script: any
+  script: ReviewCardScript
   delay: number
   compact?: boolean
 }) {
   const idea = Array.isArray(script.idea) ? script.idea[0] : script.idea
   const lane = idea?.confirmed_lane as string | undefined
   const laneColors = lane ? LANE_COLOR[lane] : { bg: '#F4F3F0', text: '#71717A' }
-  const format = (script.filming_plan as any)?.script_format as string | undefined
+  const format = script.script_format ?? undefined
 
   if (compact) {
     return (
@@ -55,7 +64,7 @@ function ScriptCard({
         style={{ animationDelay: `${delay}ms` }}
       >
         <div className="w-2 h-2 rounded-full bg-[#22C55E] flex-shrink-0" />
-        <p className="flex-1 text-sm text-[#18181B] truncate">"{script.hook}"</p>
+        <p className="flex-1 text-sm text-[#18181B] truncate">&ldquo;{script.hook}&rdquo;</p>
         {lane && (
           <span className="text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0" style={{ background: laneColors.bg, color: laneColors.text }}>
             {LANE_LABEL[lane]}
@@ -94,12 +103,12 @@ function ScriptCard({
 
         {/* Idea context */}
         {idea?.raw_idea && (
-          <p className="text-xs text-[#A1A1AA] mb-1.5 truncate">Re: "{idea.raw_idea}"</p>
+          <p className="text-xs text-[#A1A1AA] mb-1.5 truncate">Re: &ldquo;{idea.raw_idea}&rdquo;</p>
         )}
 
         {/* Hook */}
         <p className="text-sm font-medium text-[#18181B] line-clamp-2 leading-relaxed mb-2">
-          "{script.hook}"
+          &ldquo;{script.hook}&rdquo;
         </p>
 
         <p className="text-xs text-[#C4C0BB]">{formatDate(script.created_at)}</p>
@@ -137,13 +146,13 @@ export default async function ReviewPage() {
   const [pendingRes, needsRevisionRes, recentApprovedRes] = await Promise.all([
     supabase
       .from('scripts')
-      .select('id, hook, status, mood_tag, created_at, filming_plan, idea:ideas(confirmed_lane, raw_idea)')
+      .select('id, hook, status, mood_tag, created_at, script_format:filming_plan->>script_format, idea:ideas(confirmed_lane, raw_idea)')
       .eq('status', 'pending_review')
       .eq('profile_slot', slot)
       .order('created_at', { ascending: false }),
     supabase
       .from('scripts')
-      .select('id, hook, status, mood_tag, created_at, filming_plan, idea:ideas(confirmed_lane, raw_idea)')
+      .select('id, hook, status, mood_tag, created_at, script_format:filming_plan->>script_format, idea:ideas(confirmed_lane, raw_idea)')
       .eq('status', 'needs_revision')
       .eq('profile_slot', slot)
       .order('created_at', { ascending: false }),

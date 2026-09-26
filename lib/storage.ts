@@ -17,9 +17,12 @@ function r2Client() {
 }
 
 export async function uploadToStorage(localPath: string, fileName: string, jobId: string, folder?: string): Promise<string> {
-  const fileBuffer = fs.readFileSync(localPath)
+  // Streamed, not read whole: readFileSync blocked the server's event loop and
+  // held the entire video (a 4K source can be ~1GB) in memory through every
+  // retry. statSync still fails fast on a missing file, as before.
+  const { size } = fs.statSync(localPath)
   const storagePath = folder ? `${folder}/${jobId}/${fileName}` : `${jobId}/${fileName}`
-  console.log(`[storage] uploading ${storagePath} (${(fileBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
+  console.log(`[storage] uploading ${storagePath} (${(size / 1024 / 1024).toFixed(1)} MB)`)
 
   // Flaky links corrupt long TLS streams mid-upload ("SSL alert bad record
   // mac"), so:
@@ -37,7 +40,9 @@ export async function uploadToStorage(localPath: string, fileName: string, jobId
         params: {
           Bucket: BUCKET,
           Key: storagePath,
-          Body: fileBuffer,
+          // A fresh stream per attempt — a consumed stream can't be re-read.
+          // lib-storage buffers one part at a time, so part retries still work.
+          Body: fs.createReadStream(localPath),
           ContentType: 'video/mp4',
         },
         partSize: 8 * 1024 * 1024,

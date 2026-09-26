@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { useRouter, useSearchParams, usePathname } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { ConfirmModal } from '@/components/confirm-modal'
+import { useIsClient } from '@/components/use-is-client'
 
 interface Folder {
   id: string
@@ -34,13 +35,18 @@ export function FolderTabs({ folders: initialFolders, total, unfiledCount }: Pro
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<Folder | null>(null)
-  const [mounted, setMounted] = useState(false)
+  const mounted = useIsClient()
   const router = useRouter()
   const searchParams = useSearchParams()
   const pathname = usePathname()
 
-  useEffect(() => { setMounted(true) }, [])
-  useEffect(() => { setFolders(initialFolders) }, [initialFolders])
+  // Resync when the server sends a new list — adjusted during render rather
+  // than in an effect, so the stale list never paints.
+  const [prevInitialFolders, setPrevInitialFolders] = useState(initialFolders)
+  if (initialFolders !== prevInitialFolders) {
+    setPrevInitialFolders(initialFolders)
+    setFolders(initialFolders)
+  }
 
   const raw = searchParams.get('folder') ?? ''
   const selectedIds = raw ? raw.split(',').filter(Boolean) : []

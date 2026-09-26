@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import { ConfirmModal } from '@/components/confirm-modal'
 import { failureAction } from '@/lib/error-explain'
@@ -42,9 +41,6 @@ const BROLL_OPTIONS: { value: BrollMode; label: string; hint: string }[] = [
   { value: 'none',   label: 'None',   hint: 'Talking head only' },
 ]
 
-// What B-roll is allowed to come from. Only meaningful once she has CONFIRMED
-// her own clips — before that every option would resolve to stock anyway.
-type BrollSourceUi = 'both' | 'custom' | 'stock'
 // Where cutaways come from, once she has supplied her own clips. Mirrors
 // BrollSource in lib/broll.ts (kept inline so no server module reaches the
 // client bundle). Only shown when a folder/link is actually provided.
@@ -106,7 +102,12 @@ export function VideoStudio({ script, existingJobId }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [startingVariants, setStartingVariants] = useState<Set<string>>(new Set())
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Poll loop: a timeout re-armed only after each response lands, so a slow
+  // status call can never overlap the next one (and an older response can't
+  // overwrite a newer one).
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollActive = useRef(false)
+  const pollInFlight = useRef(false)
   const pollFailCount = useRef(0)
   const router = useRouter()
 
@@ -114,23 +115,22 @@ export function VideoStudio({ script, existingJobId }: Props) {
     if (jobId && (status === 'loading' || status === 'processing' || status === 'complete')) {
       startPolling(jobId)
     }
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    return stopPolling
+  // Keyed on the job only: status changes come FROM the poll and must not restart it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId])
 
-  // Background tabs throttle setInterval, and a long render can finish while the
-  // tab is hidden — leaving the progress bar frozen at its last value. Re-poll
-  // the moment the tab is focused again so the UI catches up to reality.
+  // The loop skips ticks while the tab is hidden, and a long render can finish
+  // meanwhile — re-poll the moment the tab is visible again so the UI catches
+  // up. (visibilitychange alone: 'focus' fired alongside it, doubling the call.)
   useEffect(() => {
     function refresh() {
-      if (jobId && document.visibilityState === 'visible') pollStatus(jobId)
+      if (jobId && document.visibilityState === 'visible') void pollStatus(jobId)
     }
     document.addEventListener('visibilitychange', refresh)
-    window.addEventListener('focus', refresh)
-    return () => {
-      document.removeEventListener('visibilitychange', refresh)
-      window.removeEventListener('focus', refresh)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => document.removeEventListener('visibilitychange', refresh)
+  // pollStatus only reads refs and setters, so the job id is the real dependency.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId])
 
   // Preview cards crop (object-cover) to fill a compact thumbnail, but that
@@ -153,16 +153,31 @@ export function VideoStudio({ script, existingJobId }: Props) {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
   }, [])
 
+  function stopPolling() {
+    pollActive.current = false
+    if (pollTimer.current) clearTimeout(pollTimer.current)
+    pollTimer.current = null
+  }
+
   function startPolling(id: string) {
-    if (pollRef.current) clearInterval(pollRef.current)
-    // 4s: fast enough that progress feels live, light enough that the server
-    // isn't hammering Submagic's poll API (and on Vercel, each tick is a
-    // billed function call).
-    pollRef.current = setInterval(() => pollStatus(id), 4000)
-    pollStatus(id)
+    stopPolling()
+    pollActive.current = true
+    void pollTick(id)
+  }
+
+  // 4s: fast enough that progress feels live, light enough that the server
+  // isn't hammering Submagic's poll API.
+  async function pollTick(id: string) {
+    pollTimer.current = null
+    if (!document.hidden) await pollStatus(id)
+    if (pollActive.current && !pollTimer.current) {
+      pollTimer.current = setTimeout(() => void pollTick(id), 4000)
+    }
   }
 
   async function pollStatus(id: string) {
+    if (pollInFlight.current) return
+    pollInFlight.current = true
     try {
       const res = await fetch(`/api/video/status/${id}`)
       const data = await res.json()
@@ -170,7 +185,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
         pollFailCount.current++
         if (pollFailCount.current >= 4) {
           setError(`Status check failed: ${data.error ?? 'Unknown error'}. Try refreshing.`)
-          if (pollRef.current) clearInterval(pollRef.current)
+          stopPolling()
         }
         return
       }
@@ -183,16 +198,22 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
       if (data.status === 'complete') {
         setStatus('complete')
-        if (pollRef.current) clearInterval(pollRef.current)
+        stopPolling()
       } else {
         setStatus('processing')
+        // Prep done and nothing started: every variant waits on a Start click,
+        // which restarts polling itself — until then there is nothing to watch.
+        const vs: VideoVariant[] = data.variants ?? []
+        if (vs.length > 0 && vs.every(v => v.status === 'pending' && !v.progress)) stopPolling()
       }
     } catch {
       pollFailCount.current++
       if (pollFailCount.current >= 6) {
         setError('Lost connection to server. Try refreshing the page.')
-        if (pollRef.current) clearInterval(pollRef.current)
+        stopPolling()
       }
+    } finally {
+      pollInFlight.current = false
     }
   }
 

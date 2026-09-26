@@ -10,8 +10,8 @@ export function CountUp({ value, duration = 900 }: { value: number; duration?: n
 
   useEffect(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || value === 0) {
-      setDisplay(value)
-      return
+      raf.current = requestAnimationFrame(() => setDisplay(value))
+      return () => cancelAnimationFrame(raf.current)
     }
     const start = performance.now()
     const tick = (now: number) => {

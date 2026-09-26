@@ -8,18 +8,21 @@ export default async function EditPage() {
   const supabase = await createClient()
   const slot = await getActiveSlot(supabase)
 
-  const { data: scripts } = await supabase
-    .from('scripts')
-    .select('id, hook, mood_tag, approved_at')
-    .eq('status', 'approved')
-    .eq('profile_slot', slot)
-    .order('approved_at', { ascending: false })
+  // Independent — both need only the slot, so one round trip instead of two.
+  const [{ data: scripts }, { data: jobs }] = await Promise.all([
+    supabase
+      .from('scripts')
+      .select('id, hook, mood_tag, approved_at')
+      .eq('status', 'approved')
+      .eq('profile_slot', slot)
+      .order('approved_at', { ascending: false }),
+    supabase
+      .from('video_jobs')
+      .select('id, script_id, status, selected_variant')
+      .eq('profile_slot', slot),
+  ])
 
   const jobsByScript: Record<string, { id: string; status: string; selected_variant: string | null }> = {}
-  const { data: jobs } = await supabase
-    .from('video_jobs')
-    .select('id, script_id, status, selected_variant')
-    .eq('profile_slot', slot)
   if (jobs) {
     for (const j of jobs) jobsByScript[j.script_id] = j
   }

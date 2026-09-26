@@ -1,4 +1,8 @@
 const BASE_URL = 'https://backend.blotato.com/v2'
+// Reads fail fast; the post itself gets longer because a timeout there leaves
+// it unknown whether Blotato accepted it.
+const READ_TIMEOUT_MS = 15_000
+const POST_TIMEOUT_MS = 60_000
 
 function headers() {
   return {
@@ -12,8 +16,10 @@ export interface BlatoAccount {
   platform: string
   fullname: string
   username: string
-  // Facebook pages have a pageId returned by the Blotato accounts API
+  // Facebook only: the connected Page. Blotato's accounts list does NOT include
+  // it — getAccounts() fills it in from the account's /subaccounts endpoint.
   pageId?: string
+  pageName?: string
   // Pass-through for any other platform-specific fields Blotato returns
   [key: string]: unknown
 }
@@ -42,6 +48,7 @@ export interface BlatoPostResult {
 export async function getAccounts(): Promise<BlatoAccount[]> {
   const res = await fetch(`${BASE_URL}/users/me/accounts`, {
     headers: headers(),
+    signal: AbortSignal.timeout(READ_TIMEOUT_MS),
     cache: 'no-store',
   })
   if (!res.ok) {
@@ -49,10 +56,49 @@ export async function getAccounts(): Promise<BlatoAccount[]> {
     throw new Error(`Blotato accounts fetch failed (${res.status}): ${err}`)
   }
   const data = await res.json()
-  // API returns { items: [...] } — pass through the full raw object so platform-specific
-  // fields like pageId survive to the publish call
+  // API returns { items: [...] } — pass through the full raw object so any
+  // platform-specific fields survive to the publish call
   const raw: BlatoAccount[] = Array.isArray(data) ? data : (data.items ?? data.accounts ?? data.data ?? [])
-  return raw
+  return Promise.all(raw.map(async acc => {
+    if (acc.platform.toLowerCase() !== 'facebook' || acc.pageId) return acc
+    const page = await getFacebookPage(acc.id).catch(() => null)
+    return page ? { ...acc, pageId: page.id, pageName: page.name } : acc
+  }))
+}
+
+// A Facebook post targets a Page, and Blotato's Page id is NOT the account id —
+// it lives on /accounts/{id}/subaccounts (e.g. account 37730 → page
+// 918552121656299). Sending the account id as pageId is what produced
+// "422 Page / subaccount not found" on every Facebook publish.
+async function getFacebookPage(accountId: string): Promise<{ id: string; name?: string } | null> {
+  const res = await fetch(`${BASE_URL}/users/me/accounts/${encodeURIComponent(accountId)}/subaccounts`, {
+    headers: headers(),
+    signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error(`Blotato subaccounts fetch failed (${res.status})`)
+  const data = await res.json()
+  const items: { id?: string | number; name?: string }[] = Array.isArray(data) ? data : (data.items ?? [])
+  const page = items.find(p => p.id != null)
+  return page ? { id: String(page.id), name: page.name } : null
+}
+
+// Blotato error bodies are JSON like {"message":"..."}; show the sentence, not
+// the JSON, and say what to do when it is a connection problem she can fix.
+function describePublishError(status: number, body: string, platform: string): string {
+  let message = body.trim()
+  try {
+    const parsed = JSON.parse(body) as { message?: unknown; error?: unknown }
+    const m = parsed.message ?? parsed.error
+    if (typeof m === 'string' && m.trim()) message = m.trim()
+  } catch {
+    // not JSON — keep the raw text
+  }
+  if (/subaccount not found|reconnect your social account|not connected|token.*(expired|invalid)/i.test(message)) {
+    const name = platform.charAt(0).toUpperCase() + platform.slice(1)
+    return `${name} needs reconnecting in Blotato (my.blotato.com → Accounts), then publish again. Blotato said: ${message.slice(0, 200)}`
+  }
+  return `Blotato rejected the post (${status}): ${message.slice(0, 300)}`
 }
 
 export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResult> {
@@ -62,12 +108,24 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
   let target: Record<string, unknown>
 
   if (platform === 'facebook') {
-    // Blotato requires pageId for Facebook posts. The connected account's id IS the page id
-    // in Blotato's system; fall back to accountId if pageId is not explicitly set.
-    target = {
-      targetType: 'facebook',
-      pageId: opts.pageId ?? opts.accountId,
+    // Blotato requires the Page's own id. Resolve it here too, so a publish
+    // from a tab loaded before getAccounts() carried pageId still works.
+    let pageId = opts.pageId
+    if (!pageId) {
+      try {
+        pageId = (await getFacebookPage(opts.accountId))?.id
+      } catch (e) {
+        return { postId: null, status: 'failed', error: `Could not look up the Facebook Page in Blotato: ${(e as Error).message}` }
+      }
     }
+    if (!pageId) {
+      return {
+        postId: null,
+        status: 'failed',
+        error: 'No Facebook Page is linked to this account in Blotato. Reconnect Facebook at my.blotato.com and pick a Page, then publish again.',
+      }
+    }
+    target = { targetType: 'facebook', pageId }
   } else if (platform === 'youtube') {
     // Title comes from the caption before the | separator
     const title = (opts.youtubeTitle ?? opts.text.split('|')[0]).trim().slice(0, 100)
@@ -116,15 +174,28 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
     ...(opts.scheduledAt ? { scheduledTime: opts.scheduledAt } : {}),
   }
 
-  const res = await fetch(`${BASE_URL}/posts`, {
-    method: 'POST',
-    headers: headers(),
-    body: JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}/posts`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+    })
+  } catch (e) {
+    const timedOut = (e as Error).name === 'TimeoutError'
+    return {
+      postId: null,
+      status: 'failed',
+      error: timedOut
+        ? 'Blotato did not answer in time — the post may still go out. Check my.blotato.com before publishing again, so it is not posted twice.'
+        : `Could not reach Blotato: ${(e as Error).message}`,
+    }
+  }
 
   if (!res.ok) {
     const err = await res.text()
-    return { postId: null, status: 'failed', error: `HTTP ${res.status}: ${err.slice(0, 300)}` }
+    return { postId: null, status: 'failed', error: describePublishError(res.status, err, platform) }
   }
 
   const data = await res.json()
@@ -163,6 +234,7 @@ async function pollPostStatus(
     try {
       const res = await fetch(`${BASE_URL}/posts/${postSubmissionId}`, {
         headers: headers(),
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
         cache: 'no-store',
       })
       if (res.ok) {

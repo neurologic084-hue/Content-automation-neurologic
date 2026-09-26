@@ -3,21 +3,9 @@
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import type { Script } from '@/lib/types'
+import type { Idea, Script } from '@/lib/types'
 import { PulseLoader, PulseOverlay } from '@/components/pulse-loader'
 import { Teleprompter } from '@/components/teleprompter'
-
-const LANE_LABEL: Record<string, string> = {
-  adhd_parents: 'ADHD Parents',
-  sympathetic_overdrive: 'Sympathetic Overdrive',
-  burnout_professionals: 'Burned-Out Professionals',
-}
-
-const LANE_COLOR: Record<string, { bg: string; text: string }> = {
-  adhd_parents: { bg: '#EEF2FF', text: '#6366F1' },
-  sympathetic_overdrive: { bg: '#FFF3EF', text: '#FF4F17' },
-  burnout_professionals: { bg: '#F4F3F0', text: '#71717A' },
-}
 
 const BEAT_COLORS = ['#FF4F17', '#6366F1', '#059669']
 const BEAT_FALLBACK_LABELS = ['The situation', 'Why it happens', 'What changes it']
@@ -187,9 +175,8 @@ export default function ScriptDetailPage() {
     return <div className="p-8 text-center text-[#71717A]">Script not found.</div>
   }
 
-  const idea = Array.isArray(script.idea) ? (script.idea as any[])[0] : script.idea
-  const lane = idea?.confirmed_lane as string | undefined
-  const laneColors = lane ? LANE_COLOR[lane] : { bg: '#F4F3F0', text: '#71717A' }
+  // Supabase may return the joined idea as a one-element array
+  const idea = Array.isArray(script.idea) ? (script.idea as Idea[])[0] : script.idea
   const isApproved = script.status === 'approved'
   const isNeedsRevision = script.status === 'needs_revision'
   const isPendingReview = script.status === 'pending_review'
@@ -324,7 +311,7 @@ export default function ScriptDetailPage() {
             )}
           </div>
           {idea?.raw_idea && (
-            <p className="text-xs text-[#A1A1AA] break-words">Idea: "{idea.raw_idea}"</p>
+            <p className="text-xs text-[#A1A1AA] break-words">Idea: &ldquo;{idea.raw_idea}&rdquo;</p>
           )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -615,7 +602,7 @@ export default function ScriptDetailPage() {
               <p className="text-xs text-[#71717A] mb-2 italic">{script.search_context.answer}</p>
             )}
             <div className="space-y-1">
-              {script.search_context.results?.map((r: any, i: number) => (
+              {script.search_context.results?.map((r, i) => (
                 <p key={i} className="text-xs text-[#A1A1AA]">• {r.title}</p>
               ))}
             </div>

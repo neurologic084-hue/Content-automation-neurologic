@@ -1,3 +1,7 @@
+// A hung search must fail fast so the OpenRouter fallback (TODO-JUNE §3) can
+// run — without a timeout, fetch waits on Node's ~300s default.
+const TAVILY_TIMEOUT_MS = 20_000
+
 export interface TavilyResult {
   title: string
   url: string
@@ -18,6 +22,7 @@ export async function searchWeb(query: string): Promise<TavilyResponse | null> {
   try {
     const res = await fetch('https://api.tavily.com/search', {
       method: 'POST',
+      signal: AbortSignal.timeout(TAVILY_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
@@ -113,6 +118,7 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
   const [researchRes, viralRes, redditRes] = await Promise.allSettled([
     fetch('https://api.tavily.com/search', {
       method: 'POST',
+      signal: AbortSignal.timeout(TAVILY_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
@@ -125,6 +131,7 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
     }),
     fetch('https://api.tavily.com/search', {
       method: 'POST',
+      signal: AbortSignal.timeout(TAVILY_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
@@ -138,6 +145,7 @@ export async function searchWebEnhanced(idea: string, lane: string): Promise<Tav
     // Reddit: authentic community language   real words real people use about this problem
     fetch('https://api.tavily.com/search', {
       method: 'POST',
+      signal: AbortSignal.timeout(TAVILY_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,
@@ -187,6 +195,7 @@ export async function searchNicheNews(topics: string): Promise<{ title: string; 
   try {
     const res = await fetch('https://api.tavily.com/search', {
       method: 'POST',
+      signal: AbortSignal.timeout(TAVILY_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         api_key: apiKey,

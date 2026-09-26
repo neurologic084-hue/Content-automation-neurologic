@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
-import path from 'path'
 import { createClient } from '@/lib/supabase/server'
 import { VARIANT_DEFINITIONS, DEFAULT_MUSIC_MODE, extractDriveFileId, extractDriveFolderId, listDriveFolderVideos, verifyDriveFile } from '@/lib/video-pipeline'
-import type { MusicMode, VideoVariant } from '@/lib/video-pipeline'
+import type { MusicMode } from '@/lib/video-pipeline'
 import { normalizeGradeMode } from '@/lib/color-grade'
 import { normalizeBrollSetting, normalizeBrollSource } from '@/lib/broll'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
@@ -93,9 +92,9 @@ export async function POST(req: NextRequest) {
   await supabase.from('video_jobs').delete().eq('script_id', scriptId)
   for (const old of oldJobs ?? []) {
     void deleteJobStorage(old.id)
-    try {
-      fs.rmSync(rendersDir(old.id), { recursive: true, force: true })
-    } catch { /* best-effort */ }
+    // Async and not awaited: a render folder can be gigabytes, and rmSync
+    // froze the whole server (every request, every render) while it unlinked.
+    void fs.promises.rm(rendersDir(old.id), { recursive: true, force: true }).catch(() => { /* best-effort */ })
   }
 
   const variants = VARIANT_DEFINITIONS.filter((def) => !def.hidden).map((def) => ({

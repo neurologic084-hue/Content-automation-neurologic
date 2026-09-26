@@ -32,6 +32,12 @@ export async function POST(req: NextRequest) {
   if (!jobId || !variantId) {
     return NextResponse.json({ error: 'Missing jobId or variantId.' }, { status: 400 })
   }
+  // The id ends up in output paths that reach shell commands, and the stored
+  // variants JSON is user-writable under RLS — so only accept the known shape
+  // (every id ever created is our-v<n>).
+  if (typeof variantId !== 'string' || !/^our-v\d+$/.test(variantId)) {
+    return NextResponse.json({ error: 'Unknown variant.' }, { status: 400 })
+  }
 
   const supabase = await createClient()
 

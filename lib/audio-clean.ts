@@ -249,7 +249,9 @@ export async function detectSilences(
   const minDur = opts.minDurationSec ?? 0.35
   try {
     const out = await run(
-      `ffmpeg -v info -i "${videoPath}" -af "silencedetect=noise=${noise}dB:d=${minDur}" -f null - 2>&1`
+      // -vn: audio-only analysis. Without it the null muxer also decoded every
+      // video frame (a full 1080p/4K decode per call, up to 7 calls per job).
+      `ffmpeg -v info -i "${videoPath}" -vn -af "silencedetect=noise=${noise}dB:d=${minDur}" -f null - 2>&1`
     )
     const silences: Array<[number, number]> = []
     let pending: number | null = null

@@ -35,7 +35,12 @@ export function MobileHeader() {
   }, [])
 
   // Navigating away should never leave the sheet hanging over the new page.
-  useEffect(() => { setMenuOpen(false) }, [pathname])
+  // Adjusted during render (not in an effect) so it closes in the same paint.
+  const [prevPathname, setPrevPathname] = useState(pathname)
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname)
+    setMenuOpen(false)
+  }
 
   async function doSignOut() {
     setShowSignOut(false)

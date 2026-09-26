@@ -5,7 +5,7 @@ import { buildRevisionMessages } from '@/lib/prompts'
 import { parseJsonLoose } from '@/lib/json-loose'
 import { stripDashesDeep } from '@/lib/humanizer'
 import { getLearningContext, formatLearningSections } from '@/lib/learning'
-import type { AudienceLane, GeneratedScript } from '@/lib/types'
+import type { AudienceLane, FilmingPlan, GeneratedScript } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
   const { script_id } = await req.json()
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     idea.raw_idea,
     idea.confirmed_lane as AudienceLane,
     brand,
-    learning.fewShots as any[],
+    learning.fewShots,
     formatLearningSections(learning)
   )
 
@@ -85,12 +85,12 @@ export async function POST(req: NextRequest) {
       filming_plan: {
         ...((script.filming_plan as object) ?? {}),
         ...((generated.filming_plan as object) ?? {}),
-        alt_hooks: Array.isArray((generated as any).alt_hooks)
-          ? (generated as any).alt_hooks.slice(0, 2)
-          : ((script.filming_plan as any)?.alt_hooks ?? []),
-        delivery_cues: Array.isArray((generated as any).delivery_cues)
-          ? (generated as any).delivery_cues.slice(0, 5)
-          : ((script.filming_plan as any)?.delivery_cues ?? []),
+        alt_hooks: Array.isArray(generated.alt_hooks)
+          ? generated.alt_hooks.slice(0, 2)
+          : ((script.filming_plan as FilmingPlan | null)?.alt_hooks ?? []),
+        delivery_cues: Array.isArray(generated.delivery_cues)
+          ? generated.delivery_cues.slice(0, 5)
+          : ((script.filming_plan as FilmingPlan | null)?.delivery_cues ?? []),
       },
       mood_tag: generated.mood_tag ?? script.mood_tag,
       why_this_works: generated.why_this_works,

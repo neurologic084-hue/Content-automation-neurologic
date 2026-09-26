@@ -334,7 +334,7 @@ console.log('\n── buildRetakeWindows (full-transcript coverage) ────
 
   const long = buildRetakeWindows(1200)
   const coversAll = long[0][0] === 0 && long[long.length - 1][1] === 1200 &&
-    long.every(([a, b], i) => i === 0 || a < long[i - 1][1])
+    long.every(([a], i) => i === 0 || a < long[i - 1][1])
   check('a long transcript is fully covered, first word to last',
     coversAll, `1200 words -> ${JSON.stringify(long)}`)
 

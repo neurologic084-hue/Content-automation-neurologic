@@ -120,6 +120,11 @@ export interface GeneratedScript {
   filming_plan: FilmingPlan
   mood_tag: MoodTag
   why_this_works: string
+  // Also asked for by the prompt; model output, so validated before use
+  script_format?: string
+  re_hook?: string
+  alt_hooks?: unknown
+  delivery_cues?: unknown
 }
 
 export const LANE_LABELS: Record<AudienceLane, string> = {

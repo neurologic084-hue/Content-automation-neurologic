@@ -1,7 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useIsClient } from '@/components/use-is-client'
 
 interface ConfirmModalProps {
   open: boolean
@@ -24,8 +24,7 @@ export function ConfirmModal({
   onConfirm,
   onCancel,
 }: ConfirmModalProps) {
-  const [mounted, setMounted] = useState(false)
-  useEffect(() => { setMounted(true) }, [])
+  const mounted = useIsClient()
 
   if (!open || !mounted) return null
 

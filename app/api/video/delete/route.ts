@@ -58,9 +58,9 @@ export async function POST(req: NextRequest) {
     } else {
       void deleteJobStorage(id)
     }
-    try {
-      fs.rmSync(rendersDir(id), { recursive: true, force: true })
-    } catch { /* best-effort */ }
+    // Async and not awaited: a render folder can be gigabytes, and rmSync
+    // froze the whole server (every request, every render) while it unlinked.
+    void fs.promises.rm(rendersDir(id), { recursive: true, force: true }).catch(() => { /* best-effort */ })
   }
 
   return NextResponse.json({ ok: true, deleted: deletedRows?.length ?? 0 })

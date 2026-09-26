@@ -1,6 +1,9 @@
 import type { AudienceLane, BrandSettings, Script } from './types'
 import { buildHumanizerInstruction } from './humanizer'
 
+// Few-shot examples are rendered from these three fields only.
+type FewShotExample = Pick<Script, 'hook' | 'body' | 'cta'>
+
 // Default audience archetypes — niche-agnostic, work for any creator.
 // These are universal buying psychology segments, not Jessica-specific content.
 // Override per brand by setting brand.lane_descriptions in Supabase.
@@ -240,7 +243,7 @@ function measureExample(text: string, scanTerms: string[]): { banned: string[]; 
 }
 
 function buildFewShotSection(
-  examples: Script[],
+  examples: FewShotExample[],
   brand: Pick<BrandSettings, 'creator_name'> | undefined,
   emptyFallback: string
 ): string {
@@ -305,7 +308,7 @@ export function buildScriptGenerationMessages(
   idea: string,
   lane: AudienceLane,
   brand: BrandSettings,
-  fewShotExamples: Script[],
+  fewShotExamples: FewShotExample[],
   searchContext: string,
   moodTag?: string,
   scriptFormat?: string,
@@ -523,12 +526,12 @@ Respond ONLY in this exact JSON format:
 }
 
 export function buildRevisionMessages(
-  original: { hook: string; body: string; cta: string },
+  original: { hook: string; body: string; cta: string; script_format?: string; re_hook?: string },
   revisionNotes: string,
   idea: string,
   lane: AudienceLane,
   brand: BrandSettings,
-  fewShotExamples: Script[],
+  fewShotExamples: FewShotExample[],
   learningSections?: string
 ): Array<{ role: 'system' | 'user'; content: string }> {
   const toneList = brand.tone_keywords?.length ? brand.tone_keywords.join(', ') : 'warm, direct, science-backed'
@@ -579,9 +582,9 @@ OUTPUT: Raw JSON only. No markdown. No backticks. Start with { end with }.`
 ${fewShotSection}
 
 ${learningSections?.trim() ? `${learningSections}\n\n` : ''}ORIGINAL SCRIPT:
-Format: ${(original as any).script_format || 'educational'}
+Format: ${original.script_format || 'educational'}
 Hook: ${original.hook}
-${(original as any).re_hook ? `Re-hook: ${(original as any).re_hook}\n` : ''}
+${original.re_hook ? `Re-hook: ${original.re_hook}\n` : ''}
 Body:
 ${original.body}
 
@@ -626,14 +629,3 @@ Respond ONLY in this exact JSON format:
   ]
 }
 
-// Keep backward-compatible wrapper (used nowhere but good for safety)
-export function buildScriptGenerationPrompt(
-  idea: string,
-  lane: AudienceLane,
-  brand: BrandSettings,
-  fewShotExamples: Script[],
-  searchContext: string
-): string {
-  const msgs = buildScriptGenerationMessages(idea, lane, brand, fewShotExamples, searchContext)
-  return msgs.map((m) => `[${m.role.toUpperCase()}]\n${m.content}`).join('\n\n')
-}

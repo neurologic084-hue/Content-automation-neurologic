@@ -919,7 +919,6 @@ export function planZooms(
   // Zooms read as jitter on tight framing — same guardrail as the Submagic path.
   const zoomsAllowed = profile?.faceFraming !== 'tight'
 
-  let offset = 0
   return segments.map((seg, i) => {
     const duration = seg.end - seg.start
     const segWords = editedWords.filter(w => w.segmentIndex === i)
@@ -936,7 +935,6 @@ export function planZooms(
       const beat = (i + variation) % 3
       zoom = hasEmphasis ? 'in' : (beat === 1 ? 'out' : 'in')
     }
-    offset += duration
     return { srcStart: seg.start, duration, zoom }
   })
 }
@@ -1105,7 +1103,6 @@ export async function planViralCaptions(
 export async function planEubankCaptions(
   pages: CaptionPage[],
   profile: ContentProfile | null,
-  variation = 0,
 ): Promise<void> {
   if (!pages.length) return
 

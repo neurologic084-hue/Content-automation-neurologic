@@ -11,22 +11,24 @@ export default async function EditScriptPage({
   const { scriptId } = await params
   const supabase = await createClient()
 
-  const { data: script } = await supabase
-    .from('scripts')
-    .select('id, hook, body, cta, mood_tag, filming_plan')
-    .eq('id', scriptId)
-    .eq('status', 'approved')
-    .single()
+  // The job lookup needs only the id, so it runs alongside the script read.
+  const [{ data: script }, { data: job }] = await Promise.all([
+    supabase
+      .from('scripts')
+      .select('id, hook, body, cta, mood_tag, filming_plan')
+      .eq('id', scriptId)
+      .eq('status', 'approved')
+      .single(),
+    supabase
+      .from('video_jobs')
+      .select('id, status')
+      .eq('script_id', scriptId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ])
 
   if (!script) notFound()
-
-  const { data: job } = await supabase
-    .from('video_jobs')
-    .select('id, status')
-    .eq('script_id', scriptId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
 
   return (
     <div className="p-4 sm:p-6 md:p-8 max-w-2xl w-full mx-auto">

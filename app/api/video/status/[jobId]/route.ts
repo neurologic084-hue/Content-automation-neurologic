@@ -6,7 +6,7 @@ import { releaseJobSource } from '@/lib/motion-renderer'
 import { dispatchPipelineTask } from '@/lib/sandbox-tasks'
 import { explainFailure, isTransientRenderError, isSubmagicHourlyCap } from '@/lib/error-explain'
 import { rendersDir } from '@/lib/paths'
-import { patchVariant } from '@/lib/job-lock'
+import { patchVariant, withJobLock } from '@/lib/job-lock'
 import { sweepStaleVariants, autoRequeueVariant } from '@/lib/stale-sweep'
 import fs from 'fs'
 import path from 'path'
@@ -84,6 +84,8 @@ function withCurrentDefinitions(variants: VideoVariant[]): VideoVariant[] {
     })
 }
 
+const STATUS_COLUMNS = 'id, status, created_at, selected_variant, variants'
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> }
@@ -91,9 +93,11 @@ export async function GET(
   const { jobId } = await params
   const supabase = await createClient()
 
+  // Polled every 4s — fetch only what the sweep and the studio read, not the
+  // transcript / word timings / B-roll analysis the full row carries.
   const { data: job, error } = await supabase
     .from('video_jobs')
-    .select('*')
+    .select(STATUS_COLUMNS)
     .eq('id', jobId)
     .single()
 
@@ -108,7 +112,7 @@ export async function GET(
   {
     const swept = await sweepStaleVariants(supabase, jobId, (job.variants ?? []) as VideoVariant[], job.created_at)
     if (swept > 0) {
-      const { data: refreshed } = await supabase.from('video_jobs').select('*').eq('id', jobId).single()
+      const { data: refreshed } = await supabase.from('video_jobs').select(STATUS_COLUMNS).eq('id', jobId).single()
       if (refreshed) Object.assign(job, refreshed)
     }
     // ...and opportunistically sweep OTHER jobs too. The cron that was meant to
@@ -156,7 +160,12 @@ export async function GET(
       return true
     })
 
-  let variantsChanged = false
+  // Each change is recorded per variant and written through patchVariant, so
+  // it merges onto FRESH state — a bulk write of this request's snapshot could
+  // revert a finisher's 'ready' that landed mid-request (TODO-JUNE §9).
+  const patches = new Map<string, Partial<VideoVariant> & { finalize_at?: string }>()
+  const recordPatch = (id: string, patch: Partial<VideoVariant> & { finalize_at?: string }) =>
+    patches.set(id, { ...patches.get(id), ...patch })
 
   // Recovery: if a locally-rendered variant is still showing "processing" but
   // the output file exists on disk, the DB missed the markVariant write (race condition).
@@ -166,11 +175,14 @@ export async function GET(
     if (v.status === 'processing' && !v.tool) {
       const localFile = path.join(jobRendersDir, `${v.id}.mp4`)
       if (fs.existsSync(localFile)) {
-        v.status = 'ready'
-        v.download_url = `/renders/${jobId}/${v.id}.mp4`
-        v.preview_url = `/renders/${jobId}/${v.id}.mp4`
-        v.progress = null
-        variantsChanged = true
+        const healed = {
+          status: 'ready' as const,
+          download_url: `/renders/${jobId}/${v.id}.mp4`,
+          preview_url: `/renders/${jobId}/${v.id}.mp4`,
+          progress: null,
+        }
+        Object.assign(v, healed)
+        recordPatch(v.id, healed)
       }
     }
   }
@@ -214,9 +226,10 @@ export async function GET(
           // Only reset the label on the FIRST dispatch (step 3); on a stale
           // retry keep whatever step the previous finisher reached so the bar
           // doesn't jump backwards.
-          if (!at) target.progress = { step: 3, total: 4, label: 'Color grading & effects' }
-          ;(target as { finalize_at?: string }).finalize_at = new Date(nowMs).toISOString()
-          variantsChanged = true
+          const finalizePatch: Partial<VideoVariant> & { finalize_at?: string } = { finalize_at: new Date(nowMs).toISOString() }
+          if (!at) finalizePatch.progress = { step: 3, total: 4, label: 'Color grading & effects' }
+          Object.assign(target, finalizePatch)
+          recordPatch(target.id, finalizePatch)
           if (at) console.warn(`[video-status] finalize for ${jobId}:${target.id} had no result in ${Math.round(FINALIZE_RETRY_MS / 60000)}min — re-dispatching`)
           dispatchPipelineTask({ task: 'finalize-submagic', jobId, variantId: target.id, downloadUrl: poll.downloadUrl }).catch((e) =>
             console.warn(`[video-status] finalize failed for ${jobId}:${target.id}:`, (e as Error).message)
@@ -224,9 +237,8 @@ export async function GET(
         }
       } else if (poll.status === 'failed') {
         // Transient reason → silent self-heal: fresh submission, card stays
-        // 'processing'. Mirror the helper's write into the local copy so the
-        // bulk update below persists the SAME state instead of clobbering it
-        // with this stale snapshot.
+        // 'processing'. The helper already wrote the row; mirror it into the
+        // local copy so the response shows it.
         let healed = false
         if (isTransientRenderError(poll.error ?? '')) {
           healed = await autoRequeueVariant(supabase, jobId, target, `Submagic reported: ${String(poll.error).slice(0, 120)}`, {
@@ -237,14 +249,12 @@ export async function GET(
             const { data: fresh } = await supabase.from('video_jobs').select('variants').eq('id', jobId).single()
             const fv = ((fresh?.variants ?? []) as VideoVariant[]).find((x) => x.id === target.id)
             if (fv) Object.assign(target, fv)
-            variantsChanged = true
           }
         }
         if (!healed) {
-          target.status = 'failed'
-          target.error = explainFailure(poll.error)
-          target.progress = null
-          variantsChanged = true
+          const failedPatch = { status: 'failed' as const, error: explainFailure(poll.error), progress: null }
+          Object.assign(target, failedPatch)
+          recordPatch(target.id, failedPatch)
         }
       }
     }
@@ -254,13 +264,19 @@ export async function GET(
   const allDone = started.length > 0 && started.every((v) => v.status === 'ready' || v.status === 'failed')
   const newStatus = allDone ? 'complete' : 'processing'
 
-  // Only write back to DB when Submagic variants changed or job is newly complete.
-  // Writing on every poll causes a race: the stale read overwrites markVariant's "ready" write.
-  if (variantsChanged || allDone) {
-    await supabase
-      .from('video_jobs')
-      .update({ variants, ...(allDone ? { status: 'complete' } : {}) })
-      .eq('id', jobId)
+  for (const [variantId, patch] of patches) {
+    await patchVariant(supabase, jobId, variantId, patch)
+  }
+  if (allDone) {
+    // Re-check on fresh state under the job lock: a variant restarted since
+    // this request's read must keep the job 'processing'.
+    await withJobLock(jobId, async () => {
+      const { data: fresh } = await supabase.from('video_jobs').select('variants').eq('id', jobId).single()
+      const freshStarted = ((fresh?.variants ?? []) as VideoVariant[]).filter((v) => v.status !== 'pending')
+      if (freshStarted.length > 0 && freshStarted.every((v) => v.status === 'ready' || v.status === 'failed')) {
+        await supabase.from('video_jobs').update({ status: 'complete' }).eq('id', jobId)
+      }
+    })
   }
 
   if (allDone) {

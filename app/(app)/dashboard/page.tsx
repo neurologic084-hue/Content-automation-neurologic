@@ -6,6 +6,24 @@ import { DashboardBg } from '@/components/dashboard-bg'
 import { CountUp } from '@/components/count-up'
 import { PipelineFlow } from '@/components/pipeline-flow'
 
+const ACTIVITY_TTL_DAYS = 7
+
+// Module-level so they read the clock per request, not "during render" —
+// this is a server component, rendered once per request.
+function daysAgoISO(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 60) return mins <= 1 ? 'just now' : `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return hrs === 1 ? '1 hour ago' : `${hrs} hours ago`
+  const days = Math.floor(hrs / 24)
+  return days === 1 ? 'yesterday' : `${days} days ago`
+}
+
 export default async function DashboardPage() {
   const supabase = await createClient()
 
@@ -18,62 +36,33 @@ export default async function DashboardPage() {
     .maybeSingle()
   const slot = activeBrand?.profile_slot ?? 1
 
-  const [ideasRes, pendingRes, approvedRes, publishedCountRes] = await Promise.all([
+  const ttlCutoff = daysAgoISO(ACTIVITY_TTL_DAYS)
+
+  // Everything below depends only on slot + ttlCutoff, so it goes out in ONE
+  // round trip (was five sequential rounds before first byte).
+  const [
+    ideasRes, pendingRes, approvedRes, publishedCountRes,
+    readyJobsRes, jobsScriptIdsRes, weekApprovedRes, weekPublishedRes,
+    approvedIdsRes, recentScriptsRes, approvedRes2, publishedRes,
+  ] = await Promise.all([
     supabase.from('ideas').select('id', { count: 'exact', head: true }).eq('profile_slot', slot),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'pending_review').eq('profile_slot', slot),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved').eq('profile_slot', slot),
     supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']).eq('profile_slot', slot),
-  ])
-
-  const totalIdeas = ideasRes.count ?? 0
-  const pendingReview = pendingRes.count ?? 0
-  const totalApproved = approvedRes.count ?? 0
-  const totalPublished = publishedCountRes.count ?? 0
-  const brandName = activeBrand?.creator_name ?? null
-  const hasSettings = !!(brandName && brandName.trim().length > 0)
-
-  const hour = new Date().getHours()
-  const greeting = hour < 5 ? 'Burning the midnight oil,' : hour < 12 ? 'Good morning,' : hour < 18 ? 'Good afternoon,' : 'Good evening,'
-
-  const ACTIVITY_TTL_DAYS = 7
-  const ttlCutoff = new Date(Date.now() - ACTIVITY_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString()
-
-  // "Up next" intelligence: read the pipeline and surface the single best move.
-  const [readyJobsRes, jobsScriptIdsRes, weekApprovedRes, weekPublishedRes] = await Promise.all([
+    // "Up next" intelligence: read the pipeline and surface the single best move.
     supabase.from('video_jobs').select('id', { count: 'exact', head: true }).eq('status', 'complete').is('selected_variant', null).eq('profile_slot', slot),
     supabase.from('video_jobs').select('script_id').eq('profile_slot', slot),
     supabase.from('scripts').select('id', { count: 'exact', head: true }).eq('status', 'approved').gte('approved_at', ttlCutoff).eq('profile_slot', slot),
     supabase.from('publish_jobs').select('id', { count: 'exact', head: true }).in('status', ['published', 'partial', 'scheduled']).gte('created_at', ttlCutoff).eq('profile_slot', slot),
-  ])
-  const variantsReady = readyJobsRes.count ?? 0
-  const scriptIdsWithFootage = new Set((jobsScriptIdsRes.data ?? []).map(j => j.script_id))
-  const weekApproved = weekApprovedRes.count ?? 0
-  const weekPublished = weekPublishedRes.count ?? 0
-
-  const { data: approvedIds } = await supabase.from('scripts').select('id').eq('status', 'approved').eq('profile_slot', slot)
-  const approvedNoFootage = (approvedIds ?? []).filter(s => !scriptIdsWithFootage.has(s.id)).length
-
-  type NextAction = { label: string; sublabel: string; href: string; color: string; bg: string }
-  const nextAction: NextAction | null = !hasSettings
-    ? null // getting-started card already handles this state
-    : pendingReview > 0
-    ? { label: `Review ${pendingReview} waiting script${pendingReview === 1 ? '' : 's'}`, sublabel: 'Approving trains your voice — every approval makes the next script better.', href: '/review', color: '#6366F1', bg: '#EEF2FF' }
-    : variantsReady > 0
-    ? { label: `Pick a winner — ${variantsReady} video${variantsReady === 1 ? ' has' : 's have'} variants ready`, sublabel: 'Choose the best edit and send it to Publish.', href: '/edit', color: '#FF4F17', bg: '#FFF3EF' }
-    : approvedNoFootage > 0
-    ? { label: `${approvedNoFootage} approved script${approvedNoFootage === 1 ? '' : 's'} need${approvedNoFootage === 1 ? 's' : ''} footage`, sublabel: 'Film the script, upload to Drive, and the studio edits it for you.', href: '/edit', color: '#F59E0B', bg: '#FEF3C7' }
-    : { label: 'Generate fresh ideas', sublabel: 'The pipeline is clear — feed it 10 new AI ideas from your brand.', href: '/ideas/new', color: '#16A34A', bg: '#DCFCE7' }
-
-  const { data: recentScripts } = await supabase
-    .from('scripts')
-    .select(`id, hook, status, mood_tag, created_at, idea:ideas(confirmed_lane, raw_idea)`)
-    .eq('status', 'pending_review')
-    .eq('profile_slot', slot)
-    .order('created_at', { ascending: false })
-    .limit(4)
-
-  // Recent activity: approved scripts + recent publish jobs, both within TTL window
-  const [approvedRes2, publishedRes] = await Promise.all([
+    supabase.from('scripts').select('id').eq('status', 'approved').eq('profile_slot', slot),
+    supabase
+      .from('scripts')
+      .select(`id, hook, status, mood_tag, created_at, idea:ideas(confirmed_lane, raw_idea)`)
+      .eq('status', 'pending_review')
+      .eq('profile_slot', slot)
+      .order('created_at', { ascending: false })
+      .limit(4),
+    // Recent activity: approved scripts + recent publish jobs, both within TTL window
     supabase
       .from('scripts')
       .select('id, hook, mood_tag, approved_at')
@@ -91,6 +80,35 @@ export default async function DashboardPage() {
       .order('created_at', { ascending: false })
       .limit(5),
   ])
+
+  const totalIdeas = ideasRes.count ?? 0
+  const pendingReview = pendingRes.count ?? 0
+  const totalApproved = approvedRes.count ?? 0
+  const totalPublished = publishedCountRes.count ?? 0
+  const brandName = activeBrand?.creator_name ?? null
+  const hasSettings = !!(brandName && brandName.trim().length > 0)
+
+  const hour = new Date().getHours()
+  const greeting = hour < 5 ? 'Burning the midnight oil,' : hour < 12 ? 'Good morning,' : hour < 18 ? 'Good afternoon,' : 'Good evening,'
+
+  const variantsReady = readyJobsRes.count ?? 0
+  const scriptIdsWithFootage = new Set((jobsScriptIdsRes.data ?? []).map(j => j.script_id))
+  const weekApproved = weekApprovedRes.count ?? 0
+  const weekPublished = weekPublishedRes.count ?? 0
+
+  const approvedNoFootage = (approvedIdsRes.data ?? []).filter(s => !scriptIdsWithFootage.has(s.id)).length
+  const recentScripts = recentScriptsRes.data
+
+  type NextAction = { label: string; sublabel: string; href: string; color: string; bg: string }
+  const nextAction: NextAction | null = !hasSettings
+    ? null // getting-started card already handles this state
+    : pendingReview > 0
+    ? { label: `Review ${pendingReview} waiting script${pendingReview === 1 ? '' : 's'}`, sublabel: 'Approving trains your voice — every approval makes the next script better.', href: '/review', color: '#6366F1', bg: '#EEF2FF' }
+    : variantsReady > 0
+    ? { label: `Pick a winner — ${variantsReady} video${variantsReady === 1 ? ' has' : 's have'} variants ready`, sublabel: 'Choose the best edit and send it to Publish.', href: '/edit', color: '#FF4F17', bg: '#FFF3EF' }
+    : approvedNoFootage > 0
+    ? { label: `${approvedNoFootage} approved script${approvedNoFootage === 1 ? '' : 's'} need${approvedNoFootage === 1 ? 's' : ''} footage`, sublabel: 'Film the script, upload to Drive, and the studio edits it for you.', href: '/edit', color: '#F59E0B', bg: '#FEF3C7' }
+    : { label: 'Generate fresh ideas', sublabel: 'The pipeline is clear — feed it 10 new AI ideas from your brand.', href: '/ideas/new', color: '#16A34A', bg: '#DCFCE7' }
 
   type ActivityItem =
     | { kind: 'approved'; id: string; hook: string; mood_tag: string | null; at: string }
@@ -124,16 +142,6 @@ export default async function DashboardPage() {
     adhd_parents: { bg: '#EEF2FF', text: '#6366F1' },
     sympathetic_overdrive: { bg: '#FFF3EF', text: '#FF4F17' },
     burnout_professionals: { bg: '#F4F3F0', text: '#71717A' },
-  }
-
-  function relativeTime(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime()
-    const mins = Math.floor(diff / 60000)
-    if (mins < 60) return mins <= 1 ? 'just now' : `${mins}m ago`
-    const hrs = Math.floor(mins / 60)
-    if (hrs < 24) return hrs === 1 ? '1 hour ago' : `${hrs} hours ago`
-    const days = Math.floor(hrs / 24)
-    return days === 1 ? 'yesterday' : `${days} days ago`
   }
 
   const PLATFORM_META: Record<string, { label: string; bg: string }> = {
@@ -626,7 +634,7 @@ export default async function DashboardPage() {
             </svg>
           </div>
           <p className="font-medium text-[#18181B] mb-1">No ideas yet</p>
-          <p className="text-sm text-[#A1A1AA]">Tap "New content idea" above to generate your first script.</p>
+          <p className="text-sm text-[#A1A1AA]">Tap &ldquo;New content idea&rdquo; above to generate your first script.</p>
         </div>
       )}
 

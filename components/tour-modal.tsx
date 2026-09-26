@@ -1,9 +1,15 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
+import { useIsClient } from '@/components/use-is-client'
 
 export const TOUR_KEY = 'reel_tour_v1'
+
+const noopSubscribe = () => () => {}
+function readUnseen(): boolean {
+  try { return !localStorage.getItem(TOUR_KEY) } catch { return false }
+}
 
 const STEPS = [
   {
@@ -53,28 +59,31 @@ interface HighlightRect {
 type Phase = 'welcome' | 'tour'
 
 export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean; onClose?: () => void }) {
-  const [mounted, setMounted] = useState(false)
+  const mounted = useIsClient()
+  // Opened explicitly (forceOpen). First-visit display is derived below.
   const [visible, setVisible] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
+  // First visit = no TOUR_KEY in localStorage; read as an external store so
+  // the server and hydration pass see false and nothing is set in an effect.
+  const unseen = useSyncExternalStore(noopSubscribe, readUnseen, () => false)
+  const shown = visible || (!forceOpen && unseen && !dismissed)
   const [phase, setPhase] = useState<Phase>('welcome')
   const [step, setStep] = useState(0)
   const [rect, setRect] = useState<HighlightRect | null>(null)
 
-  useEffect(() => { setMounted(true) }, [])
-
-  useEffect(() => {
+  // Reopen from the start whenever forceOpen turns on (adjusted during render).
+  const [prevForceOpen, setPrevForceOpen] = useState(false)
+  if (forceOpen !== prevForceOpen) {
+    setPrevForceOpen(forceOpen)
     if (forceOpen) {
       setVisible(true)
       setPhase('welcome')
       setStep(0)
-      return
     }
-    try {
-      if (!localStorage.getItem(TOUR_KEY)) setVisible(true)
-    } catch {}
-  }, [forceOpen])
+  }
 
   useEffect(() => {
-    if (!visible || phase !== 'tour') return
+    if (!shown || phase !== 'tour') return
     function measure() {
       const el = document.querySelector(STEPS[step].selector)
       if (el) {
@@ -85,11 +94,12 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
     measure()
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
-  }, [visible, phase, step])
+  }, [shown, phase, step])
 
   function dismiss() {
     try { localStorage.setItem(TOUR_KEY, '1') } catch {}
     setVisible(false)
+    setDismissed(true)
     onClose?.()
   }
 
@@ -106,7 +116,7 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
     }
   }
 
-  if (!visible || !mounted) return null
+  if (!shown || !mounted) return null
 
   // ── Welcome slide ──────────────────────────────────────────────
   if (phase === 'welcome') {
