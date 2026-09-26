@@ -138,8 +138,16 @@ export async function POST(req: NextRequest) {
 
   await supabase.from('publish_jobs').update({ download_url: absoluteUrl, status: 'publishing' }).eq('id', job.id)
 
+  // The exact text each platform gets. Saved per platform on platform_posts —
+  // the row's `caption` column only holds one (the first platform's), so a
+  // platform-specific caption used to be unrecoverable after a failed post.
+  const postTexts = accounts.map(acc => {
+    const platform = acc.platform.toLowerCase()
+    return withCredit(captions[platform] ?? fallbackCaption, platform)
+  })
+
   const results = await Promise.allSettled(
-    accounts.map(acc => {
+    accounts.map((acc, i) => {
       const platform = acc.platform.toLowerCase()
       const captionText = captions[platform] ?? fallbackCaption
 
@@ -152,7 +160,7 @@ export async function POST(req: NextRequest) {
       return publishPost({
         accountId: acc.id,
         platform: acc.platform,
-        text: withCredit(captionText, platform),
+        text: postTexts[i],
         mediaUrls: [absoluteUrl],
         scheduledAt,
         youtubeTitle,
@@ -163,10 +171,11 @@ export async function POST(req: NextRequest) {
 
   const platformPosts = accounts.map((acc, i) => {
     const r = results[i]
+    const caption = postTexts[i]
     if (r.status === 'fulfilled') {
-      return { accountId: acc.id, platform: acc.platform, postId: r.value.postId, status: r.value.status, error: r.value.error ?? null }
+      return { accountId: acc.id, platform: acc.platform, postId: r.value.postId, status: r.value.status, error: r.value.error ?? null, caption }
     }
-    return { accountId: acc.id, platform: acc.platform, postId: null, status: 'failed', error: (r.reason as Error).message }
+    return { accountId: acc.id, platform: acc.platform, postId: null, status: 'failed', error: (r.reason as Error).message, caption }
   })
 
   const allFailed = platformPosts.every(p => p.status === 'failed')
