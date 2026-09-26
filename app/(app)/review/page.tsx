@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { getActiveSlot } from '@/lib/active-profile'
 import Link from 'next/link'
+import { PageGuide } from '@/components/help/page-guide'
 
 const LANE_LABEL: Record<string, string> = {
   adhd_parents: 'ADHD Parents',
@@ -195,6 +196,8 @@ export default async function ReviewPage() {
           Approve, revise, or reject generated scripts.
         </p>
       </div>
+
+      <PageGuide page="review" />
 
       {/* All clear */}
       {totalAction === 0 && (

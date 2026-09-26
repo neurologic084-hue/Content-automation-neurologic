@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { ConfirmModal } from '@/components/confirm-modal'
 import { failureAction } from '@/lib/error-explain'
+import { InfoTip } from '@/components/help/info-tip'
+import { STUDIO_OPTIONS } from '@/components/help/guide-content'
 import type { VideoVariant, MusicMode } from '@/lib/video-pipeline'
 
 // Custom B-roll works end-to-end (all 6 variants) but the input is hidden to
@@ -527,6 +529,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
           <div className="mb-4">
             <div className="flex items-center gap-2 mb-1.5">
               <p className="text-xs font-semibold text-[#71717A]">Your own B-roll</p>
+              <InfoTip title="Your own B-roll">
+                <p>B-roll is short cutaway footage shown over your voice. Put your own clips (up to 12) in a Google Drive folder, share it as “Anyone with the link”, paste the folder link, and tap Confirm B-roll.</p>
+                <p>Olympus only uses a clip where it matches what you are saying. Leave this empty to use stock footage.</p>
+              </InfoTip>
               {CUSTOM_BROLL_COMING_SOON && (
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#FFF3EF] text-[#FF4F17] uppercase tracking-wide">Coming soon</span>
               )}
@@ -582,7 +588,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
           {/* Background music */}
           <div className="mb-4">
-            <p className="text-xs font-semibold text-[#71717A] mb-1.5">Background music</p>
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <p className="text-xs font-semibold text-[#71717A]">Background music</p>
+              <OptionHelp group="Background music" />
+            </div>
             <div className="grid grid-cols-2 gap-2">
               {MUSIC_OPTIONS.map(opt => {
                 const active = musicMode === opt.value
@@ -604,12 +613,15 @@ export function VideoStudio({ script, existingJobId }: Props) {
                 )
               })}
             </div>
-            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Source choice applies to the Motion Lab variants. Edit Engine variants pick their own matching track (this only toggles music on/off for those).</p>
+            <p className="text-[11px] text-[#A1A1AA] mt-1.5">Applies to all six styles. Smart picks a track from your music library that fits the mood of the script.</p>
           </div>
 
           {/* Color look */}
           <div className="mb-4">
-            <p className="text-xs font-semibold text-[#71717A] mb-1.5">Color look</p>
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <p className="text-xs font-semibold text-[#71717A]">Color look</p>
+              <OptionHelp group="Color look" />
+            </div>
             <div className="flex flex-wrap gap-2">
               {GRADE_OPTIONS.map(opt => {
                 const active = gradeMode === opt.value
@@ -637,7 +649,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
 
           {/* B-roll amount */}
           <div className="mb-4">
-            <p className="text-xs font-semibold text-[#71717A] mb-1.5">B-roll</p>
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <p className="text-xs font-semibold text-[#71717A]">B-roll</p>
+              <OptionHelp group="B-roll" />
+            </div>
             <div className="grid grid-cols-3 gap-2">
               {BROLL_OPTIONS.map(opt => {
                 const active = brollMode === opt.value
@@ -690,7 +705,10 @@ export function VideoStudio({ script, existingJobId }: Props) {
             {/* Source picker — only meaningful once she has supplied clips. */}
             {brollConfirmed && brollMode !== 'none' && (
               <div className="mt-3">
-                <p className="text-xs font-semibold text-[#71717A] mb-1.5">Which B-roll to use</p>
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <p className="text-xs font-semibold text-[#71717A]">Which B-roll to use</p>
+                  <OptionHelp group="Your own B-roll" />
+                </div>
                 <div className="flex flex-wrap gap-2">
                   {BROLL_SOURCE_OPTIONS.map(opt => {
                     const active = brollSource === opt.value
@@ -739,9 +757,23 @@ export function VideoStudio({ script, existingJobId }: Props) {
           {status === 'processing' && (
             <div className="bg-white border border-[#E4E4E0] rounded-2xl p-5">
               <div className="flex items-center justify-between mb-3">
-                <p className="text-sm font-semibold text-[#18181B]">
-                  {isPreparingSource ? (prepProgress.label ?? 'Preparing footage') : 'Generating variants'}
-                </p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-sm font-semibold text-[#18181B]">
+                    {isPreparingSource ? (prepProgress.label ?? 'Preparing footage') : 'Generating variants'}
+                  </p>
+                  {isPreparingSource ? (
+                    <InfoTip title="Preparing your footage">
+                      <p>Olympus downloads your recording once, cleans up the sound, and cuts out retakes. Every style then starts from this prepared copy.</p>
+                      <p>It usually takes a few minutes. You can leave this page; it keeps going.</p>
+                    </InfoTip>
+                  ) : (
+                    <InfoTip title="What are these versions?">
+                      <p>Each card is the same recording edited in a different style. Start only the ones you want; each takes around 20 minutes and uses editing credits.</p>
+                      <p><span className="text-white font-semibold">Edit Engine</span> styles (1 to 3) focus on captions and pacing. <span className="text-white font-semibold">Motion Lab</span> styles (4 to 6) add on-screen graphics.</p>
+                      <p>“Waiting in line” just means other videos are ahead. It starts on its own.</p>
+                    </InfoTip>
+                  )}
+                </div>
                 <span className="text-xs text-[#A1A1AA]">
                   {isPreparingSource ? `${overallPercent}%` : `${readyCount} / ${overallReadyTotal} ready`}
                 </span>
@@ -1043,5 +1075,19 @@ export function VideoStudio({ script, existingJobId }: Props) {
         onCancel={() => setConfirmRetry(null)}
       />
 </div>
+  )
+}
+
+// "?" next to a studio option, explained with the same copy as the /guide page.
+function OptionHelp({ group }: { group: string }) {
+  const g = STUDIO_OPTIONS.find(o => o.title === group)
+  if (!g) return null
+  return (
+    <InfoTip title={g.title}>
+      <p>{g.intro}</p>
+      {g.options.map(o => (
+        <p key={o.name}><span className="text-white font-semibold">{o.name}:</span> {o.body}</p>
+      ))}
+    </InfoTip>
   )
 }

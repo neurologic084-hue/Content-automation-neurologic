@@ -20,22 +20,22 @@ const STEPS = [
   {
     selector: 'a[href="/ideas/new"]',
     title: 'New Idea',
-    body: 'Everything starts here. Type a rough topic   AI picks the right audience and writes a full hook, body, and CTA in under 30 seconds.',
+    body: 'Everything starts here. Type a rough topic. AI picks the right audience and writes a full hook, body, and CTA in under 30 seconds.',
   },
   {
     selector: 'a[href="/review"]',
     title: 'Review',
-    body: 'Scripts waiting for your call. Read the hook, body, and CTA. Approve what lands, revise what doesn\'t   every decision trains your voice forever.',
+    body: 'Scripts waiting for your call. Read the hook, body, and CTA. Approve what lands, revise what doesn\'t. Every decision trains your voice forever.',
   },
   {
     selector: 'a[href="/library"]',
     title: 'Library',
-    body: 'Every script you\'ve approved, organised by audience lane. Your growing content vault   the more you approve, the smarter future scripts get.',
+    body: 'Every script you\'ve approved, in one place. Sort them into folders with the ⋯ menu on each card.',
   },
   {
     selector: 'a[href="/edit"]',
     title: 'Video Studio',
-    body: 'Turn an approved script into a finished video. Paste your Google Drive recording link, pick an edit style, and AI handles cutting, captions, and music automatically.',
+    body: 'Turn an approved script into a finished video. Paste your Google Drive recording link and Olympus edits it in up to six styles: cutting, captions, music, and B-roll. Pick your favourite.',
   },
   {
     selector: 'a[href="/publish"]',
@@ -45,7 +45,12 @@ const STEPS = [
   {
     selector: 'a[href="/settings"]',
     title: 'Settings',
-    body: 'Your brand voice. Fill this in once   identity, tone, audience, and transformation. Every script Olympus writes forever draws from this.',
+    body: 'Your brand voice. Fill this in once: identity, tone, audience, and transformation. Every script Olympus writes forever draws from this.',
+  },
+  {
+    selector: 'a[href="/guide"]',
+    title: 'Help & guide',
+    body: 'Stuck or unsure? The guide explains every step, every option, and what to do if something goes wrong. Each page also has a “How this page works” card at the top.',
   },
 ]
 
@@ -170,7 +175,7 @@ export function TourModal({ forceOpen = false, onClose }: { forceOpen?: boolean;
               Take the guided tour?
             </h2>
             <p className="text-sm leading-relaxed mb-4" style={{ color: '#6B6B68' }}>
-              A quick walkthrough of all 7 pages   what each one does and when to use it. The full loop from idea to published video.
+              A quick walkthrough of every page: what each one does and when to use it. The full loop from idea to published video.
             </p>
 
             {/* Flow preview */}

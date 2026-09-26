@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
 import type { BlatoAccount } from '@/lib/blotato'
 import type { VideoVariant } from '@/lib/video-pipeline'
+import { PageGuide } from '@/components/help/page-guide'
 
 // ── Platform config ───────────────────────────────────────────────────────────
 
@@ -849,6 +850,8 @@ function PublishForm() {
         <p className="mt-1 text-sm text-[#71717A]">Post to all connected platforms at once.</p>
       </div>
 
+      <PageGuide page="publish" className="mb-4" />
+
       {/* Selected video banner   shown when coming from the edit page */}
       {selectedJob && paramJobId && (
         <div className="animate-fadeInUp bg-[#FFF4F1] border border-[#FFCAB8] rounded-2xl px-5 py-4 mb-4 flex items-start gap-3" style={{ animationDelay: '60ms' }}>
@@ -1085,7 +1088,7 @@ function PublishForm() {
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M20 6L9 17l-5-5" />
                   </svg>
-                  Drive link detected   file must be shared as &ldquo;Anyone with the link&rdquo;
+                  Drive link detected. The file must be shared as &ldquo;Anyone with the link&rdquo;
                 </p>
               )}
 
@@ -1184,7 +1187,7 @@ function PublishForm() {
             <p className={`text-sm font-semibold mb-3 ${allPublished ? 'text-[#15803D]' : 'text-[#92400E]'}`}>
               {result.status === 'published' && 'Published ✓'}
               {result.status === 'scheduled' && 'Scheduled ✓'}
-              {result.status === 'partial' && 'Partially published   some platforms failed'}
+              {result.status === 'partial' && 'Partially published: some platforms failed'}
               {result.status === 'failed' && 'Publish failed'}
             </p>
             <div className="space-y-1.5">

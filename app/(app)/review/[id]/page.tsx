@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client'
 import type { Idea, Script } from '@/lib/types'
 import { PulseLoader, PulseOverlay } from '@/components/pulse-loader'
 import { Teleprompter } from '@/components/teleprompter'
+import { PageGuide } from '@/components/help/page-guide'
 
 const BEAT_COLORS = ['#FF4F17', '#6366F1', '#059669']
 const BEAT_FALLBACK_LABELS = ['The situation', 'Why it happens', 'What changes it']
@@ -270,6 +271,8 @@ export default function ScriptDetailPage() {
         </svg>
         {isApproved ? 'Library' : 'Review queue'}
       </button>
+
+      {!editing && <PageGuide page="reviewDetail" className="mb-5" />}
 
       {/* Approved — ready to film banner */}
       {isApproved && !editing && (
@@ -661,7 +664,7 @@ export default function ScriptDetailPage() {
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#A1A1AA" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
               </svg>
-              <p className="text-xs text-[#A1A1AA]">Approving this script trains your engine   future scripts will match its style.</p>
+              <p className="text-xs text-[#A1A1AA]">Approving this script trains your engine. Future scripts will match its style.</p>
             </div>
 
             {showRevisionInput ? (

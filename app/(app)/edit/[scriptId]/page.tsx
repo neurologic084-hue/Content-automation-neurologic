@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { VideoStudio } from './video-studio'
+import { PageGuide } from '@/components/help/page-guide'
 
 export default async function EditScriptPage({
   params,
@@ -53,6 +54,8 @@ export default async function EditScriptPage({
           Record the script below, upload to Google Drive, then paste the link.
         </p>
       </div>
+
+      <PageGuide page="studio" />
 
       {/* Filming guide   visible before uploading */}
       {(script.filming_plan?.shot_type || script.filming_plan?.setup || script.filming_plan?.wardrobe) && (

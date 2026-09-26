@@ -3,6 +3,7 @@ import { getActiveSlot } from '@/lib/active-profile'
 import Link from 'next/link'
 import { ScriptActionsMenu } from '@/components/script-actions-menu'
 import { FolderTabs } from '@/components/folder-tabs'
+import { PageGuide } from '@/components/help/page-guide'
 
 const MOOD_COLOR: Record<string, string> = {
   calm: '#6366F1',
@@ -91,6 +92,8 @@ export default async function LibraryPage({
           {total} approved script{total !== 1 ? 's' : ''}
         </p>
       </div>
+
+      <PageGuide page="library" className="mb-5" />
 
       {/* Folder tabs — always shown (includes New folder button) */}
       <div className="animate-fadeInUp mb-5" style={{ animationDelay: '60ms' }}>

@@ -3,6 +3,7 @@ import { getActiveSlot } from '@/lib/active-profile'
 import Link from 'next/link'
 import { CountUp } from '@/components/count-up'
 import { EditScriptList } from '@/components/edit-script-list'
+import { PageGuide } from '@/components/help/page-guide'
 
 export default async function EditPage() {
   const supabase = await createClient()
@@ -47,6 +48,8 @@ export default async function EditPage() {
           Add footage to your approved scripts and generate edited variants per video.
         </p>
       </div>
+
+      <PageGuide page="edit" />
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6 animate-fadeInUp" style={{ animationDelay: '40ms' }}>

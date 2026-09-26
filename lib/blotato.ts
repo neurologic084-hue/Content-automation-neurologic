@@ -188,7 +188,7 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
       postId: null,
       status: 'failed',
       error: timedOut
-        ? 'Blotato did not answer in time — the post may still go out. Check my.blotato.com before publishing again, so it is not posted twice.'
+        ? 'Blotato did not answer in time. The post may still go out, so check my.blotato.com before publishing again to avoid posting it twice.'
         : `Could not reach Blotato: ${(e as Error).message}`,
     }
   }

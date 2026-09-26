@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { PageGuide } from '@/components/help/page-guide'
 
 const TONE_OPTIONS = [
   'Warm', 'Direct', 'Science-backed', 'Empathetic', 'Calm',
@@ -453,6 +454,8 @@ export default function SettingsPage() {
           Everything here feeds into every script the AI writes. The active profile is used for all script generation.
         </p>
       </div>
+
+      <PageGuide page="settings" className="mb-5" />
 
       {/* Profile Switcher */}
       <div className="animate-fadeInUp p-1 bg-[#F4F3F0] rounded-2xl mb-5 flex gap-1" style={{ animationDelay: '50ms' }}>

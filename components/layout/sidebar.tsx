@@ -345,6 +345,30 @@ export function Sidebar({ hasSettings = false }: { hasSettings?: boolean }) {
           )
         })()}
 
+        {/* Guide — always reachable; the tour step for it targets this link */}
+        {(() => {
+          const active = pathname === '/guide'
+          return (
+            <Link
+              href="/guide"
+              className={[
+                'relative flex items-center gap-2.5 px-3 py-[7px] rounded-lg text-[13px] font-medium transition-all duration-150',
+                active ? 'bg-[#FFF4F1] text-[#FF4F17]' : 'text-[#5A5A57] hover:bg-[#F7F5F3] hover:text-[#1A1A18]',
+              ].join(' ')}
+            >
+              {active && (
+                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-[18px] bg-[#FF4F17] rounded-r-full" />
+              )}
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                <path d="M12 17h.01" />
+              </svg>
+              <span className="flex-1">Help &amp; guide</span>
+            </Link>
+          )
+        })()}
+
         {/* Sign out */}
         <button
           onClick={() => setShowSignOut(true)}

@@ -215,7 +215,19 @@ export default async function DashboardPage() {
             >
               {hasSettings ? brandName : 'Creator'}
             </h1>
-            <TourTriggerButton />
+            <div className="flex items-center gap-2">
+              <TourTriggerButton />
+              <Link
+                href="/guide"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors bg-[#F4F3F0] text-[#71717A] hover:bg-[#EDECEA] hover:text-[#18181B]"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                </svg>
+                Guide
+              </Link>
+            </div>
           </div>
 
           {/* Inline stats — count up on load */}
@@ -339,7 +351,7 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold" style={{ color: step2Done ? '#A1A1AA' : '#18181B', textDecoration: step2Done ? 'line-through' : 'none' }}>Create your first idea</p>
-                <p className="text-xs text-[#A1A1AA]">Type anything   AI picks the audience and writes the script</p>
+                <p className="text-xs text-[#A1A1AA]">Type anything. AI picks the audience and writes the script</p>
               </div>
               {step1Done && !step2Done && (
                 <Link
@@ -365,7 +377,7 @@ export default async function DashboardPage() {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold" style={{ color: step3Done ? '#A1A1AA' : '#18181B', textDecoration: step3Done ? 'line-through' : 'none' }}>Review & approve your first script</p>
-                <p className="text-xs text-[#A1A1AA]">Read, edit if needed, approve   it trains your voice forever</p>
+                <p className="text-xs text-[#A1A1AA]">Read, edit if needed, approve. It trains your voice forever</p>
               </div>
               {step2Done && pendingReview > 0 && (
                 <Link
@@ -398,7 +410,7 @@ export default async function DashboardPage() {
             <p className="font-semibold text-base text-white" style={{ fontFamily: 'var(--font-jakarta)' }}>
               New content idea
             </p>
-            <p className="text-white/70 text-sm mt-0.5">Type anything   AI picks the audience and writes the script</p>
+            <p className="text-white/70 text-sm mt-0.5">Type anything. AI picks the audience and writes the script</p>
           </div>
           <svg className="ml-auto flex-shrink-0 opacity-70 group-hover:translate-x-1 transition-transform" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M9 18l6-6-6-6" />
