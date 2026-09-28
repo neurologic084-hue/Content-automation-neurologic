@@ -260,6 +260,7 @@ export function VideoStudio({ script, existingJobId }: Props) {
     }
 
     setJobId(data.jobId)
+    setReplacingJobId(null)
     setStatus('processing')
     startPolling(data.jobId)
   }
@@ -279,6 +280,32 @@ export function VideoStudio({ script, existingJobId }: Props) {
   // easy. Confirm first — this is the only guard against someone tapping Retry
   // repeatedly and stacking renders of the same variant.
   const [confirmRetry, setConfirmRetry] = useState<{ id: string; force: boolean; label: string } | null>(null)
+  // Refilming: swap in a new recording for this script. The old edit is only
+  // deleted when the new footage is actually submitted (the process route
+  // replaces the script's job), so backing out restores it untouched.
+  const [confirmNewFootage, setConfirmNewFootage] = useState(false)
+  const [replacingJobId, setReplacingJobId] = useState<string | null>(null)
+
+  function beginNewFootage() {
+    stopPolling()
+    setReplacingJobId(jobId)
+    setJobId(null)
+    setVariants([])
+    setReadyCount(0)
+    setSelectedVariant(null)
+    setError(null)
+    setDriveUrl('')
+    setFootageCheck({ state: 'idle' })
+    setStatus('idle')
+  }
+
+  function keepCurrentEdits() {
+    if (!replacingJobId) return
+    setJobId(replacingJobId)
+    setReplacingJobId(null)
+    setStatus('loading')
+    startPolling(replacingJobId)
+  }
 
   function askStartVariant(variantId: string, force = false) {
     const v = variants.find(x => x.id === variantId)
@@ -468,11 +495,26 @@ export function VideoStudio({ script, existingJobId }: Props) {
             </div>
             <div>
               <p className="font-semibold text-[#18181B] text-sm" style={{ fontFamily: 'var(--font-jakarta)' }}>
-                Add your footage
+                {replacingJobId ? 'Add your new footage' : 'Add your footage'}
               </p>
               <p className="text-xs text-[#A1A1AA]">Upload to Google Drive and paste the share link</p>
             </div>
           </div>
+
+          {replacingJobId && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 mb-4">
+              <p className="text-xs text-[#92400E] leading-relaxed flex-1 min-w-[12rem]">
+                Your current edits stay until you start the new one. Starting replaces them with fresh versions of the new recording.
+              </p>
+              <button
+                type="button"
+                onClick={keepCurrentEdits}
+                className="text-xs font-semibold text-[#92400E] underline cursor-pointer"
+              >
+                Keep current edits
+              </button>
+            </div>
+          )}
 
           <div className="bg-[#F9F9F8] rounded-xl p-4 mb-4 text-xs text-[#71717A] space-y-2">
             <p className="font-semibold text-[#18181B]">How to share your video from Google Drive:</p>
@@ -1041,10 +1083,23 @@ export function VideoStudio({ script, existingJobId }: Props) {
             })}
           </div>
 
-          {/* Actions — deleting/replacing an edit lives in the Library's
-              script menu now, so the library stays the one place edits are
-              managed from. */}
-          <div className="flex items-center gap-3 pt-1">
+          {/* Actions — "Use new footage" refilms from here (it used to be
+              reachable only via Library → ⋯ → Remove edit, which the creator
+              couldn't find). Removing an edit outright stays in the Library. */}
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            {!isPreparingSource && !variants.some(v => v.status === 'processing') && (
+              <button
+                type="button"
+                onClick={() => setConfirmNewFootage(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#E4E4E0] bg-white px-3.5 py-2 text-xs font-semibold text-[#52525B] transition-colors hover:border-[#FFD4C4] hover:text-[#FF4F17] cursor-pointer"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M23 7l-7 5 7 5V7z" />
+                  <rect x="1" y="5" width="15" height="14" rx="2" />
+                </svg>
+                Use new footage
+              </button>
+            )}
             {selectedVariant && (
               <div className="flex items-center gap-2 text-xs text-[#22C55E] font-medium">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1057,6 +1112,19 @@ export function VideoStudio({ script, existingJobId }: Props) {
         </div>
       )}
     
+      <ConfirmModal
+        open={confirmNewFootage}
+        title="Refilm this script?"
+        message="Paste a new recording and Olympus makes fresh versions from it. Your current versions are replaced once you start the new edit. Anything you already posted stays posted."
+        confirmLabel="Add new footage"
+        cancelLabel="Cancel"
+        onConfirm={() => {
+          setConfirmNewFootage(false)
+          beginNewFootage()
+        }}
+        onCancel={() => setConfirmNewFootage(false)}
+      />
+
       <ConfirmModal
         open={!!confirmRetry}
         title={confirmRetry?.force ? 'Render this version again?' : 'Retry this version?'}

@@ -230,6 +230,10 @@ export const PROBLEMS: { problem: string; fix: string }[] = [
     fix: 'The post may still go out. Check the Blotato calendar before publishing again, so it does not post twice.',
   },
   {
+    problem: 'Captions cover my face',
+    fix: 'Frame yourself with your head in the upper third of the shot, leaving the lower part of the frame for captions. Then open the script in Edit, tap “Use new footage”, and paste the new recording.',
+  },
+  {
     problem: 'Storage is getting full',
     fix: 'In Settings, section 09, tap “Clear working files”. It removes only the raw footage used to make videos. Every finished video stays.',
   },
@@ -243,5 +247,6 @@ export const FAQ: { q: string; a: string }[] = [
   { q: 'Can I post the same video twice?', a: 'Yes. Olympus warns you first, in case it was not on purpose.' },
   { q: 'Where are my finished videos?', a: 'In the studio page for that script (Edit, then the script), and in Publish under “From library”. Each finished version has a download button.' },
   { q: 'How do I change which social accounts are used?', a: 'Accounts are connected in Blotato. Open Settings, section 08, and tap “Manage in Blotato”.' },
+  { q: 'How do I refilm a script that already has edits?', a: 'Open the script in Edit and tap “Use new footage” under the versions. Paste the link to your new recording and start the edit. Your old versions stay until you start, and anything you already posted stays posted.' },
   { q: 'What if a script is not quite right?', a: 'Tap Edit to change the words yourself, or Revise and tell the AI what to change. Revising creates a fresh version for you to review.' },
 ]
