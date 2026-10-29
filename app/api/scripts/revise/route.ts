@@ -6,6 +6,7 @@ import { parseJsonLoose } from '@/lib/json-loose'
 import { stripDashesDeep } from '@/lib/humanizer'
 import { getLearningContext, formatLearningSections } from '@/lib/learning'
 import type { AudienceLane, FilmingPlan, GeneratedScript } from '@/lib/types'
+import { explainAiErrorForCreator } from '@/lib/error-explain'
 
 export async function POST(req: NextRequest) {
   const { script_id } = await req.json()
@@ -57,7 +58,7 @@ export async function POST(req: NextRequest) {
       json: true,
     })
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    return NextResponse.json({ error: explainAiErrorForCreator(err, 'revising this script') || String(err) }, { status: 500 })
   }
 
   let generated: GeneratedScript

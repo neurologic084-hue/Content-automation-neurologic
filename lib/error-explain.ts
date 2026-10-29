@@ -306,3 +306,21 @@ export function failureAction(raw: unknown): { label: string; url: string } | nu
     return { label: 'Check billing', url: 'https://openrouter.ai/credits' }
   return null
 }
+
+// For the screens the creator works on directly (captions, scripts, ideas):
+// plain words plus what she can still do. Variant cards keep explainFailure's
+// short operator form. Anything unrecognised passes through unchanged.
+export function explainAiErrorForCreator(raw: unknown, task: string): string {
+  const msg = (raw instanceof Error ? raw.message : String(raw ?? '')).trim()
+  const low = msg.toLowerCase()
+  if (low.includes('openrouter') || low.includes('gemini')) {
+    if (/\b402\b/.test(msg) || low.includes('credit') || low.includes('insufficient')) {
+      return `The AI writing service is out of credits, so ${task} isn't possible right now. Your team needs to top it up; nothing you did caused this.`
+    }
+    if (/\b(401|403)\b/.test(msg) || low.includes('user not found') || low.includes('unauthorized') || low.includes('invalid api key')) {
+      return `The AI writing service isn't connected right now (its account key stopped working), so ${task} isn't possible yet. Your team needs to reconnect it; nothing you did caused this.`
+    }
+  }
+  return msg
+}
+

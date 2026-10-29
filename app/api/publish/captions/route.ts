@@ -3,6 +3,7 @@ import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { PLATFORM_INSTRUCTIONS, PLATFORM_CAPS, enforceYouTubeLimits } from '@/lib/caption-platforms'
 import { parseJsonLoose } from '@/lib/json-loose'
 import { stripDashesDeep, buildHumanizerInstruction } from '@/lib/humanizer'
+import { explainAiErrorForCreator } from '@/lib/error-explain'
 
 export async function POST(req: NextRequest) {
   const { hook, body, cta, platforms } = await req.json() as {
@@ -100,7 +101,7 @@ Example: {"instagram":"caption here","tiktok":"caption here"}`
         if (attempt < maxAttempts) continue
         // Final attempt still missing platforms   fail loudly instead of
         // silently returning 200 with an incomplete captions object.
-        return NextResponse.json({ error: `Caption generation failed: ${lastError}` }, { status: 500 })
+        return NextResponse.json({ error: captionError(lastError) }, { status: 500 })
       }
 
       // Enforce limits per platform
@@ -126,5 +127,12 @@ Example: {"instagram":"caption here","tiktok":"caption here"}`
     }
   }
 
-  return NextResponse.json({ error: `Caption generation failed: ${lastError}` }, { status: 500 })
+  return NextResponse.json({ error: captionError(lastError) }, { status: 500 })
+}
+
+function captionError(lastError: unknown): string {
+  const friendly = explainAiErrorForCreator(lastError, 'writing captions')
+  return friendly === String(lastError ?? '').trim()
+    ? `Caption generation failed: ${lastError}`
+    : `${friendly} You can still type your captions in the boxes below and publish.`
 }

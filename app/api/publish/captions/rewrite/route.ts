@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { PLATFORM_INSTRUCTIONS, PLATFORM_CAPS, enforceYouTubeLimits } from '@/lib/caption-platforms'
 import { stripDashes } from '@/lib/humanizer'
+import { explainAiErrorForCreator } from '@/lib/error-explain'
 
 export async function POST(req: NextRequest) {
   const { platform, currentCaption, feedback, script } = await req.json() as {
@@ -70,6 +71,7 @@ Return ONLY the new caption text. No explanation, no intro sentence, no quotes a
 
     return NextResponse.json({ caption })
   } catch (e) {
-    return NextResponse.json({ error: `Rewrite failed: ${(e as Error).message}` }, { status: 500 })
+    const friendly = explainAiErrorForCreator(e, 'rewriting this caption')
+    return NextResponse.json({ error: friendly === (e as Error).message ? `Rewrite failed: ${friendly}` : friendly }, { status: 500 })
   }
 }

@@ -7,6 +7,7 @@ import { parseJsonLoose } from '@/lib/json-loose'
 import { stripDashesDeep, buildHumanizerInstruction } from '@/lib/humanizer'
 import { getLearningContext, formatLearningSections } from '@/lib/learning'
 import type { AudienceLane, GeneratedScript } from '@/lib/types'
+import { explainAiErrorForCreator } from '@/lib/error-explain'
 
 export async function POST(req: NextRequest) {
   const { idea_id, mood_tag: requestedMood, use_brand_context: useBrandContext = true, script_format: scriptFormat } = await req.json()
@@ -108,7 +109,7 @@ Return ONLY valid JSON matching this schema exactly, no markdown, no extra keys:
     })
   } catch (err) {
     await supabase.from('ideas').update({ status: 'pending_lane_confirm' }).eq('id', idea_id)
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    return NextResponse.json({ error: explainAiErrorForCreator(err, 'writing a script') || String(err) }, { status: 500 })
   }
 
   let generated: GeneratedScript

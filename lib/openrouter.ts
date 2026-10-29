@@ -80,7 +80,12 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
           await sleep(RETRY_BASE_MS * attempt)
           continue
         }
-        throw e
+        // Not retryable (dead key 401, no credits 402, bad request): stop
+        // retrying but still fall through to the backup below. Throwing here
+        // skipped it — so the spare tyre never fired for the exact "our
+        // account is broken" case it exists for.
+        lastError = e
+        break
       }
 
       const data = await res.json()
@@ -113,7 +118,8 @@ export async function chatCompletion(opts: CompletionOptions): Promise<string> {
         await sleep(RETRY_BASE_MS * attempt)
         continue
       }
-      throw err
+      lastError = err
+      break
     }
   }
 

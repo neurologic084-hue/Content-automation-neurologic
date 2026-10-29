@@ -4,6 +4,7 @@ import { chatCompletion, MODELS } from '@/lib/openrouter'
 import { buildHumanizerInstruction, stripDashes } from '@/lib/humanizer'
 import { searchNicheNews } from '@/lib/tavily'
 import { parseJsonLoose } from '@/lib/json-loose'
+import { explainAiErrorForCreator } from '@/lib/error-explain'
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}))
@@ -173,7 +174,7 @@ Respond ONLY with raw JSON, no markdown:
       json: true,
     })
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    return NextResponse.json({ error: explainAiErrorForCreator(err, 'generating ideas') || String(err) }, { status: 500 })
   }
 
   let parsed: { ideas: Array<{ format: string; idea: string } | string> }
