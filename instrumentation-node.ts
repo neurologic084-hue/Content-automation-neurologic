@@ -65,6 +65,12 @@ export async function registerNode() {
 
   async function sweep() {
     try {
+      const { processRecoveryRequests } = await import('./lib/recovery')
+      await processRecoveryRequests(db)
+    } catch (e) {
+      console.warn('[watchdog] recovery pass skipped:', (e as Error).message)
+    }
+    try {
       const { data: jobs } = await db
         .from('video_jobs')
         .select('id, created_at, variants')

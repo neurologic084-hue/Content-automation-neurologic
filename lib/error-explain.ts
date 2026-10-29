@@ -28,6 +28,10 @@ export function isTransientRenderError(raw: unknown): boolean {
   return [
     // machine pressure (the compositor/OOM family)
     'resource temporarily unavailable', 'eagain', 'cannot allocate', 'out of memory', 'enomem', 'compositor error',
+    // a working file another step cleared mid-render (shared raw download
+    // deleted by a finishing step). Re-fetching fixes it, so it is a silent
+    // retry, not a card.
+    'no such file or directory', 'enoent',
     // network flakes
     'econnreset', 'etimedout', 'socket hang up', 'fetch failed', 'bad record mac', 'network error',
     // upstream fetch/download blips (incl. Submagic failing to pull our file —
@@ -65,6 +69,12 @@ export function explainFailure(raw: unknown): string {
   // Messages we already wrote to be user-facing — pass them straight through.
   if (mentions('please retry', 'please retry this variant', 'came back empty', 'could not download the footage', 'took too long', 'timed out')) {
     return trim(msg)
+  }
+
+  // A working file vanished mid-render. Nothing she did, and a retry rebuilds
+  // it, so say that instead of showing a server path.
+  if (mentions('no such file or directory', 'enoent')) {
+    return 'A temporary working file went missing while this was being edited. This is on our side and usually fixes itself. Press retry if it does not.'
   }
 
   // ── Remotion render (v4-v6) ──────────────────────────────────────────────────

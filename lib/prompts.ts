@@ -286,7 +286,7 @@ ${rendered}`
 // through verbatim   they also carry medical-claim and compliance rules we have
 // no business silently dropping, and editing someone's own brand settings out
 // from under them in code is worse than overriding one clause in the open.
-function buildBrandHardRules(brand: BrandSettings): string {
+export function buildBrandHardRules(brand: BrandSettings): string {
   const context = brand.extra_context?.trim()
   if (!context) return ''
 

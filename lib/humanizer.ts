@@ -84,6 +84,22 @@ export function stripDashesDeep<T>(value: T): T {
   return value
 }
 
+// The banned vocabulary as a checker instead of an instruction: returns every
+// banned word or phrase actually present, so output can be verified and fixed
+// rather than trusting the model to have obeyed the prompt.
+export function findBannedPhrases(text: string): string[] {
+  const all = [
+    ...BANNED_VERBS, ...BANNED_INTENSIFIERS, ...BANNED_ABSTRACT, ...BANNED_TRANSITIONS,
+    ...BANNED_ADVERBS, ...BANNED_HOLLOW, ...BANNED_STRUCTURAL_PHRASES,
+  ]
+  const found = new Set<string>()
+  for (const phrase of all) {
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    if (new RegExp(`(^|[^A-Za-z])${escaped}([^A-Za-z]|$)`, 'i').test(text)) found.add(phrase)
+  }
+  return [...found]
+}
+
 export function buildHumanizerInstruction(): string {
   const allBanned = [...BANNED_VERBS, ...BANNED_INTENSIFIERS, ...BANNED_ABSTRACT]
 

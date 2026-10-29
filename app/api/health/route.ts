@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server'
 import os from 'os'
+import fs from 'fs'
+import { rendersRoot } from '@/lib/paths'
 import { containerCores, containerMemoryGb, renderSlots, renderConcurrency } from '@/lib/motion-renderer'
 
 // Railway's healthcheck target. Deliberately shallow: it answers "this
@@ -10,6 +12,20 @@ import { containerCores, containerMemoryGb, renderSlots, renderConcurrency } fro
 // Railway restart it, killing any render running in-process and turning a
 // transient upstream blip into lost work.
 export const dynamic = 'force-dynamic'
+
+// Free space where renders live. A long-lived container keeps every finished
+// video on local disk, so this is the number that explains "file went missing"
+// style failures. Never throws: health must keep answering.
+function diskInfo(): { freeGb: number; totalGb: number } | null {
+  try {
+    const dir = fs.existsSync(rendersRoot()) ? rendersRoot() : os.tmpdir()
+    const st = fs.statfsSync(dir)
+    const gb = (n: number) => Math.round((n / 1024 ** 3) * 10) / 10
+    return { freeGb: gb(st.bavail * st.bsize), totalGb: gb(st.blocks * st.bsize) }
+  } catch {
+    return null
+  }
+}
 
 export function GET() {
   // Report the HOST numbers (what os sees) next to the CONTAINER numbers (the
@@ -23,6 +39,7 @@ export function GET() {
     uptime: Math.round(process.uptime()),
     host: { cores: os.cpus().length, memoryGb: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10 },
     container: { cores: containerCores(), memoryGb: Math.round(containerMemoryGb() * 10) / 10 },
+    disk: diskInfo(),
     render: { concurrentRenders: slots, tabsPerRender: renderConcurrency(), variantsPerWave: slots },
   })
 }

@@ -105,6 +105,11 @@ export interface VideoVariant extends VideoVariantDef {
   // Surfaced on the variant card: a video that silently lacks the B-roll she
   // supplied looks perfectly healthy, which is the worst way to fail.
   broll_notice?: string | null
+  // Operator recovery (lib/recovery.ts). `recover_requested` asks the server to
+  // rebuild a failed variant's footage and re-run it; `resume_after_prep` is
+  // the server's own "start me as soon as the footage is ready" marker.
+  recover_requested?: boolean
+  resume_after_prep?: boolean
   // ISO timestamp stamped when the variant enters 'processing', cleared when it
   // reaches ready/failed. Lets the status route detect a variant whose worker
   // VM was killed before it could write its own failure (a silent forever-spin).

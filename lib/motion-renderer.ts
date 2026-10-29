@@ -51,6 +51,7 @@ const MUSIC_ENABLED = true
 // stop deduping. globalThis survives reloads; module code does not.
 const g = globalThis as unknown as {
   __olySourceFiles?: Map<string, Promise<string>>
+  __olyCompressedInflight?: Map<string, Promise<string>>
   __olySubmagicSources?: Map<string, Promise<string>>
   __olyContentProfiles?: Map<string, Promise<ContentProfile>>
   __olySubmagicFinalizes?: Set<string>
@@ -279,7 +280,16 @@ async function getSharedSourceFile(
   if (fs.existsSync(finalPath)) return finalPath
 
   const existing = sourceFileCache.get(jobId)
-  if (existing) return existing
+  if (existing) {
+    // A cached path is only good while the file is still there: the compress
+    // step deletes the raw download, so a caller that joined late would be
+    // handed a path that no longer exists (ffmpeg: "source.mp4: No such file
+    // or directory"). Wait for the owner, check, and re-download if it's gone.
+    const joined = await existing.catch(() => null)
+    if (joined && fs.existsSync(joined)) return joined
+    if (sourceFileCache.get(jobId) === existing) sourceFileCache.delete(jobId)
+    if (fs.existsSync(finalPath)) return finalPath
+  }
 
   const promise = (async () => {
     // SIZE GATE before the bytes move: the duration cap downstream can only
@@ -606,9 +616,13 @@ async function sharedWords(jobId: string): Promise<{ text: string; start: number
 // nothing.
 // One in-flight fetch per job, shared by every variant that asks while it runs.
 // Six variants starting together otherwise each pull the same multi-GB source.
-const compressedSourceInflight = new Map<string, Promise<string>>()
+// On globalThis like every other shared map here: Next bundles routes
+// separately, so a module-level Map is per-bundle and two routes asking for
+// the same job's source would each start their own download/compress, one
+// deleting the raw file the other is about to read.
+const compressedSourceInflight = (g.__olyCompressedInflight ??= new Map<string, Promise<string>>())
 
-async function getLocalCompressedSource(
+export async function getLocalCompressedSource(
   jobId: string,
   sourceUrl: string,
   outDir: string,
@@ -663,6 +677,50 @@ async function getLocalCompressedSourceInner(
     }
   }
 
+  // Download + gate + compress, retried when the raw file disappears underneath
+  // us. That has one cause in practice — another caller finishing its compress
+  // pass and deleting the shared raw download — and the cure is simply to fetch
+  // it again, so it must never surface as a failed card.
+  let lastVanish: unknown
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await downloadGateAndCompress(jobId, sourceUrl, outDir, onProgress)
+    } catch (e) {
+      if (!fileVanishedError(e, outDir)) throw e
+      lastVanish = e
+      console.warn(`[motion-renderer] raw footage vanished for job ${jobId.slice(0, 8)} (attempt ${attempt}/3) — fetching it again. ${describeJobDir(outDir)}`)
+      sourceFileCache.delete(jobId)
+      // Another caller may have finished the compress while we waited.
+      if (fs.existsSync(compressedPath)) return compressedPath
+    }
+  }
+  throw lastVanish
+}
+
+function fileVanishedError(e: unknown, outDir: string): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? '')
+  return /ENOENT|No such file or directory/i.test(msg) && msg.includes(outDir)
+}
+
+// One line of ground truth for the logs when a file goes missing: is the job
+// folder there, what is in it, and is the disk full.
+function describeJobDir(outDir: string): string {
+  try {
+    const files = fs.existsSync(outDir) ? fs.readdirSync(outDir).slice(0, 12).join(',') : '(folder missing)'
+    const st = fs.statfsSync(outDir)
+    const freeGb = (st.bavail * st.bsize / 1024 ** 3).toFixed(1)
+    return `[dir: ${files} | disk free: ${freeGb}GB]`
+  } catch {
+    return '[dir: unreadable]'
+  }
+}
+
+async function downloadGateAndCompress(
+  jobId: string,
+  sourceUrl: string,
+  outDir: string,
+  onProgress?: ProgressCallback,
+): Promise<string> {
   const rawLocalPath = await getSharedSourceFile(jobId, sourceUrl, outDir, onProgress)
 
   // LENGTH GATE, before any heavy or paid work. The studio is built for short
@@ -4117,6 +4175,14 @@ async function prepareJobSourceTaskInner(jobId: string, sourceUrl: string, db: R
       ))
       await db.from('video_jobs').update({ variants: readyVariants }).eq('id', jobId)
     })
+
+    // Variants that were waiting on this prep (an operator recovery) start now.
+    try {
+      const { resumeVariantsAfterPrep } = await import('./recovery')
+      await resumeVariantsAfterPrep(db, jobId)
+    } catch (resumeErr) {
+      console.warn(`[recovery] could not resume variants for ${jobId.slice(0, 8)}:`, (resumeErr as Error).message)
+    }
   } catch (e) {
     const raw = (e as Error).message
     console.error(`[motion-renderer] source prep failed job=${jobId}:`, raw)
