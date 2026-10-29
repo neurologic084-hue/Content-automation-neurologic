@@ -157,7 +157,7 @@ async function fetchPublishData(): Promise<PublishData> {
     supabase
       .from('publish_jobs')
       .select('id, video_job_id, variant_id, caption, status, published_at, scheduled_at, platform_posts, scripts(hook)')
-      .in('status', ['published', 'partial', 'scheduled'])
+      .in('status', ['published', 'partial', 'scheduled', 'publishing'])
       .eq('profile_slot', slot)
       .order('published_at', { ascending: false, nullsFirst: false })
       .limit(50),
@@ -523,6 +523,7 @@ function PublishForm() {
   // Submit
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<{
+    publishJobId?: string
     status: string
     platformPosts: { platform: string; status: string; error?: string | null; url?: string | null }[]
   } | null>(null)
@@ -860,7 +861,35 @@ function PublishForm() {
   }
 
   const noKey = accountsError?.includes('BLOTATO_API_KEY')
-  const allPublished = result?.status === 'published' || result?.status === 'scheduled'
+  // While any post is still going out (or a scheduled one has come due), ask the
+  // server to re-check with Blotato every 15s, then refresh the list.
+  const unresolved = publishedList.some(r => (r.platform_posts ?? []).some(pp =>
+    pp.status === 'processing' || (pp.status === 'scheduled' && !!r.scheduled_at && new Date(r.scheduled_at).getTime() < now - 120_000)))
+  useEffect(() => {
+    if (!unresolved) return
+    let stopped = false
+    let tries = 0
+    let timer: ReturnType<typeof setTimeout>
+    const tick = async () => {
+      if (stopped || tries++ >= 40) return
+      try {
+        await fetch('/api/publish/reconcile', { method: 'POST' })
+        await loadJobs()
+      } catch { /* try again next tick */ }
+      if (!stopped) timer = setTimeout(tick, 15_000)
+    }
+    timer = setTimeout(tick, 4_000)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [unresolved, loadJobs])
+
+  // The card follows the saved record, so "still posting" turns into "live" (with
+  // a link) or a failure by itself as the reconciler learns the outcome.
+  const liveRow = result?.publishJobId ? publishedList.find(r => r.id === result.publishJobId) : undefined
+  const shown = result && liveRow
+    ? { ...result, status: liveRow.status, platformPosts: liveRow.platform_posts as NonNullable<typeof result>['platformPosts'] }
+    : result
+  const stillPosting = shown?.status === 'publishing' || (shown?.platformPosts ?? []).some(p => p.status === 'processing')
+  const allPublished = shown?.status === 'published' || shown?.status === 'scheduled'
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -994,6 +1023,17 @@ function PublishForm() {
             </div>
           )}
         </div>
+
+        {accounts.some(a => a.needsReconnect) && (
+          <div className="rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-5 py-4 text-xs leading-relaxed text-[#92400E]" role="alert">
+            {accounts.filter(a => a.needsReconnect).map(a => (
+              <p key={a.id} className="mb-1 last:mb-0">
+                <span className="font-semibold">{getPlatformMeta(a.platform).label}:</span> the last post to it failed because the connection needs renewing.{' '}
+                <a href="https://my.blotato.com" target="_blank" rel="noopener noreferrer" className="font-semibold underline">Reconnect it in Blotato</a>, then publish. If you already did, just publish again.
+              </p>
+            ))}
+          </div>
+        )}
 
         {/* ── 2. Video ── */}
         <div className="bg-white border border-[#E4E4E0] rounded-2xl p-5">
@@ -1183,23 +1223,36 @@ function PublishForm() {
         )}
 
         {/* Result */}
-        {result && (
+        {shown && (
           <div className={`rounded-2xl px-5 py-4 border ${allPublished ? 'bg-[#F0FDF4] border-[#BBF7D0]' : 'bg-[#FFFBEB] border-[#FDE68A]'}`}>
-            <p className={`text-sm font-semibold mb-3 ${allPublished ? 'text-[#15803D]' : 'text-[#92400E]'}`}>
-              {result.status === 'published' && 'Published ✓'}
-              {result.status === 'scheduled' && 'Scheduled ✓'}
-              {result.status === 'partial' && 'Partially published: some platforms failed'}
-              {result.status === 'failed' && 'Publish failed'}
+            <p className={`text-sm font-semibold ${stillPosting ? 'mb-1' : 'mb-3'} ${allPublished ? 'text-[#15803D]' : 'text-[#92400E]'}`}>
+              {shown.status === 'published' && 'Published ✓'}
+              {shown.status === 'scheduled' && 'Scheduled ✓'}
+              {shown.status === 'publishing' && 'Posting now…'}
+              {shown.status === 'partial' && (stillPosting ? 'Posting now… one platform did not go through' : 'Partially published: some platforms failed')}
+              {shown.status === 'failed' && 'Publish failed'}
             </p>
+            {stillPosting && (
+              <p className="mb-3 text-xs leading-relaxed text-[#92400E]" aria-live="polite">
+                Some platforms take a few minutes to finish. You can leave this page; the result shows up under Published below.
+              </p>
+            )}
             <div className="space-y-1.5">
-              {result.platformPosts.map((p, i) => {
+              {shown.platformPosts.map((p, i) => {
                 const meta = getPlatformMeta(p.platform)
                 return (
                   <div key={i} className="flex items-center gap-2 text-xs">
                     <span className="w-5 h-5 rounded-lg flex items-center justify-center flex-shrink-0"
                       style={{ background: meta.color, color: 'white' }}>{meta.icon}</span>
                     <span className="font-medium text-[#18181B]">{meta.label}</span>
-                    {p.status === 'published' || p.status === 'scheduled'
+                    {p.status === 'processing'
+                      ? (
+                        <span className="flex items-center gap-2 text-[#92400E]">
+                          <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#D97706] border-t-transparent" aria-hidden="true" />
+                          posting…
+                        </span>
+                      )
+                      : p.status === 'published' || p.status === 'scheduled'
                       ? (
                         <span className="flex items-center gap-2">
                           <span className="text-[#16A34A]">✓ {p.status === 'scheduled' ? 'scheduled' : 'live'}</span>
@@ -1517,9 +1570,11 @@ function PublishForm() {
               const styleName = (jobs.find(j => j.id === p.video_job_id)?.variants ?? []).find(v => v.id === p.variant_id)?.name
               const badge = p.status === 'scheduled'
                 ? { text: 'SCHEDULED', bg: '#EFF6FF', fg: '#3B82F6' }
-                : p.status === 'partial'
-                  ? { text: 'SOME FAILED', bg: '#FFFBEB', fg: '#D97706' }
-                  : { text: 'LIVE', bg: '#F0FDF4', fg: '#16A34A' }
+                : p.status === 'publishing'
+                  ? { text: 'POSTING…', bg: '#EFF6FF', fg: '#2563EB' }
+                  : p.status === 'partial'
+                    ? { text: 'SOME FAILED', bg: '#FFFBEB', fg: '#D97706' }
+                    : { text: 'LIVE', bg: '#F0FDF4', fg: '#16A34A' }
               return (
                 <div key={p.id} className="rounded-xl border border-[#F0EFED] bg-[#FAFAFA] px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
@@ -1538,14 +1593,14 @@ function PublishForm() {
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {posts.map((pp, i) => {
                         const m = getPlatformMeta(pp.platform)
-                        const ok = pp.status === 'published' || pp.status === 'scheduled'
+                        const ok = pp.status === 'published' || pp.status === 'scheduled' || pp.status === 'processing'
                         const inner = (
                           <>
                             <span className="flex h-4 w-4 items-center justify-center rounded text-white" style={{ background: ok ? m.color : '#DC2626' }}>
                               <span className="flex scale-[0.6] items-center justify-center">{m.icon}</span>
                             </span>
                             {m.label}
-                            <span aria-hidden="true">{ok ? (pp.url ? '↗' : '✓') : '✗'}</span>
+                            <span aria-hidden="true">{pp.status === 'processing' ? '…' : ok ? (pp.url ? '↗' : '✓') : '✗'}</span>
                           </>
                         )
                         const cls = 'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium'

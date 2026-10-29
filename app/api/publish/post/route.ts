@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
 import { createClient } from '@/lib/supabase/server'
-import { publishPost } from '@/lib/blotato'
+import { publishPost, videoTooLargeMessage, type BlatoPostResult } from '@/lib/blotato'
+import { rollUpPublishStatus } from '@/lib/publish-reconcile'
 import { PLATFORM_CAPS } from '@/lib/caption-platforms'
 import { uploadToStorage } from '@/lib/storage'
 import { rendersDir } from '@/lib/paths'
@@ -146,9 +147,17 @@ export async function POST(req: NextRequest) {
     return withCredit(captions[platform] ?? fallbackCaption, platform)
   })
 
+  // How big is the file? Each platform has a maximum, and finding out here beats
+  // an obscure rejection from Blotato after the upload attempt.
+  const videoBytes = await fetch(absoluteUrl, { method: 'HEAD', signal: AbortSignal.timeout(8_000) })
+    .then(r => (r.ok ? Number(r.headers.get('content-length')) || null : null))
+    .catch(() => null)
+
   const results = await Promise.allSettled(
     accounts.map((acc, i) => {
       const platform = acc.platform.toLowerCase()
+      const tooLarge = videoTooLargeMessage(platform, videoBytes)
+      if (tooLarge) return Promise.resolve<BlatoPostResult>({ postId: null, status: 'failed', error: tooLarge })
       const captionText = captions[platform] ?? fallbackCaption
 
       // For YouTube, extract the title (before |) and pass it separately
@@ -178,9 +187,7 @@ export async function POST(req: NextRequest) {
     return { accountId: acc.id, platform: acc.platform, postId: null, status: 'failed', error: (r.reason as Error).message, caption, url: null }
   })
 
-  const allFailed = platformPosts.every(p => p.status === 'failed')
-  const anyFailed = platformPosts.some(p => p.status === 'failed')
-  const finalStatus = allFailed ? 'failed' : anyFailed ? 'partial' : (scheduledAt ? 'scheduled' : 'published')
+  const finalStatus = rollUpPublishStatus(platformPosts.map(p => p.status), !!scheduledAt)
 
   await supabase
     .from('publish_jobs')
