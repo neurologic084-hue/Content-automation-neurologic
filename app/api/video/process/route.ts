@@ -58,9 +58,10 @@ export async function POST(req: NextRequest) {
         }
       } else if (brollFileId) {
         customBrollEntries.push({ url: `https://drive.google.com/uc?export=download&id=${brollFileId}` })
-      } else if (/^https?:\/\//.test(link) && !link.includes('drive.google.com')) {
-        customBrollEntries.push({ url: link })
       } else {
+        // Only Google Drive links reach here. Any other address would be fetched
+        // by the server itself, so it is refused, same as the B-roll check in the
+        // studio already does.
         return NextResponse.json(
           { error: `Invalid B-roll link: "${link.slice(0, 60)}". Paste a Google Drive folder link (or file links, one per line).` },
           { status: 400 }

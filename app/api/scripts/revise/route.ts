@@ -39,7 +39,13 @@ export async function POST(req: NextRequest) {
   learning.recentHooks = learning.recentHooks.filter(h => h !== script.hook)
 
   const messages = buildRevisionMessages(
-    { hook: script.hook, body: script.body, cta: script.cta },
+    {
+      hook: script.hook,
+      body: script.body,
+      cta: script.cta,
+      script_format: scriptFormat,
+      re_hook: (script.filming_plan as FilmingPlan | null)?.re_hook,
+    },
     script.revision_notes,
     idea.raw_idea,
     idea.confirmed_lane as AudienceLane,

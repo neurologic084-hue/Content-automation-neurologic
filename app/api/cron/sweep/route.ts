@@ -8,14 +8,16 @@ import type { VideoVariant } from '@/lib/video-pipeline'
 // covers the closed-tab case so a dead render can't sit 'processing' forever.
 //
 // Vercel automatically sends `Authorization: Bearer $CRON_SECRET` when the
-// CRON_SECRET env var is set; without the env var the route stays open (it's
-// idempotent and read-mostly, but set the secret in production anyway).
+// CRON_SECRET env var is set. Without a secret the route refuses everyone: the
+// proxy lets /api/cron/ through unauthenticated, so an unset secret used to make
+// this a public button. On Railway the in-process watchdog does this job
+// (instrumentation-node.ts) and nothing needs to call it.
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: NextRequest) {
   const secret = process.env.CRON_SECRET
-  if (secret && req.headers.get('authorization') !== `Bearer ${secret}`) {
+  if (!secret || req.headers.get('authorization') !== `Bearer ${secret}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
