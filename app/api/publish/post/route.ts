@@ -173,9 +173,9 @@ export async function POST(req: NextRequest) {
     const r = results[i]
     const caption = postTexts[i]
     if (r.status === 'fulfilled') {
-      return { accountId: acc.id, platform: acc.platform, postId: r.value.postId, status: r.value.status, error: r.value.error ?? null, caption }
+      return { accountId: acc.id, platform: acc.platform, postId: r.value.postId, status: r.value.status, error: r.value.error ?? null, caption, url: r.value.url ?? null }
     }
-    return { accountId: acc.id, platform: acc.platform, postId: null, status: 'failed', error: (r.reason as Error).message, caption }
+    return { accountId: acc.id, platform: acc.platform, postId: null, status: 'failed', error: (r.reason as Error).message, caption, url: null }
   })
 
   const allFailed = platformPosts.every(p => p.status === 'failed')

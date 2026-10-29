@@ -506,11 +506,15 @@ async function buildSharedCleanAudio(jobId: string, compressedPath: string, outD
     // job. A source at/under 1080p is left untouched; only a 4K/larger one is
     // scaled (existing 4K jobs included, on their next prep/retry).
     await downscaleInPlace(cleanPath)
-    await uploadToStorage(cleanPath, SHARED_CLEAN_NAME, jobId)
 
-    // Transcribe the CLEANED audio: better words, and the timings then match
-    // exactly what every variant renders from.
-    const words = await transcribeLocalFile(cleanPath)
+    // Upload the clean and transcribe it at the same time: both only READ the
+    // finished file, and the transcript is of the CLEANED audio (better words,
+    // and the timings match exactly what every variant renders from). Run one
+    // after the other, the upload sat idle in front of the transcription.
+    const [, words] = await Promise.all([
+      uploadToStorage(cleanPath, SHARED_CLEAN_NAME, jobId),
+      transcribeLocalFile(cleanPath),
+    ])
     if (words.length) {
       // The job row first: durable, already read by every render, cannot expire
       // or 404. The R2 JSON stays as the fallback for installs where the
@@ -984,12 +988,18 @@ export async function prepareJobSource(
   // If the network flakes here (e.g. TLS "bad record mac" mid-upload), the
   // job must NOT fail — Submagic variants re-attempt this exact upload when
   // they start (the source-URL cache drops rejected promises).
-  await onProgress?.(97, 'Backing up footage to storage')
-  try {
-    await getSubmagicSourceUrl(jobId, sourceUrl)
-  } catch (e) {
-    console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
-  }
+  //
+  // Runs ALONGSIDE the audio clean below, not before it: the upload (150-200MB)
+  // and the Auphonic round trip are independent, and doing them one after the
+  // other put the whole upload on the critical path. Awaited before the
+  // pre-cut so nothing downstream ever sees it half done.
+  const backupDone = (async () => {
+    try {
+      await getSubmagicSourceUrl(jobId, sourceUrl)
+    } catch (e) {
+      console.warn(`[motion-renderer] source backup to R2 failed for job=${jobId} — continuing with local copy; Submagic variants will retry the upload:`, (e as Error).message)
+    }
+  })()
   // Clean the audio and transcribe it ONCE for the whole job (Auphonic ->
   // ElevenLabs; Submagic is no longer in this chain), so the Motion Lab variants
   // each reuse it instead of repeating both — AND, now that this runs BEFORE the
@@ -1013,6 +1023,8 @@ export async function prepareJobSource(
   } else {
     console.warn('[shared-audio] no usable compressed source — skipping the shared clean')
   }
+  await onProgress?.(98, 'Backing up footage to storage')
+  await backupDone
 
   // Pre-cut the footage for the Submagic variants (v1-v3): our planner makes a
   // tight, clean cut (silence + retakes + stutters) and Submagic then only adds

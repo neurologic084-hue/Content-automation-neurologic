@@ -48,6 +48,18 @@ export async function processRecoveryRequests(db: SupabaseClient): Promise<numbe
       started++
     } catch (e) {
       console.warn(`[recovery] job ${job.id.slice(0, 8)} could not start:`, (e as Error).message)
+      // The prep never launched, so nothing will ever resume these. Put them
+      // back on a normal failed card (with Retry) rather than leaving a
+      // spinner that never ends.
+      const { explainFailure } = await import('./error-explain')
+      for (const v of flagged) {
+        await patchVariant(db, job.id, v.id, {
+          status: 'failed',
+          error: explainFailure(e),
+          resume_after_prep: false,
+          progress: null,
+        }).catch(() => { /* best-effort */ })
+      }
     } finally {
       // Held only for this pass: the flags are already cleared, so a later
       // sweep has nothing to pick up twice.

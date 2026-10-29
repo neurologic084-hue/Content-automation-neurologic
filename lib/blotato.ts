@@ -43,6 +43,8 @@ export interface BlatoPostResult {
   postId: string | null
   status: 'published' | 'scheduled' | 'failed'
   error?: string
+  /** Link to the live post, once the platform has one. */
+  url?: string
 }
 
 export async function getAccounts(): Promise<BlatoAccount[]> {
@@ -219,7 +221,7 @@ export async function publishPost(opts: BlatoPostOptions): Promise<BlatoPostResu
   }
   // 'published' or still 'in-progress' after the poll window   report published either way
   // (in-progress almost always resolves quickly after); the postId lets it be checked later.
-  return { postId: postSubmissionId, status: 'published' }
+  return { postId: postSubmissionId, status: 'published', ...(outcome.url ? { url: outcome.url } : {}) }
 }
 
 // TikTok is the slowest platform to confirm (~30s observed end-to-end), so the
@@ -229,7 +231,7 @@ async function pollPostStatus(
   postSubmissionId: string,
   maxAttempts = 12,
   intervalMs = 3000
-): Promise<{ status: 'published' | 'failed' | 'in-progress'; error?: string }> {
+): Promise<{ status: 'published' | 'failed' | 'in-progress'; error?: string; url?: string }> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${BASE_URL}/posts/${postSubmissionId}`, {
@@ -239,7 +241,7 @@ async function pollPostStatus(
       })
       if (res.ok) {
         const data = await res.json()
-        if (data.status === 'published') return { status: 'published' }
+        if (data.status === 'published') return { status: 'published', url: typeof data.publicUrl === 'string' ? data.publicUrl : undefined }
         if (data.status === 'failed') return { status: 'failed', error: data.error }
       }
     } catch {

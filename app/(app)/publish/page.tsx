@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
+import { VideoPicker } from '@/components/publish/video-picker'
 import type { BlatoAccount } from '@/lib/blotato'
 import type { VideoVariant } from '@/lib/video-pipeline'
 import { PageGuide } from '@/components/help/page-guide'
@@ -266,7 +267,7 @@ interface PublishedRow {
   status: string
   published_at: string | null
   scheduled_at: string | null
-  platform_posts: { platform: string; status: string }[]
+  platform_posts: { platform: string; status: string; url?: string | null; error?: string | null }[]
   script: { hook: string } | null
 }
 
@@ -523,7 +524,7 @@ function PublishForm() {
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<{
     status: string
-    platformPosts: { platform: string; status: string; error?: string | null }[]
+    platformPosts: { platform: string; status: string; error?: string | null; url?: string | null }[]
   } | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
@@ -698,6 +699,23 @@ function PublishForm() {
     return publishedKeys.has(`${jobId}:${variantId}`)
   }
 
+  // Platforms this exact version has actually gone out (or is scheduled) to.
+  // Failed attempts don't count: a "partial" row also lists the platform that
+  // failed, and showing that as posted is how Facebook looked live when it
+  // never was.
+  function postedOn(jobId: string, variantId: string): string[] {
+    const job = jobs.find(j => j.id === jobId)
+    const out = new Set<string>()
+    for (const r of publishedList) {
+      if (r.video_job_id !== jobId) continue
+      if (r.variant_id ? r.variant_id !== variantId : variantId !== job?.selected_variant) continue
+      for (const pp of r.platform_posts ?? []) {
+        if (pp.status === 'published' || pp.status === 'scheduled') out.add(pp.platform.toLowerCase())
+      }
+    }
+    return [...out]
+  }
+
   function pickVariant(job: VideoJobRow, variantId: string) {
     setPickedVariantId(variantId)
     const variant = (job.variants ?? []).find(v => v.id === variantId)
@@ -757,20 +775,31 @@ function PublishForm() {
     setGeneratingCaptions(true)
     setCaptionError(null)
     const s = selectedJob!.script!
-    try {
-      const res = await fetch('/api/publish/captions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hook: s.hook, body: s.body, cta: s.cta, platforms: selectedPlatforms }),
-      })
-      const data = await res.json()
-      if (!res.ok) { setCaptionError(data.error ?? 'Generation failed'); return }
-      setCaptions(prev => ({ ...prev, ...data.captions }))
-    } catch (e) {
-      setCaptionError((e as Error).message)
-    } finally {
-      setGeneratingCaptions(false)
+    const body = JSON.stringify({ hook: s.hook, body: s.body, cta: s.cta, platforms: selectedPlatforms })
+    // One automatic retry for a dropped connection or a timeout (phone on
+    // flaky wifi); a real answer from the server, success or error, is final.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await fetch('/api/publish/captions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(100_000),
+        })
+        const data = await res.json()
+        if (!res.ok) { setCaptionError(data.error ?? 'Generation failed'); break }
+        setCaptions(prev => ({ ...prev, ...data.captions }))
+        break
+      } catch (e) {
+        if (attempt === 1) { await new Promise(r => setTimeout(r, 1500)); continue }
+        setCaptionError(
+          (e as Error).name === 'TimeoutError'
+            ? 'Writing the captions took too long. Tap “Try again”, or type them below.'
+            : 'Could not reach the server to write the captions. Check your connection and tap “Try again”, or type them below.',
+        )
+      }
     }
+    setGeneratingCaptions(false)
   }
 
   // Auto-generate captions once the param job is selected and accounts are ready.
@@ -925,27 +954,40 @@ function PublishForm() {
               {accounts.map(acc => {
                 const meta = getPlatformMeta(acc.platform)
                 const selected = selectedIds.has(acc.id)
+                const handle = acc.username ? `@${acc.username}` : (acc.fullname || '')
                 return (
                   <button
                     key={acc.id}
                     type="button"
+                    role="checkbox"
+                    aria-checked={selected}
                     onClick={() => toggleAccount(acc.id)}
-                    className="flex items-center gap-2 px-3 py-2 rounded-xl border transition-all text-sm font-medium"
+                    className="flex min-w-[9.5rem] flex-1 items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer sm:flex-none"
                     style={{
                       background: selected ? meta.color : '#F9F9F8',
                       borderColor: selected ? meta.color : '#E4E4E0',
                       color: selected ? 'white' : '#18181B',
                     }}
                   >
-                    <span className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
+                    <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg"
                       style={{ background: selected ? 'rgba(255,255,255,0.2)' : meta.color, color: 'white' }}>
                       {meta.icon}
                     </span>
-                    <span>{meta.label}</span>
-                    {selected
-                      ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
-                      : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                    }
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold leading-tight">{meta.label}</span>
+                      {handle && (
+                        <span className="block max-w-[9rem] truncate text-[11px] leading-tight" style={{ opacity: selected ? 0.85 : 0.55 }}>{handle}</span>
+                      )}
+                    </span>
+                    <span
+                      className="flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full border"
+                      style={{ borderColor: selected ? 'rgba(255,255,255,0.7)' : '#D4D4D0', background: selected ? 'rgba(255,255,255,0.25)' : 'white' }}
+                      aria-hidden="true"
+                    >
+                      {selected && (
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                      )}
+                    </span>
                   </button>
                 )
               })}
@@ -992,70 +1034,15 @@ function PublishForm() {
                 <Link href="/edit" className="text-xs text-[#FF4F17] underline">Go to Video Studio →</Link>
               </div>
             ) : (
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {jobs.map(job => {
-                  const isSelected = selectedJobId === job.id
-                  const ready = readyVariants(job)
-                  return (
-                    <div
-                      key={job.id}
-                      onClick={() => { if (!isSelected) pickJob(job) }}
-                      className="w-full text-left rounded-xl border px-4 py-3 transition-all cursor-pointer"
-                      style={{
-                        borderColor: isSelected ? '#FF4F17' : '#E4E4E0',
-                        background: isSelected ? '#FFF4F1' : '#FAFAFA',
-                        outline: isSelected ? '1.5px solid #FF4F17' : 'none',
-                      }}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-[#18181B] truncate">
-                            {job.script?.hook ?? 'Untitled video'}
-                          </p>
-                          <p className="text-[11px] text-[#A1A1AA] mt-0.5">
-                            {ready.length} ready variant{ready.length === 1 ? '' : 's'} · {new Date(job.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                          </p>
-                        </div>
-                        {isSelected && (
-                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FF4F17" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
-                            <path d="M20 6L9 17l-5-5" />
-                          </svg>
-                        )}
-                      </div>
-                      {/* Variant picker — each ready variant is publishable on its
-                          own; ones already out are marked instead of hidden. */}
-                      {isSelected && ready.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mt-2.5">
-                          {ready.map(v => {
-                            const done = isPublished(job.id, v.id)
-                            const active = (pickedVariantId ?? job.selected_variant) === v.id
-                            return (
-                              <button
-                                key={v.id}
-                                type="button"
-                                onClick={e => { e.stopPropagation(); pickVariant(job, v.id) }}
-                                className="px-2.5 h-7 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1"
-                                style={{
-                                  background: active ? '#FF4F17' : 'white',
-                                  color: active ? 'white' : done ? '#A1A1AA' : '#18181B',
-                                  border: `1px solid ${active ? '#FF4F17' : '#E4E4E0'}`,
-                                }}
-                              >
-                                {v.name ?? v.id}
-                                {done && (
-                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={active ? 'white' : '#22C55E'} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M20 6L9 17l-5-5" />
-                                  </svg>
-                                )}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
+              <VideoPicker
+                jobs={jobs}
+                selectedJobId={selectedJobId}
+                pickedVariantId={pickedVariantId}
+                onPickJob={job => pickJob(job as VideoJobRow)}
+                onPickVariant={(job, variantId) => pickVariant(job as VideoJobRow, variantId)}
+                postedOn={postedOn}
+                platformMeta={getPlatformMeta}
+              />
             )
           )}
 
@@ -1141,9 +1128,23 @@ function PublishForm() {
           </div>
 
           {captionError && (
-            <div className="mb-3 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-4 py-3">
-              <p className="text-xs text-[#DC2626]">{captionError}</p>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 bg-[#FEF2F2] border border-[#FECACA] rounded-xl px-4 py-3" role="alert">
+              <p className="min-w-[12rem] flex-1 text-xs leading-relaxed text-[#B91C1C]">{captionError}</p>
+              <button
+                type="button"
+                onClick={generateCaptions}
+                disabled={!canGenerate || generatingCaptions}
+                className="rounded-lg border border-[#FECACA] bg-white px-3 py-1.5 text-xs font-semibold text-[#B91C1C] transition-colors hover:bg-[#FEE2E2] disabled:opacity-50 cursor-pointer"
+              >
+                Try again
+              </button>
             </div>
+          )}
+
+          {generatingCaptions && (
+            <p className="mb-3 text-xs text-[#71717A]" aria-live="polite">
+              Writing captions for each platform in your voice. This takes about 10 seconds.
+            </p>
           )}
 
           {!canGenerate && selectedPlatforms.length > 0 && (
@@ -1199,7 +1200,16 @@ function PublishForm() {
                       style={{ background: meta.color, color: 'white' }}>{meta.icon}</span>
                     <span className="font-medium text-[#18181B]">{meta.label}</span>
                     {p.status === 'published' || p.status === 'scheduled'
-                      ? <span className="text-[#16A34A]">✓ {p.status}</span>
+                      ? (
+                        <span className="flex items-center gap-2">
+                          <span className="text-[#16A34A]">✓ {p.status === 'scheduled' ? 'scheduled' : 'live'}</span>
+                          {p.url && (
+                            <a href={p.url} target="_blank" rel="noopener noreferrer" className="font-medium text-[#FF4F17] underline">
+                              View post ↗
+                            </a>
+                          )}
+                        </span>
+                      )
                       : <span className="text-[#DC2626]">✗ {p.error ?? 'failed'}</span>
                     }
                   </div>
@@ -1424,6 +1434,42 @@ function PublishForm() {
           </div>
         )}
 
+        {/* What is about to happen, in words — and why the button is grey when it is */}
+        {!result && (() => {
+          const platformsList = selectedPlatforms.map(p => getPlatformMeta(p).label)
+          const joined = platformsList.length > 1
+            ? `${platformsList.slice(0, -1).join(', ')} and ${platformsList[platformsList.length - 1]}`
+            : platformsList[0]
+          const missing: string[] = []
+          if (!videoUrl.trim()) missing.push('pick a video')
+          if (selectedIds.size === 0) missing.push('choose at least one platform')
+          else {
+            const noCaption = selectedPlatforms.filter(p => !(captions[p] ?? '').trim()).map(p => getPlatformMeta(p).label)
+            if (noCaption.length) missing.push(`add a caption for ${noCaption.join(' and ')}`)
+          }
+          if (scheduleMode === 'later' && !scheduledAt) missing.push('pick a date and time')
+          else if (scheduleMode === 'later' && scheduledInPast) missing.push('pick a time that has not passed')
+          const when = scheduleMode === 'later' && scheduledAt
+            ? `on ${new Date(scheduledAt).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+            : 'right now'
+          return (
+            <div className="rounded-xl border border-[#E4E4E0] bg-white px-4 py-3 text-[13px] leading-relaxed text-[#52525B]" aria-live="polite">
+              {missing.length === 0 ? (
+                <>
+                  Posting{' '}
+                  <span className="font-semibold text-[#18181B]">
+                    &ldquo;{(selectedJob?.script?.hook ?? 'your video').slice(0, 60)}{(selectedJob?.script?.hook?.length ?? 0) > 60 ? '…' : ''}&rdquo;
+                  </span>
+                  {selectedVariant?.name ? <> ({selectedVariant.name})</> : null} to{' '}
+                  <span className="font-semibold text-[#18181B]">{joined}</span>, {when}.
+                </>
+              ) : (
+                <>To publish, <span className="font-semibold text-[#18181B]">{missing.join(', then ')}</span>.</>
+              )}
+            </div>
+          )
+        })()}
+
         {/* Submit */}
         {!result && (
           <button
@@ -1467,28 +1513,50 @@ function PublishForm() {
           <div className="space-y-2 max-h-72 overflow-y-auto">
             {publishedList.map(p => {
               const when = p.status === 'scheduled' ? p.scheduled_at : p.published_at
-              const platforms = (p.platform_posts ?? []).filter(pp => pp.status === 'published' || pp.status === 'scheduled')
+              const posts = p.platform_posts ?? []
+              const styleName = (jobs.find(j => j.id === p.video_job_id)?.variants ?? []).find(v => v.id === p.variant_id)?.name
+              const badge = p.status === 'scheduled'
+                ? { text: 'SCHEDULED', bg: '#EFF6FF', fg: '#3B82F6' }
+                : p.status === 'partial'
+                  ? { text: 'SOME FAILED', bg: '#FFFBEB', fg: '#D97706' }
+                  : { text: 'LIVE', bg: '#F0FDF4', fg: '#16A34A' }
               return (
                 <div key={p.id} className="rounded-xl border border-[#F0EFED] bg-[#FAFAFA] px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium text-[#18181B] truncate flex-1 min-w-0">
                       {p.script?.hook ?? (p.caption ? `“${p.caption.slice(0, 60)}${p.caption.length > 60 ? '…' : ''}”` : 'Published video')}
                     </p>
-                    <span
-                      className="text-[10px] font-bold px-2 py-0.5 rounded-md flex-shrink-0"
-                      style={{
-                        background: p.status === 'scheduled' ? '#EFF6FF' : p.status === 'partial' ? '#FFFBEB' : '#F0FDF4',
-                        color: p.status === 'scheduled' ? '#3B82F6' : p.status === 'partial' ? '#D97706' : '#16A34A',
-                      }}
-                    >
-                      {p.status === 'scheduled' ? 'SCHEDULED' : p.status === 'partial' ? 'PARTIAL' : 'PUBLISHED'}
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-md flex-shrink-0" style={{ background: badge.bg, color: badge.fg }}>
+                      {badge.text}
                     </span>
                   </div>
                   <p className="text-[11px] text-[#A1A1AA] mt-1">
-                    {p.variant_id ? `${p.variant_id.replace('our-', '')} · ` : ''}
-                    {platforms.length > 0 ? platforms.map(pp => pp.platform).join(', ') : '—'}
+                    {styleName ?? (p.variant_id ? `Style ${p.variant_id.replace('our-v', '')}` : 'Video')}
                     {when ? ` · ${new Date(when).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : ''}
                   </p>
+                  {posts.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {posts.map((pp, i) => {
+                        const m = getPlatformMeta(pp.platform)
+                        const ok = pp.status === 'published' || pp.status === 'scheduled'
+                        const inner = (
+                          <>
+                            <span className="flex h-4 w-4 items-center justify-center rounded text-white" style={{ background: ok ? m.color : '#DC2626' }}>
+                              <span className="flex scale-[0.6] items-center justify-center">{m.icon}</span>
+                            </span>
+                            {m.label}
+                            <span aria-hidden="true">{ok ? (pp.url ? '↗' : '✓') : '✗'}</span>
+                          </>
+                        )
+                        const cls = 'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-medium'
+                        return ok && pp.url ? (
+                          <a key={i} href={pp.url} target="_blank" rel="noopener noreferrer" className={`${cls} border-[#E4E4E0] bg-white text-[#18181B] hover:border-[#FFCAB8]`} title={`Open on ${m.label}`}>{inner}</a>
+                        ) : (
+                          <span key={i} className={`${cls} ${ok ? 'border-[#E4E4E0] bg-white text-[#52525B]' : 'border-[#FECACA] bg-[#FEF2F2] text-[#B91C1C]'}`} title={ok ? undefined : 'This one did not post'}>{inner}</span>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
               )
             })}

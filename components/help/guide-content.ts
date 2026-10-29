@@ -96,9 +96,9 @@ export const PAGE_GUIDES: Record<PageGuideKey, PageGuideContent> = {
   publish: {
     title: 'Post everywhere at once',
     steps: [
-      { title: 'Choose platforms', body: 'Instagram, Facebook, TikTok, and YouTube start switched on. Tap one to leave it out.' },
-      { title: 'Pick the video', body: 'Choose a finished version from your library. A green tick means that version already went out.' },
-      { title: 'Check the captions', body: 'Olympus writes one caption per platform, sized to fit. Edit any of them, or use “Rewrite with feedback”.' },
+      { title: 'Choose platforms', body: 'Instagram, Facebook, TikTok, and YouTube start switched on, each showing the account it will post to. Tap one to leave it out.' },
+      { title: 'Pick the video', body: 'The video at the top is the one you are about to post, with a preview you can play. Tap another version below it to switch. A green tick means that version already went out.' },
+      { title: 'Check the captions', body: 'Olympus writes one caption per platform in your voice, sized to fit. Edit any of them, or use “Rewrite with feedback” (try “make it shorter” or “lead with sleep”).' },
       { title: 'Publish now or schedule', body: 'Scheduling lets you pick a day and time. The calendar shows what is already planned.' },
     ],
     tip: 'If one platform fails and the rest work, the result says which one. Fix it (usually by reconnecting it in Blotato), then publish again with only that platform selected.',
@@ -245,6 +245,7 @@ export const FAQ: { q: string; a: string }[] = [
   { q: 'Why are there six versions?', a: 'Each is a different editing style, and different topics suit different styles. Start only the ones you want. You never have to use all six.' },
   { q: 'Does retrying cost anything?', a: 'Yes. Every render is a full edit that uses editing and AI credits, so retry when there is a reason to, not just to see a different take.' },
   { q: 'Can I post the same video twice?', a: 'Yes. Olympus warns you first, in case it was not on purpose.' },
+  { q: 'How do I know a post is live?', a: 'After you publish, each platform shows “live” with a “View post” link. The Published list at the bottom of the Publish page keeps those links, and shows which platform failed if any did.' },
   { q: 'Where are my finished videos?', a: 'In the studio page for that script (Edit, then the script), and in Publish under “From library”. Each finished version has a download button.' },
   { q: 'How do I change which social accounts are used?', a: 'Accounts are connected in Blotato. Open Settings, section 08, and tap “Manage in Blotato”.' },
   { q: 'How do I refilm a script that already has edits?', a: 'Open the script in Edit and tap “Use new footage” under the versions. Paste the link to your new recording and start the edit. Your old versions stay until you start, and anything you already posted stays posted.' },
